@@ -28,6 +28,7 @@ These skills are adapted from [Anthropic's life-sciences repository](https://git
 | [pharmacovigilance](skills/pharmacovigilance/) | FDA FAERS adverse event analysis | Drug safety signals, ADR detection |
 | [claims-data-analysis](skills/claims-data-analysis/) | Healthcare claims RWE | Utilization, treatment patterns, PMPM costs |
 | [clinical-nlp](skills/clinical-nlp/) | Extract entities from clinical text | NER on notes, medication extraction, ICD coding |
+| [dicom-parser](skills/dicom-parser/) | Parse DICOM medical image metadata | DICOM tags, radiology metadata, imaging analytics |
 
 ## Installation
 
