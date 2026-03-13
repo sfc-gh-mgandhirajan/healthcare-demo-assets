@@ -212,14 +212,9 @@ def build_pdf():
     # --- Section 2: Architecture Overview ---
     pdf.add_page()
     pdf.section_title("2", "Architecture Overview")
-    pdf.body("The architecture follows a four-layer model: external knowledge tools (CKEs) at the top, an orchestrator agent profile, healthcare domain skill collections, and Snowflake platform skills at the foundation.")
+    pdf.body("The architecture follows a layered model: an orchestrator agent profile at the top, healthcare domain skill categories in the middle (with shared knowledge CKE skills invoked on-demand), Snowflake platform skills at the foundation, and a data model knowledge repository feeding schema context upward.")
     pdf.sub_title("Layered Architecture")
     pdf.code_block("""+------------------------------------------------------------------+
-|              CORTEX KNOWLEDGE EXTENSIONS (CKEs)                  |
-|  PubMed Biomedical Corpus  |  Clinical Trials Research Database  |
-+------------------------------------------------------------------+
-                              |
-+------------------------------------------------------------------+
 |              ORCHESTRATOR AGENT PROFILE                           |
 |              healthcare-solutions.md                              |
 |  Intent Detection -> Domain Routing -> Skill Composition         |
@@ -236,6 +231,13 @@ def build_pdf():
        |     | Claims & | | Lab Data | | Research |      |
        |     | RWE (1)  | | (1)      | | (1)      |      |
        |     +----------+ +----------+ +----------+      |
+       |              |              |              |
+       |   +----------------------------------------------+
+       |   | SHARED KNOWLEDGE (composable, on-demand)     |
+       |   | $cke-pubmed        $cke-clinical-trials      |
+       |   | Domain skills invoke when evidence adds value|
+       |   +----------------------------------------------+
+       |              |              |              |
        v              v              v              v
 +------------------------------------------------------------------+
 |              SNOWFLAKE PLATFORM SKILLS                            |
