@@ -268,29 +268,13 @@ Detailed skill documentation is available in the `references/` folder:
 
 Based on course BIOE 395 taught at Stanford University.
 
-## Cortex Knowledge Extension: PubMed CKE
+## Evidence Grounding: PubMed CKE
 
-**PubMed Biomedical Research Corpus** from Snowflake Marketplace (listing `GZSTZ67BY9OQW`) provides RAG-based semantic search across biomedical literature.
+Invoke `$cke-pubmed` when evaluating research ideas to survey the literature landscape:
 
-**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
+- Literature landscape review: assess how crowded a research area is
+- Novelty assessment: determine if a proposed idea has already been published
+- Risk evaluation: find prior work that supports or challenges feasibility
+- Gap identification: identify under-explored areas
 
-**When to use in scientific problem selection:**
-- **Literature landscape review:** Search PubMed to assess how crowded a research area is
-- **Novelty assessment:** Determine if a proposed idea has already been published or explored
-- **Risk evaluation:** Find prior work that supports or challenges the feasibility of an approach
-- **Gap identification:** Identify under-explored areas by searching for what does and does not exist in the literature
-
-**Query Pattern:**
-```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-  '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-  '{"query": "CRISPR base editing sickle cell disease clinical outcomes", "columns": ["chunk", "document_title", "source_url"]}'
-);
-```
-
-**Integration with problem evaluation:**
-When a user pitches a research idea, use the PubMed CKE to quickly survey the literature landscape:
-1. Search for the core topic to gauge publication volume and recency
-2. Search for the specific approach/method to assess novelty
-3. Search for competing approaches to understand alternatives
-4. Use results to inform Skill 1 (Intuition Pumps) and Skill 2 (Risk Assessment) discussions
+See `$cke-pubmed` for setup, query patterns, and the research landscape survey workflow.

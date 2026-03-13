@@ -332,43 +332,12 @@ snowflake-connector-python>=3.0.0
 scipy>=1.10.0  # For statistical tests
 ```
 
-## Cortex Knowledge Extension: PubMed CKE
+## Evidence Grounding: PubMed CKE
 
-**PubMed Biomedical Research Corpus** from Snowflake Marketplace (listing `GZSTZ67BY9OQW`) provides RAG-based semantic search across PubMed biomedical literature directly in Snowflake.
+Invoke `$cke-pubmed` when evidence grounding adds value to safety signal analysis:
 
-**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
-
-**When to use in pharmacovigilance:**
-- Search published literature for known drug-adverse event associations
-- Find mechanism-of-action evidence supporting safety signals
+- After signal detection (PRR/ROR > 2), search for published drug-event associations and mechanism evidence
 - Cross-reference disproportionality findings with case reports and clinical studies
-- Literature-based validation of PRR/ROR signal detection results
+- Literature-based validation of signal detection results
 
-**Query Pattern:**
-```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-  '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-  '{"query": "pembrolizumab hepatotoxicity mechanism adverse event", "columns": ["chunk", "document_title", "source_url"]}'
-);
-```
-
-**Integration with FAERS analysis:**
-```sql
-WITH faers_signals AS (
-  SELECT drug_name, reaction_pt, prr, ror
-  FROM drug_safety_signals
-  WHERE prr > 2 AND ror > 2
-),
-literature_evidence AS (
-  SELECT
-    s.drug_name,
-    s.reaction_pt,
-    s.prr,
-    SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-      '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-      '{"query": "' || s.drug_name || ' ' || s.reaction_pt || ' adverse event mechanism", "columns": ["chunk", "document_title", "source_url"]}'
-    ) AS pubmed_evidence
-  FROM faers_signals s
-)
-SELECT * FROM literature_evidence;
-```
+See `$cke-pubmed` for setup, query patterns, and the full FAERS signal enrichment SQL pattern.

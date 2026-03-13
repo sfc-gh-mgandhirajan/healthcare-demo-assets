@@ -187,35 +187,12 @@ FROM (
 - Cortex Search service for semantic imaging search
 - Data quality summary
 
-## Cortex Knowledge Extension: PubMed CKE
+## Evidence Grounding: PubMed CKE
 
-**PubMed Biomedical Research Corpus** from Snowflake Marketplace (listing `GZSTZ67BY9OQW`) provides RAG-based search across biomedical literature for radiology research context.
+Invoke `$cke-pubmed` when radiology research context enriches imaging analytics:
 
-**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
+- Search for imaging biomarkers, modality-specific diagnostic criteria, evidence-based imaging guidelines
+- Augment Cortex AI extraction with published radiology evidence
+- Compare institutional imaging patterns against published utilization studies
 
-**When to use in imaging analytics:**
-- **Radiology research context:** Search for imaging biomarkers, modality-specific diagnostic criteria, and evidence-based imaging guidelines
-- **Report enrichment:** Augment Cortex AI extraction with published radiology evidence
-- **Population benchmarking:** Compare institutional imaging patterns against published utilization studies
-
-**Query Pattern:**
-```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-  '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-  '{"query": "pulmonary nodule CT screening Lung-RADS classification", "columns": ["chunk", "document_title", "source_url"]}'
-);
-```
-
-**Integration with imaging analytics:**
-```sql
-SELECT
-  r.study_uid,
-  r.key_findings,
-  SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-    '{"query": "' || r.key_findings::STRING || ' radiology evidence", "columns": ["chunk", "document_title", "source_url"]}'
-  ) AS literature_context
-FROM radiology_findings r
-WHERE r.critical_findings IS NOT NULL
-LIMIT 10;
-```
+See `$cke-pubmed` for setup, query patterns, and the imaging research context SQL pattern.

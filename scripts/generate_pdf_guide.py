@@ -192,10 +192,10 @@ def build_pdf():
     pdf.add_page()
     pdf.section_title("1", "Executive Summary")
     pdf.body("This document describes a modular, skill-based architecture for building healthcare data solutions on Snowflake using Cortex Code. The system consists of:")
-    pdf.bullet("15 healthcare domain skills covering 7 business functions")
+    pdf.bullet("17 skills: 15 healthcare domain skills + 2 shared CKE skills, organized in 8 categories")
     pdf.bullet("1 orchestrator agent profile (healthcare-solutions) that routes requests to the right skill(s)")
     pdf.bullet("Integration with Snowflake platform skills (Dynamic Tables, Cortex AI, Streamlit, dbt, governance)")
-    pdf.bullet("2 Cortex Knowledge Extensions (CKEs) for PubMed biomedical literature and ClinicalTrials.gov research")
+    pdf.bullet("2 Cortex Knowledge Extensions (CKEs) as standalone composable skills (PubMed, ClinicalTrials.gov)")
     pdf.bullet("1 Data Model Knowledge Repository (Cortex Search over DICOM 18-table reference model)")
     pdf.bullet("9 cross-domain composition patterns for complex multi-skill solutions")
     pdf.bullet("Cross-cutting prerequisite pattern: auto-fires data model queries before schema-dependent tasks")
@@ -267,7 +267,7 @@ def build_pdf():
     # --- Section 3: Healthcare Skills Inventory ---
     pdf.add_page()
     pdf.section_title("3", "Healthcare Skills Inventory")
-    pdf.body("The collection contains 15 standalone skills organized into 7 healthcare business functional area categories in the repository, plus 1 skill collection (healthcare-imaging) with 7 sub-skills.")
+    pdf.body("The collection contains 17 skills organized into 8 categories: 7 healthcare business domains + 1 shared knowledge category for CKEs. The healthcare-imaging skill is a collection with 7 sub-skills.")
 
     pdf.sub_title("Repository Directory Structure")
     pdf.code_block("""skills/
@@ -278,7 +278,8 @@ def build_pdf():
 +-- genomics-bioinformatics/   nextflow-development, variant-annotation, single-cell-rna-qc,
 |                              scvi-tools, survival-analysis
 +-- lab-instrument-data/       instrument-data-to-allotrope
-+-- research-strategy/         scientific-problem-selection""")
++-- research-strategy/         scientific-problem-selection
++-- shared-knowledge/          cke-pubmed, cke-clinical-trials""")
 
     pdf.sub_title("3.1 Medical Imaging & Radiology")
     pdf.body("Repo path: skills/medical-imaging/")
@@ -388,7 +389,7 @@ end-to-end healthcare data solutions on Snowflake.
 ## Cross-Domain Patterns [9 composition patterns for multi-skill solutions]
 ## Guardrails            [HIPAA governance rules across all workflows]""")
     pdf.sub_title("Routing Mechanism")
-    pdf.body("The profile uses trigger keywords in the user's request to determine the healthcare business domain. Each domain maps to one or more skills via $skill-name invocation syntax. CKEs are automatically suggested when evidence grounding is beneficial.")
+    pdf.body("The profile uses trigger keywords in the user's request to determine the healthcare business domain. Each domain maps to one or more skills via $skill-name invocation syntax. Domain skills invoke CKE skills ($cke-pubmed, $cke-clinical-trials) on-demand when evidence grounding is beneficial.")
     pdf.table(
         ["Domain", "Example Request", "Skill Invoked", "Platform / CKE"],
         [
@@ -406,72 +407,62 @@ end-to-end healthcare data solutions on Snowflake.
     # --- Section 5: CKEs ---
     pdf.add_page()
     pdf.section_title("5", "Cortex Knowledge Extensions (CKEs)")
-    pdf.body("Two Cortex Knowledge Extensions from the Snowflake Marketplace are available as RAG-based knowledge tools. These are shared Cortex Search Services that provide domain-specific literature search without copying data into your account.")
+    pdf.body("CKEs are Snowflake Marketplace shared Cortex Search Services that provide RAG-based literature search. In this architecture, CKEs are implemented as standalone composable skills under shared-knowledge/ -- domain skills invoke them on-demand via $cke-pubmed or $cke-clinical-trials when evidence grounding adds value.")
 
-    pdf.sub_title("Available CKEs")
+    pdf.sub_title("Architecture: CKEs as Composable Skills")
+    pdf.body("Rather than embedding CKE connection details, query patterns, and SQL in every domain skill, CKEs are encapsulated as standalone skills. This eliminates duplication and makes adding new CKEs trivial.")
     pdf.table(
-        ["CKE", "Marketplace Listing", "Service Name", "Use Cases"],
+        ["Approach", "Where CKE lives", "How skills access it", "Trade-off"],
         [
-            ["PubMed Biomedical Research Corpus", "GZSTZ67BY9OQW", "<CKE_DB>.SHARED.CKE_PUBMED_SERVICE", "Literature review, drug mechanisms, radiology research, clinical NLP context"],
-            ["Clinical Trials Research Database", "GZSTZ67BY9ORD", "<CKE_DB>.SHARED.CKE_CLINICAL_TRIALS_SERVICE", "Trial design, protocol comparison, feasibility analysis, eligibility criteria"],
+            ["Orchestrator-level", "Agent profile", "Agent injects CKE context", "Coupling: orchestrator must know when to query"],
+            ["Skill-level (embedded)", "Each skill's SKILL.md", "Each skill queries CKE directly", "Duplication: CKE details in 6+ skills"],
+            ["Composable skills (chosen)", "shared-knowledge/ category", "Skills invoke $cke-pubmed etc.", "Clean: single definition, on-demand composition"],
         ],
-        [pw * 0.22, pw * 0.18, pw * 0.3, pw * 0.3],
+        [pw * 0.2, pw * 0.22, pw * 0.28, pw * 0.3],
     )
 
-    pdf.sub_title("CKE Setup (One-Time)")
-    pdf.body("1. Navigate to Snowflake Marketplace and search for the CKE listing.\n2. Click Get to install - no data is copied; a shared Cortex Search Service appears in your account.\n3. Note the database name assigned (e.g., PUBMED_BIOMEDICAL_RESEARCH_CORPUS).")
-
-    pdf.sub_title("CKE Query Pattern (SQL)")
-    pdf.code_block("""SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-  '<cke_database>.SHARED.<service_name>',
-  '{"query": "<natural language question>",
-    "columns": ["chunk", "document_title", "source_url"]}'
-);""")
-
-    pdf.sub_title("CKE with Cortex Agent API")
-    pdf.body("CKEs can be specified as cortex_search tools in the Cortex Agent API:")
-    pdf.code_block("""{
-  "tools": [{
-    "tool_spec": {
-      "type": "cortex_search",
-      "name": "pubmed_search",
-      "spec": {
-        "service_name": "<cke_database>.SHARED.CKE_PUBMED_SERVICE",
-        "max_results": 5,
-        "title_column": "document_title",
-        "id_column": "source_url"
-      }
-    }
-  }]
-}""")
-
-    pdf.sub_title("CKE Routing by Skill")
+    pdf.sub_title("Available CKE Skills")
+    pdf.body("Repo path: skills/shared-knowledge/")
     pdf.table(
-        ["CKE", "Trigger Keywords", "Skills"],
+        ["CKE Skill", "Data Source", "Marketplace ID", "Service Name"],
         [
-            ["PubMed CKE", "PubMed, biomedical literature, drug mechanism, clinical evidence", "$pharmacovigilance, $clinical-nlp, $scientific-problem-selection, dicom-analytics"],
-            ["Clinical Trials CKE", "ClinicalTrials.gov, trial search, trial design, feasibility", "$clinical-trial-protocol-skill, $claims-data-analysis, $survival-analysis"],
+            ["$cke-pubmed", "PubMed biomedical literature", "GZSTZ67BY9OQW", "<CKE_DB>.SHARED.CKE_PUBMED_SERVICE"],
+            ["$cke-clinical-trials", "ClinicalTrials.gov registry", "GZSTZ67BY9ORD", "<CKE_DB>.SHARED.CKE_CLINICAL_TRIALS_SERVICE"],
         ],
-        [pw * 0.2, pw * 0.4, pw * 0.4],
+        [pw * 0.2, pw * 0.25, pw * 0.2, pw * 0.35],
     )
 
-    pdf.check_page_break(40)
-    pdf.sub_title("Integration Example: Drug Safety + PubMed CKE")
-    pdf.code_block("""WITH faers_signals AS (
-  SELECT drug_name, reaction_pt, prr, ror
-  FROM drug_safety_signals WHERE prr > 2 AND ror > 2
-),
-literature_evidence AS (
-  SELECT s.drug_name, s.reaction_pt, s.prr,
-    SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-      '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
-      '{"query": "' || s.drug_name || ' ' || s.reaction_pt
-        || ' adverse event mechanism",
-        "columns": ["chunk", "document_title", "source_url"]}'
-    ) AS pubmed_evidence
-  FROM faers_signals s
-)
-SELECT * FROM literature_evidence;""")
+    pdf.sub_title("CKE Routing: Which Domain Skills Invoke Which CKE")
+    pdf.table(
+        ["CKE Skill", "Trigger Keywords", "Domain Skills That Invoke It"],
+        [
+            ["$cke-pubmed", "PubMed, biomedical literature, drug mechanism, clinical evidence, research papers", "$pharmacovigilance, $clinical-nlp, $scientific-problem-selection, dicom-analytics"],
+            ["$cke-clinical-trials", "ClinicalTrials.gov, trial search, trial design, feasibility, eligibility", "$clinical-trial-protocol-skill, $claims-data-analysis, $survival-analysis"],
+        ],
+        [pw * 0.18, pw * 0.4, pw * 0.42],
+    )
+
+    pdf.sub_title("How Domain Skills Invoke CKEs")
+    pdf.body("Domain skills contain a lightweight 'Evidence Grounding' section that describes when to invoke the CKE skill and what to query. The CKE skill encapsulates all Marketplace setup, query patterns, and integration SQL.")
+    pdf.code_block("""## Evidence Grounding: PubMed CKE   (in pharmacovigilance/SKILL.md)
+
+Invoke $cke-pubmed when evidence grounding adds value:
+- After signal detection (PRR/ROR > 2), search for drug-event associations
+- Cross-reference disproportionality findings with case reports
+
+See $cke-pubmed for setup, query patterns, and integration SQL.""")
+
+    pdf.sub_title("CKE Skill Contents")
+    pdf.body("Each CKE skill SKILL.md encapsulates:")
+    pdf.bullet("Marketplace details (listing ID, service name, columns)")
+    pdf.bullet("One-time setup instructions")
+    pdf.bullet("SQL query patterns (basic search + Cortex Agent API tool spec)")
+    pdf.bullet("Use cases by domain skill (table of when/what to query)")
+    pdf.bullet("Integration patterns with full SQL examples (signal enrichment, prompt grounding, feasibility analysis)")
+
+    pdf.check_page_break(30)
+    pdf.sub_title("Key Design Decision: On-Demand vs Auto Pre-Step")
+    pdf.body("CKEs differ from the data-model-knowledge cross-cutting prerequisite. Data-model-knowledge auto-fires (Step 0) because schema context is always needed for DICOM tasks. CKEs are on-demand -- the domain skill decides when literature/trial evidence adds value. This keeps CKEs composable rather than mandatory.")
 
     # --- Section 6: Data Model Knowledge Repository ---
     pdf.add_page()
@@ -619,7 +610,7 @@ FROM model_knowledge;""")
             "$healthcare-imaging (dicom-parser) - Build imaging metadata tables",
             "$fhir-data-transformation - Ingest FHIR DiagnosticReport/ImagingStudy",
             "$clinical-nlp - Extract findings from radiology reports",
-            "PubMed CKE - Enrich with radiology research context",
+            "$cke-pubmed - Enrich with radiology research context",
             "Platform: developing-with-streamlit OR build-react-app",
         ]),
         ("Pattern 2: Clinical Data Warehouse (OMOP)", [
@@ -631,7 +622,7 @@ FROM model_knowledge;""")
         ]),
         ("Pattern 3: Drug Safety Signal Detection", [
             "$pharmacovigilance - Load and analyze FAERS data",
-            "PubMed CKE - Search literature for drug-event associations",
+            "$cke-pubmed - Search literature for drug-event associations",
             "$clinical-nlp - Extract adverse events from narrative text",
             "$claims-data-analysis - Correlate with claims-based utilization",
             "Platform: developing-with-streamlit - Safety signal dashboard",
@@ -649,17 +640,17 @@ FROM model_knowledge;""")
         ]),
         ("Pattern 6: Real-World Evidence Study", [
             "$claims-data-analysis - Build cohorts from claims data",
-            "Clinical Trials CKE - Cross-reference with registered trials",
+            "$cke-clinical-trials - Cross-reference with registered trials",
             "$omop-cdm-modeling - Standardize to OMOP CDM",
             "$survival-analysis - Time-to-event outcomes analysis",
             "$clinical-nlp - Enrich with unstructured clinical data",
-            "PubMed CKE - Validate findings against published literature",
+            "$cke-pubmed - Validate findings against published literature",
             "Platform: developing-with-streamlit - Study results dashboard",
         ]),
         ("Pattern 7: Clinical Trial Design", [
             "$scientific-problem-selection - Validate research problem",
-            "Clinical Trials CKE - Search for similar/competing trials",
-            "PubMed CKE - Review biomedical literature for evidence",
+            "$cke-clinical-trials - Search for similar/competing trials",
+            "$cke-pubmed - Review biomedical literature for evidence",
             "$clinical-trial-protocol-skill - Generate protocol document",
             "$survival-analysis - Power analysis and endpoint design",
             "$claims-data-analysis - Feasibility analysis from claims data",
@@ -793,7 +784,11 @@ ALTER TABLE dicom_patient MODIFY COLUMN patient_id
       {"name": "survival-analysis",
        "relative_path": "genomics-bioinformatics/survival-analysis"},
       {"name": "variant-annotation",
-       "relative_path": "genomics-bioinformatics/variant-annotation"}
+       "relative_path": "genomics-bioinformatics/variant-annotation"},
+      {"name": "cke-pubmed",
+       "relative_path": "shared-knowledge/cke-pubmed"},
+      {"name": "cke-clinical-trials",
+       "relative_path": "shared-knowledge/cke-clinical-trials"}
     ]
   }]
 }""")
@@ -831,6 +826,7 @@ $survival-analysis run KM analysis on treatment outcomes""")
             ["  genomics-bioinformatics/", "nextflow-development, variant-annotation, single-cell-rna-qc, scvi-tools, survival-analysis"],
             ["  lab-instrument-data/", "instrument-data-to-allotrope"],
             ["  research-strategy/", "scientific-problem-selection"],
+            ["  shared-knowledge/", "cke-pubmed, cke-clinical-trials"],
             ["Reference Model", "references/dicom_data_model_reference.xlsx"],
             ["Setup SQL", "scripts/setup_dicom_model_knowledge_repo.sql"],
         ],

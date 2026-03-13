@@ -58,6 +58,14 @@
         {
           "name": "variant-annotation",
           "relative_path": "genomics-bioinformatics/variant-annotation"
+        },
+        {
+          "name": "cke-pubmed",
+          "relative_path": "shared-knowledge/cke-pubmed"
+        },
+        {
+          "name": "cke-clinical-trials",
+          "relative_path": "shared-knowledge/cke-clinical-trials"
         }
       ],
       "added_at": "2026-03-13T00:00:00.000Z"
