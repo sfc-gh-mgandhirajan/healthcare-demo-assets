@@ -18,6 +18,26 @@ Healthcare-imaging router: After user intent matches GOVERNANCE.
 
 ## Workflow
 
+### Step 0: Query Data Model Knowledge for PHI Columns (Auto — Injected by Router)
+
+The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` identify all PHI-containing columns across the DICOM data model.
+
+**Query PHI columns:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+    '{"query": "PHI protected health information patient name ID birth date identifiers", "columns": ["table_name", "column_name", "data_type", "contains_phi", "description", "dicom_tag"]}'
+);
+```
+
+**Use the results to:**
+- Automatically identify every column flagged `contains_phi = Y` across all 18 tables
+- Generate masking policies targeting the exact PHI columns (no manual enumeration)
+- Scope de-identification pipelines to the correct columns
+- Verify HIPAA Safe Harbor coverage against the data model reference
+
+**If search service is unavailable**, fall back to the hardcoded HIPAA 18 identifiers list below.
+
 ### Step 1: Assess Governance Requirements
 
 **Ask** user:

@@ -18,6 +18,26 @@ Healthcare-imaging router: After user intent matches ANALYTICS.
 
 ## Workflow
 
+### Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` provide source table definitions for building analytics.
+
+**Query source table definitions for analytical views:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+    '{"query": "study series patient modality body part date description columns for analytics", "columns": ["table_name", "column_name", "data_type", "description", "dicom_tag", "relationships"]}'
+);
+```
+
+**Use the results to:**
+- Build analytical Dynamic Tables with correct source column names and join keys
+- Reference accurate column descriptions in Cortex AI prompts
+- Ensure GROUP BY / aggregation columns exist in the source tables
+- Map relationships for multi-table joins (e.g., study → series → instance)
+
+**If search service is unavailable**, fall back to the schema in `dicom-parser/SKILL.md`.
+
 ### Step 1: Understand Analytics Goals
 
 **Ask** user:

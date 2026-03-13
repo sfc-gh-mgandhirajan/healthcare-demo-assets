@@ -19,6 +19,26 @@ Healthcare-imaging router Step: After user intent matches INGEST.
 
 ## Workflow
 
+### Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` provide the target table schema.
+
+**Query target table definitions for the ingestion scope:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+    '{"query": "study series instance patient columns data types for ingestion pipeline", "columns": ["table_name", "column_name", "data_type", "constraints", "dicom_tag", "relationships"]}'
+);
+```
+
+**Use the results to:**
+- Build accurate COPY INTO column mappings (match VARIANT paths to exact column names/types)
+- Generate Dynamic Table SELECT lists with correct column names, types, and DICOM tag paths
+- Set up Stream/Task INSERT statements with proper target schema
+- Validate that all required columns (from constraints) are populated
+
+**If search service is unavailable**, fall back to the hardcoded schema in `dicom-parser/SKILL.md`.
+
 ### Step 1: Gather Source Information
 
 **Goal:** Understand the imaging data source and volume.

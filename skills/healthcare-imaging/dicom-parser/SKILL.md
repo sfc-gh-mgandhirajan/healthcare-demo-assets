@@ -17,6 +17,29 @@ Parse DICOM (Digital Imaging and Communications in Medicine) file metadata and l
 - Creating PACS (Picture Archiving and Communication System) analytics
 - Preparing imaging data for ML/AI embeddings
 
+## Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` are available as grounding context.
+
+**If results are available**, use them as the source of truth for DDL generation instead of the hardcoded DDL below. The search results contain the latest table names, column names, data types, constraints, DICOM tag mappings, and relationships.
+
+**Generate DDL from search results:**
+```sql
+WITH model_knowledge AS (
+    SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+        'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+        '{"query": "<tables requested by user e.g. patient study series instance>", "columns": ["table_name", "column_name", "data_type", "constraints", "description", "dicom_tag", "relationships"]}'
+    ) AS context
+)
+SELECT SNOWFLAKE.CORTEX.COMPLETE(
+    'llama3.1-70b',
+    'Generate Snowflake CREATE TABLE DDL statements from this data model reference. Use exact column names, data types, and constraints. Add foreign key references where relationships exist. Reference: ' || context::STRING
+) AS generated_ddl
+FROM model_knowledge;
+```
+
+**If search service is unavailable**, fall back to the hardcoded DDL in the "Comprehensive DICOM Data Model" section below.
+
 ## Quick Start
 
 ```python
