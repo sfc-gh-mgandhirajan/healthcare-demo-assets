@@ -1,0 +1,66 @@
+{
+  "local": [
+    {
+      "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
+      "skills": [
+        {
+          "name": "healthcare-imaging",
+          "relative_path": "medical-imaging/healthcare-imaging"
+        },
+        {
+          "name": "claims-data-analysis",
+          "relative_path": "claims-rwe/claims-data-analysis"
+        },
+        {
+          "name": "clinical-nlp",
+          "relative_path": "clinical-data-ehr/clinical-nlp"
+        },
+        {
+          "name": "clinical-trial-protocol-skill",
+          "relative_path": "drug-safety/clinical-trial-protocol-skill"
+        },
+        {
+          "name": "fhir-data-transformation",
+          "relative_path": "clinical-data-ehr/fhir-data-transformation"
+        },
+        {
+          "name": "instrument-data-to-allotrope",
+          "relative_path": "lab-instrument-data/instrument-data-to-allotrope"
+        },
+        {
+          "name": "nextflow-development",
+          "relative_path": "genomics-bioinformatics/nextflow-development"
+        },
+        {
+          "name": "omop-cdm-modeling",
+          "relative_path": "clinical-data-ehr/omop-cdm-modeling"
+        },
+        {
+          "name": "pharmacovigilance",
+          "relative_path": "drug-safety/pharmacovigilance"
+        },
+        {
+          "name": "scientific-problem-selection",
+          "relative_path": "research-strategy/scientific-problem-selection"
+        },
+        {
+          "name": "scvi-tools",
+          "relative_path": "genomics-bioinformatics/scvi-tools"
+        },
+        {
+          "name": "single-cell-rna-qc",
+          "relative_path": "genomics-bioinformatics/single-cell-rna-qc"
+        },
+        {
+          "name": "survival-analysis",
+          "relative_path": "genomics-bioinformatics/survival-analysis"
+        },
+        {
+          "name": "variant-annotation",
+          "relative_path": "genomics-bioinformatics/variant-annotation"
+        }
+      ],
+      "added_at": "2026-03-13T00:00:00.000Z"
+    }
+  ]
+}
