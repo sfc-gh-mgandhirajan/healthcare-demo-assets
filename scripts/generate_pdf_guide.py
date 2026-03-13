@@ -88,33 +88,37 @@ class PDF(FPDF):
         if col_widths is None:
             w = (self.w - self.l_margin - self.r_margin) / len(headers)
             col_widths = [w] * len(headers)
-        self.set_font("Helvetica", "B", 8)
-        self.set_fill_color(*TABLE_HEADER_BG)
-        self.set_text_color(*WHITE)
-        for i, h in enumerate(headers):
-            self.cell(col_widths[i], 7, h, border=1, fill=True, align="C")
-        self.ln()
-        self.set_font("Helvetica", "", 8)
-        self.set_text_color(*DARK)
+
+        def draw_header():
+            self.set_font("Helvetica", "B", 8)
+            self.set_fill_color(*TABLE_HEADER_BG)
+            self.set_text_color(*WHITE)
+            for i, h in enumerate(headers):
+                self.cell(col_widths[i], 7, h, border=1, fill=True, align="C")
+            self.ln()
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(*DARK)
+
+        draw_header()
         for ri, row in enumerate(rows):
-            if ri % 2 == 1:
-                self.set_fill_color(*TABLE_ALT_BG)
-            else:
-                self.set_fill_color(*WHITE)
             max_h = 7
             for ci, cell in enumerate(row):
-                lines = self.multi_cell(col_widths[ci], 5, cell, border=0, split_only=True)
+                lines = self.multi_cell(col_widths[ci], 5, cell, dry_run=True, output="LINES")
                 h = len(lines) * 5 + 2
                 if h > max_h:
                     max_h = h
-            x_start = self.get_x()
+            if self.get_y() + max_h > self.h - 25:
+                self.add_page()
+                draw_header()
+            x_start = self.l_margin
             y_start = self.get_y()
+            fill_clr = TABLE_ALT_BG if ri % 2 == 1 else WHITE
             for ci, cell in enumerate(row):
                 x = x_start + sum(col_widths[:ci])
-                self.set_xy(x, y_start)
-                self.set_fill_color(TABLE_ALT_BG[0], TABLE_ALT_BG[1], TABLE_ALT_BG[2]) if ri % 2 == 1 else self.set_fill_color(*WHITE)
+                self.set_fill_color(*fill_clr)
                 self.rect(x, y_start, col_widths[ci], max_h, "DF")
                 self.set_xy(x + 1, y_start + 1)
+                self.set_text_color(*DARK)
                 self.multi_cell(col_widths[ci] - 2, 5, cell)
             self.set_y(y_start + max_h)
         self.ln(3)
@@ -236,7 +240,7 @@ def build_pdf():
 +------------------------------------------------------------------+
 |              SNOWFLAKE PLATFORM SKILLS                            |
 | Dynamic Tables | Cortex AI | Streamlit | SPCS | dbt | ML        |
-| Governance | Cortex Search | Cortex Agent | Cortex Analyst       |
+| React App | Governance | Cortex Search | Cortex Agent | Analyst  |
 +------------------------------------------------------------------+
        ^
        |
@@ -246,7 +250,19 @@ def build_pdf():
 | DICOM_MODEL_SEARCH_SVC (auto pre-step for schema tasks)          |
 +------------------------------------------------------------------+""")
     pdf.sub_title("How It Works")
-    pdf.body("1. User sends a natural language request to Cortex Code.  2. The orchestrator profile detects the healthcare business domain from trigger keywords.  3. The matching domain skill is invoked (e.g., $healthcare-imaging for DICOM tasks).  4. For schema-dependent intents (PARSE, INGEST, ANALYTICS, GOVERNANCE), the router auto-queries the Data Model Knowledge Repository via Cortex Search before dispatching.  5. Domain skills may invoke CKEs (PubMed, Clinical Trials) for evidence grounding.  6. Domain skills invoke Snowflake platform skills for infrastructure needs.  7. HIPAA governance guardrails are applied as cross-cutting concerns.")
+    pdf.table(
+        ["Step", "Action", "Component"],
+        [
+            ["1", "User sends a natural language request", "Cortex Code CLI"],
+            ["2", "Orchestrator detects healthcare business domain from trigger keywords", "healthcare-solutions.md"],
+            ["3", "Matching domain skill is invoked (e.g., $healthcare-imaging for DICOM)", "Domain Skill Router"],
+            ["4", "For schema-dependent intents (PARSE, INGEST, ANALYTICS, GOVERNANCE), auto-query Data Model Knowledge Repository via Cortex Search", "DICOM_MODEL_SEARCH_SVC"],
+            ["5", "Domain skills may invoke CKEs (PubMed, Clinical Trials) for evidence grounding", "CKE Cortex Search Services"],
+            ["6", "Domain skills invoke Snowflake platform skills for infrastructure", "Dynamic Tables, Streamlit, etc."],
+            ["7", "HIPAA governance guardrails applied as cross-cutting concerns", "Masking, RLS, Audit"],
+        ],
+        [pw * 0.07, pw * 0.58, pw * 0.35],
+    )
 
     # --- Section 3: Healthcare Skills Inventory ---
     pdf.add_page()
@@ -413,12 +429,12 @@ end-to-end healthcare data solutions on Snowflake.
 
     pdf.sub_title("CKE Routing by Skill")
     pdf.table(
-        ["Triggers", "CKE", "Skills That Use It"],
+        ["CKE", "Trigger Keywords", "Skills"],
         [
-            ["PubMed, biomedical literature, drug mechanism, clinical evidence, research papers", "PubMed CKE", "$pharmacovigilance, $clinical-nlp, $scientific-problem-selection, $healthcare-imaging (dicom-analytics)"],
-            ["ClinicalTrials.gov, trial search, trial design, similar trials, trial feasibility", "Clinical Trials CKE", "$clinical-trial-protocol-skill, $claims-data-analysis, $survival-analysis"],
+            ["PubMed CKE", "PubMed, biomedical literature, drug mechanism, clinical evidence", "$pharmacovigilance, $clinical-nlp, $scientific-problem-selection, dicom-analytics"],
+            ["Clinical Trials CKE", "ClinicalTrials.gov, trial search, trial design, feasibility", "$clinical-trial-protocol-skill, $claims-data-analysis, $survival-analysis"],
         ],
-        [pw * 0.35, pw * 0.15, pw * 0.5],
+        [pw * 0.2, pw * 0.4, pw * 0.4],
     )
 
     pdf.check_page_break(40)
