@@ -267,9 +267,21 @@ def build_pdf():
     # --- Section 3: Healthcare Skills Inventory ---
     pdf.add_page()
     pdf.section_title("3", "Healthcare Skills Inventory")
-    pdf.body("The collection contains 15 standalone skills organized into 7 healthcare business domains, plus 1 skill collection (healthcare-imaging) with 7 sub-skills.")
+    pdf.body("The collection contains 15 standalone skills organized into 7 healthcare business functional area categories in the repository, plus 1 skill collection (healthcare-imaging) with 7 sub-skills.")
+
+    pdf.sub_title("Repository Directory Structure")
+    pdf.code_block("""skills/
++-- medical-imaging/           healthcare-imaging (router + 7 sub-skills), dicom-parser
++-- clinical-data-ehr/         fhir-data-transformation, clinical-nlp, omop-cdm-modeling
++-- drug-safety/               pharmacovigilance, clinical-trial-protocol-skill
++-- claims-rwe/                claims-data-analysis
++-- genomics-bioinformatics/   nextflow-development, variant-annotation, single-cell-rna-qc,
+|                              scvi-tools, survival-analysis
++-- lab-instrument-data/       instrument-data-to-allotrope
++-- research-strategy/         scientific-problem-selection""")
 
     pdf.sub_title("3.1 Medical Imaging & Radiology")
+    pdf.body("Repo path: skills/medical-imaging/")
     pdf.body("The healthcare-imaging skill collection is a router that detects intent and routes to 7 sub-skills covering the full imaging lifecycle from parsing to AI, plus a data model knowledge service.")
     pdf.table(
         ["Sub-Skill", "Triggers", "Description"],
@@ -286,6 +298,7 @@ def build_pdf():
     )
 
     pdf.sub_title("3.2 Clinical Data & EHR")
+    pdf.body("Repo path: skills/clinical-data-ehr/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -297,6 +310,7 @@ def build_pdf():
     )
 
     pdf.sub_title("3.3 Drug Safety & Pharmacovigilance")
+    pdf.body("Repo path: skills/drug-safety/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -308,6 +322,7 @@ def build_pdf():
 
     pdf.check_page_break(50)
     pdf.sub_title("3.4 Claims & Real-World Evidence")
+    pdf.body("Repo path: skills/claims-rwe/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -318,6 +333,7 @@ def build_pdf():
 
     pdf.check_page_break(60)
     pdf.sub_title("3.5 Genomics & Bioinformatics")
+    pdf.body("Repo path: skills/genomics-bioinformatics/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -332,6 +348,7 @@ def build_pdf():
 
     pdf.check_page_break(40)
     pdf.sub_title("3.6 Lab & Instrument Data")
+    pdf.body("Repo path: skills/lab-instrument-data/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -341,6 +358,7 @@ def build_pdf():
     )
 
     pdf.sub_title("3.7 Research Strategy")
+    pdf.body("Repo path: skills/research-strategy/")
     pdf.table(
         ["Skill", "Triggers", "Description"],
         [
@@ -743,14 +761,39 @@ ALTER TABLE dicom_patient MODIFY COLUMN patient_id
     pdf.sub_title("Installation")
     pdf.body("1. Clone the skills repository:")
     pdf.code_block("git clone <repo-url> coco-healthcare-skills")
-    pdf.body("2. Register skills globally in ~/.snowflake/cortex/skills.json:")
+    pdf.body("2. Register skills in ~/.snowflake/cortex/skills.json. A ready-to-use template is included in the repo at skills.json.template -- just replace the path placeholder:")
     pdf.code_block("""{
   "local": [{
-    "path": "/path/to/coco-healthcare-skills/skills",
+    "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
     "skills": [
       {"name": "healthcare-imaging",
-       "relative_path": "healthcare-imaging"},
-      ... (add all 15 skills)
+       "relative_path": "medical-imaging/healthcare-imaging"},
+      {"name": "claims-data-analysis",
+       "relative_path": "claims-rwe/claims-data-analysis"},
+      {"name": "clinical-nlp",
+       "relative_path": "clinical-data-ehr/clinical-nlp"},
+      {"name": "clinical-trial-protocol-skill",
+       "relative_path": "drug-safety/clinical-trial-protocol-skill"},
+      {"name": "fhir-data-transformation",
+       "relative_path": "clinical-data-ehr/fhir-data-transformation"},
+      {"name": "instrument-data-to-allotrope",
+       "relative_path": "lab-instrument-data/instrument-data-to-allotrope"},
+      {"name": "nextflow-development",
+       "relative_path": "genomics-bioinformatics/nextflow-development"},
+      {"name": "omop-cdm-modeling",
+       "relative_path": "clinical-data-ehr/omop-cdm-modeling"},
+      {"name": "pharmacovigilance",
+       "relative_path": "drug-safety/pharmacovigilance"},
+      {"name": "scientific-problem-selection",
+       "relative_path": "research-strategy/scientific-problem-selection"},
+      {"name": "scvi-tools",
+       "relative_path": "genomics-bioinformatics/scvi-tools"},
+      {"name": "single-cell-rna-qc",
+       "relative_path": "genomics-bioinformatics/single-cell-rna-qc"},
+      {"name": "survival-analysis",
+       "relative_path": "genomics-bioinformatics/survival-analysis"},
+      {"name": "variant-annotation",
+       "relative_path": "genomics-bioinformatics/variant-annotation"}
     ]
   }]
 }""")
@@ -759,7 +802,8 @@ ALTER TABLE dicom_patient MODIFY COLUMN patient_id
     ~/.snowflake/cortex/agents/""")
     pdf.body("4. Set up CKEs (optional): Install PubMed CKE and/or Clinical Trials CKE from Snowflake Marketplace.")
     pdf.body("5. Set up Data Model Knowledge Repository: Run scripts/setup_dicom_model_knowledge_repo.sql to create the Cortex Search Service.")
-    pdf.body("6. Verify in Cortex Code:")
+    pdf.body("6. Update skills (git pull): Since all skills are registered from the repo path, running git pull updates every skill automatically.")
+    pdf.body("7. Verify in Cortex Code:")
     pdf.code_block("""/agents   # Should show healthcare-solutions
 /skill    # Should show all healthcare skills""")
 
@@ -777,13 +821,20 @@ $survival-analysis run KM analysis on treatment outcomes""")
         ["Component", "Path"],
         [
             ["Agent Profile", "~/.snowflake/cortex/agents/healthcare-solutions.md"],
-            ["Skills (global)", "~/.snowflake/cortex/skills/healthcare-imaging/"],
-            ["Skills (repo)", "coco-healthcare-skills/skills/"],
             ["Skills Config", "~/.snowflake/cortex/skills.json"],
+            ["Skills Config Template", "coco-healthcare-skills/skills.json.template"],
+            ["Skills (repo root)", "coco-healthcare-skills/skills/"],
+            ["  medical-imaging/", "healthcare-imaging (router + 7 sub-skills)"],
+            ["  clinical-data-ehr/", "fhir-data-transformation, clinical-nlp, omop-cdm-modeling"],
+            ["  drug-safety/", "pharmacovigilance, clinical-trial-protocol-skill"],
+            ["  claims-rwe/", "claims-data-analysis"],
+            ["  genomics-bioinformatics/", "nextflow-development, variant-annotation, single-cell-rna-qc, scvi-tools, survival-analysis"],
+            ["  lab-instrument-data/", "instrument-data-to-allotrope"],
+            ["  research-strategy/", "scientific-problem-selection"],
             ["Reference Model", "references/dicom_data_model_reference.xlsx"],
             ["Setup SQL", "scripts/setup_dicom_model_knowledge_repo.sql"],
         ],
-        [pw * 0.25, pw * 0.75],
+        [pw * 0.3, pw * 0.7],
     )
 
     pdf.sub_title("Snowflake Objects")
