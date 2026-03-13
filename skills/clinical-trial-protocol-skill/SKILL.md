@@ -84,7 +84,28 @@ scripts/
 
 ## Prerequisites
 
-### 1. clinical trials MCP Server (Required)
+### 1. Clinical Trials CKE (Recommended)
+
+**Cortex Knowledge Extension: Clinical Trials Research Database** from Snowflake Marketplace (listing `GZSTZ67BY9ORD`).
+
+This CKE provides RAG-based semantic search across ClinicalTrials.gov data directly in Snowflake. Use it to find similar trials, benchmark eligibility criteria, and research competitor protocols.
+
+**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
+
+**Query Pattern:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+  '<CKE_DB>.SHARED.CKE_CLINICAL_TRIALS_SERVICE',
+  '{"query": "phase 3 trial pancreatic cancer pembrolizumab", "columns": ["chunk", "document_title", "source_url"]}'
+);
+```
+
+**When to use in this skill:**
+- **Step 1 (Research Similar Protocols):** Search for similar/competing trials by condition, intervention, phase
+- **Step 2 (Protocol Foundation):** Benchmark eligibility criteria from comparable trials
+- **Step 4 (Protocol Operations):** Reference endpoint definitions from similar study designs
+
+### 2. clinical trials MCP Server (Alternative)
 
 **Installation:**
 - Configure MCP server in your AI coding assistant settings

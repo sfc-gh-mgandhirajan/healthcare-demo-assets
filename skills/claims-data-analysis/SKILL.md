@@ -332,3 +332,42 @@ LEFT JOIN a1c_tests a ON d.member_id = a.member_id;
 pandas>=2.0.0
 snowflake-connector-python>=3.0.0
 ```
+
+## Cortex Knowledge Extension: Clinical Trials CKE
+
+**Clinical Trials Research Database** from Snowflake Marketplace (listing `GZSTZ67BY9ORD`) provides RAG-based semantic search across ClinicalTrials.gov data.
+
+**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
+
+**When to use in claims analysis:**
+- **Feasibility analysis:** Search for trials by condition to understand inclusion/exclusion criteria and match against claims-based cohort characteristics
+- **RWE benchmarking:** Compare real-world treatment patterns against clinical trial protocols
+- **Site selection support:** Identify active trial sites and match with claims-based patient geographies
+
+**Query Pattern:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+  '<CKE_DB>.SHARED.CKE_CLINICAL_TRIALS_SERVICE',
+  '{"query": "type 2 diabetes GLP-1 agonist phase 3 recruiting", "columns": ["chunk", "document_title", "source_url"]}'
+);
+```
+
+**Integration with cohort analysis:**
+```sql
+WITH claims_cohort AS (
+  SELECT DISTINCT member_id, dx1 AS condition_code
+  FROM CLAIMS.MEDICAL
+  WHERE dx1 LIKE 'E11%'  -- Type 2 Diabetes
+),
+trial_landscape AS (
+  SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '<CKE_DB>.SHARED.CKE_CLINICAL_TRIALS_SERVICE',
+    '{"query": "type 2 diabetes recruiting eligibility criteria", "columns": ["chunk", "document_title", "source_url"]}'
+  ) AS matching_trials
+)
+SELECT
+  COUNT(DISTINCT c.member_id) AS eligible_patients,
+  t.matching_trials
+FROM claims_cohort c, trial_landscape t
+GROUP BY t.matching_trials;
+```

@@ -307,3 +307,42 @@ pip install spacy scispacy medspacy
 # Download models
 pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_lg-0.5.3.tar.gz
 ```
+
+## Cortex Knowledge Extension: PubMed CKE
+
+**PubMed Biomedical Research Corpus** from Snowflake Marketplace (listing `GZSTZ67BY9OQW`) provides RAG-based semantic search across biomedical literature.
+
+**Setup:** Install from Marketplace → shared Cortex Search Service appears in your account.
+
+**When to use in clinical NLP:**
+- **Entity disambiguation:** Look up biomedical terms, drug names, or disease concepts in PubMed literature for context
+- **Terminology validation:** Verify extracted ICD/SNOMED/UMLS mappings against published usage
+- **Contextual enrichment:** Augment NLP extraction with literature-based knowledge about drug-disease relationships
+- **Prompt engineering:** Ground LLM prompts with PubMed evidence for more accurate clinical entity extraction
+
+**Query Pattern:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+  '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+  '{"query": "clinical NER discharge summary medication extraction", "columns": ["chunk", "document_title", "source_url"]}'
+);
+```
+
+**Integration with Cortex AI extraction:**
+```sql
+WITH pubmed_context AS (
+  SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+    '{"query": "drug interaction classification clinical text", "columns": ["chunk"]}'
+  ) AS literature_context
+)
+SELECT
+  n.note_id,
+  SNOWFLAKE.CORTEX.COMPLETE(
+    'llama3.1-70b',
+    'Using this biomedical reference context: ' || p.literature_context::STRING ||
+    ' Extract medications and potential drug interactions from this clinical note: ' || n.note_text
+  ) AS enriched_extraction
+FROM clinical_notes n, pubmed_context p
+LIMIT 10;
+```
