@@ -1,6 +1,6 @@
 ---
 name: healthcare-imaging
-description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflake. This is the entry point for healthcare imaging solutions combining platform skills with clinical imaging workflows. Triggers: DICOM, medical imaging, radiology, imaging pipeline, PACS, imaging viewer, imaging AI, imaging governance, HIPAA imaging, clinical images, pathology images, imaging metadata, imaging ML, imaging model, imaging analytics, healthcare imaging, imaging data lake, imaging FHIR, imaging study, imaging series."
+description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflake. This is the entry point for healthcare imaging solutions combining platform skills with clinical imaging workflows. Triggers: DICOM, medical imaging, radiology, imaging pipeline, PACS, imaging viewer, imaging AI, imaging governance, HIPAA imaging, clinical images, pathology images, imaging metadata, imaging ML, imaging model, imaging analytics, healthcare imaging, imaging data lake, imaging FHIR, imaging study, imaging series, data model knowledge, DICOM schema reference, model repository."
 ---
 
 # Healthcare Imaging Solutions on Snowflake
@@ -20,6 +20,7 @@ description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflak
 | VIEWER | "imaging viewer", "Streamlit imaging", "DICOM viewer", "imaging app", "imaging dashboard", "radiology UI", "deploy viewer" | `imaging-viewer/SKILL.md` |
 | GOVERNANCE | "imaging governance", "HIPAA", "PHI masking", "imaging audit", "imaging classification", "imaging access policy", "de-identification" | `imaging-governance/SKILL.md` |
 | ML | "imaging model", "train imaging", "imaging classification ML", "pathology model", "radiology AI", "deploy imaging model", "imaging inference" | `imaging-ml/SKILL.md` |
+| MODEL_KNOWLEDGE | "data model reference", "DICOM schema lookup", "generate DDL from model", "what columns", "model repository", "PHI columns", "table relationships" | `data-model-knowledge/SKILL.md` |
 
 ## Workflow
 
@@ -40,12 +41,15 @@ Detect Intent from table above
   +---> GOVERNANCE > Load imaging-governance/SKILL.md
   |
   +---> ML --------> Load imaging-ml/SKILL.md
+  |
+  +---> MODEL_KNOWLEDGE -> Load data-model-knowledge/SKILL.md (Cortex Search over data model)
 ```
 
 ## Cross-Cutting Concerns
 
 All sub-skills should apply these platform patterns:
 
+- **Data Model Knowledge**: The `data-model-knowledge` sub-skill provides a Cortex Search Service over the DICOM data model spreadsheet. Query it at runtime to get latest table/column definitions instead of relying on hardcoded schemas. Use it before PARSE (DDL generation), GOVERNANCE (PHI column discovery), or any schema-dependent task.
 - **DICOM Parsing**: The `dicom-parser` sub-skill contains a comprehensive 18-table DICOM data model and a pydicom-based parser script. Use it as the foundation before ingestion or analytics.
 - **Data Engineering**: Dynamic Tables for incremental refresh, Streams/Tasks for event-driven pipelines
 - **AI/ML**: Cortex AI functions (COMPLETE, EXTRACT, SENTIMENT), Cortex Search for imaging metadata, ML Registry for models
