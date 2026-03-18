@@ -1,27 +1,74 @@
 {
   "local": [
     {
-      "path": "<ABSOLUTE_PATH_TO_REPO>/src",
+      "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
       "skills": [
-        {"name": "hcls-provider-imaging", "relative_path": "hcls-provider-imaging"},
-        {"name": "hcls-provider-imaging-dicom-parser", "relative_path": "hcls-provider-imaging-dicom-parser"},
-        {"name": "hcls-provider-cdata-fhir", "relative_path": "hcls-provider-cdata-fhir"},
-        {"name": "hcls-provider-cdata-clinical-nlp", "relative_path": "hcls-provider-cdata-clinical-nlp"},
-        {"name": "hcls-provider-cdata-omop", "relative_path": "hcls-provider-cdata-omop"},
-        {"name": "hcls-provider-claims-data-analysis", "relative_path": "hcls-provider-claims-data-analysis"},
-        {"name": "hcls-pharma-dsafety-pharmacovigilance", "relative_path": "hcls-pharma-dsafety-pharmacovigilance"},
-        {"name": "hcls-pharma-dsafety-clinical-trial-protocol", "relative_path": "hcls-pharma-dsafety-clinical-trial-protocol"},
-        {"name": "hcls-pharma-genomics-nextflow", "relative_path": "hcls-pharma-genomics-nextflow"},
-        {"name": "hcls-pharma-genomics-variant-annotation", "relative_path": "hcls-pharma-genomics-variant-annotation"},
-        {"name": "hcls-pharma-genomics-single-cell-qc", "relative_path": "hcls-pharma-genomics-single-cell-qc"},
-        {"name": "hcls-pharma-genomics-scvi-tools", "relative_path": "hcls-pharma-genomics-scvi-tools"},
-        {"name": "hcls-pharma-genomics-survival-analysis", "relative_path": "hcls-pharma-genomics-survival-analysis"},
-        {"name": "hcls-pharma-lab-allotrope", "relative_path": "hcls-pharma-lab-allotrope"},
-        {"name": "hcls-cross-research-problem-selection", "relative_path": "hcls-cross-research-problem-selection"},
-        {"name": "hcls-cross-cke-pubmed", "relative_path": "hcls-cross-cke-pubmed"},
-        {"name": "hcls-cross-cke-clinical-trials", "relative_path": "hcls-cross-cke-clinical-trials"}
+        {
+          "name": "healthcare-imaging",
+          "relative_path": "medical-imaging/healthcare-imaging"
+        },
+        {
+          "name": "claims-data-analysis",
+          "relative_path": "claims-rwe/claims-data-analysis"
+        },
+        {
+          "name": "clinical-nlp",
+          "relative_path": "clinical-data-ehr/clinical-nlp"
+        },
+        {
+          "name": "clinical-trial-protocol-skill",
+          "relative_path": "drug-safety/clinical-trial-protocol-skill"
+        },
+        {
+          "name": "fhir-data-transformation",
+          "relative_path": "clinical-data-ehr/fhir-data-transformation"
+        },
+        {
+          "name": "instrument-data-to-allotrope",
+          "relative_path": "lab-instrument-data/instrument-data-to-allotrope"
+        },
+        {
+          "name": "nextflow-development",
+          "relative_path": "genomics-bioinformatics/nextflow-development"
+        },
+        {
+          "name": "omop-cdm-modeling",
+          "relative_path": "clinical-data-ehr/omop-cdm-modeling"
+        },
+        {
+          "name": "pharmacovigilance",
+          "relative_path": "drug-safety/pharmacovigilance"
+        },
+        {
+          "name": "scientific-problem-selection",
+          "relative_path": "research-strategy/scientific-problem-selection"
+        },
+        {
+          "name": "scvi-tools",
+          "relative_path": "genomics-bioinformatics/scvi-tools"
+        },
+        {
+          "name": "single-cell-rna-qc",
+          "relative_path": "genomics-bioinformatics/single-cell-rna-qc"
+        },
+        {
+          "name": "survival-analysis",
+          "relative_path": "genomics-bioinformatics/survival-analysis"
+        },
+        {
+          "name": "variant-annotation",
+          "relative_path": "genomics-bioinformatics/variant-annotation"
+        },
+        {
+          "name": "cke-pubmed",
+          "relative_path": "shared-knowledge/cke-pubmed"
+        },
+        {
+          "name": "cke-clinical-trials",
+          "relative_path": "shared-knowledge/cke-clinical-trials"
+        }
       ],
-      "added_at": "2026-03-18T00:00:00.000Z"
+      "added_at": "2026-03-13T00:00:00.000Z"
     }
   ]
 }
