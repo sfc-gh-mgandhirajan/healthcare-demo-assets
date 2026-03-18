@@ -121,7 +121,7 @@ def build_pdf():
     pdf.cell(0, 8, "Industry Solutions Tiger Team", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(20)
     pdf.set_font("Helvetica", "I", 10)
-    pdf.cell(0, 8, "March 17, 2026", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, "March 18, 2026", align="C", new_x="LMARGIN", new_y="NEXT")
 
     # Executive Summary
     pdf.add_page()
@@ -320,6 +320,168 @@ def build_pdf():
     pdf.sub_bullet("cortex profile add health-sciences-incubator")
     pdf.ln(2)
     pdf.bold_text("Feedback loop: Field issues -> incubator repo -> Tiger Team triage -> Phase 2")
+
+    # Skill Taxonomy
+    pdf.add_page()
+    pdf.section_title("Skill Taxonomy")
+    pdf.body_text(
+        "Skills are organized in a five-level hierarchy that maps from the broadest "
+        "industry classification down to individual capabilities."
+    )
+    pdf.ln(2)
+    pdf.subsection_title("Hierarchy Definition")
+    pdf.set_font("Courier", "B", 11)
+    pdf.set_text_color(0, 100, 180)
+    pdf.cell(0, 7, "  Industry / Sub-Industry / Business Function / Use Case Skill / Sub-Skill", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(40, 40, 40)
+    pdf.ln(4)
+
+    w_tax = [30, 55, 55, 45]
+    pdf.table_header(["Level", "Example", "Description", "Applies To"], w_tax)
+    tax_rows = [
+        ["Industry", "Health Sciences", "Top-level domain", "Both repos"],
+        ["Sub-Industry", "Provider, Pharma,\nPayer", "Customer segment", "Incubator\nstructure"],
+        ["Business\nFunction", "Clinical Research,\nDrug Safety", "Functional area\nwithin sub-industry", "Incubator\nstructure"],
+        ["Use Case\nSkill", "healthcare-imaging,\npharmacovigilance", "Concrete skill\nsolving a use case", "Both repos"],
+        ["Sub-Skill", "dicom-parser,\nimaging-viewer", "Leaf capability\nwithin a skill", "Skill internal"],
+    ]
+    for i, row in enumerate(tax_rows):
+        pdf.table_row(row, w_tax, fill=(i % 2 == 0))
+
+    pdf.ln(6)
+    pdf.subsection_title("Sub-Industries")
+    w_sub = [35, 55, 95]
+    pdf.table_header(["Sub-Industry", "Customer Types", "Business Functions"], w_sub)
+    sub_rows = [
+        ["Provider", "Hospitals, health systems,\nclinics, IDNs", "Clinical Research, Clinical Data\nManagement, Revenue Cycle"],
+        ["Pharma", "Pharma, biotech, CROs", "Drug Safety, Genomics,\nLab Operations"],
+        ["Payer", "Health plans, TPAs, PBMs", "Claims Processing\n(future skills)"],
+        ["Cross-Industry", "All of the above", "Research Strategy,\nKnowledge Extensions"],
+    ]
+    for i, row in enumerate(sub_rows):
+        pdf.table_row(row, w_sub, fill=(i % 2 == 0))
+
+    # Incubator Repo Structure
+    pdf.add_page()
+    pdf.section_title("Incubator Repo Structure")
+    pdf.body_text(
+        "The incubator repo uses the full hierarchy as directory nesting. "
+        "This provides clear organization for browsing and discovery during development."
+    )
+    pdf.ln(2)
+    pdf.set_font("Courier", "", 9)
+    pdf.set_text_color(40, 40, 40)
+    inc_tree = [
+        "  skills/",
+        "    health-sciences/",
+        "      provider/",
+        "        clinical-research/",
+        "          healthcare-imaging/",
+        "            dicom-parser/",
+        "            dicom-ingestion/",
+        "            dicom-analytics/",
+        "            imaging-viewer/",
+        "            imaging-governance/",
+        "            imaging-ml/",
+        "        clinical-data-management/",
+        "          fhir-data-transformation/",
+        "          clinical-nlp/",
+        "          omop-cdm-modeling/",
+        "        revenue-cycle/",
+        "          claims-data-analysis/",
+        "      pharma/",
+        "        drug-safety/",
+        "          pharmacovigilance/",
+        "          clinical-trial-protocol/",
+        "        genomics/",
+        "          nextflow-development/",
+        "          variant-annotation/",
+        "          single-cell-rna-qc/",
+        "          scvi-tools/",
+        "          survival-analysis/",
+        "        lab-operations/",
+        "          instrument-data-to-allotrope/",
+        "      payer/",
+        "        claims-processing/",
+        "      cross-industry/",
+        "        research-strategy/",
+        "          scientific-problem-selection/",
+        "        knowledge-extensions/",
+        "          cke-pubmed/",
+        "          cke-clinical-trials/",
+    ]
+    for line in inc_tree:
+        pdf.cell(0, 4.5, line, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(40, 40, 40)
+    pdf.body_text(
+        "Leaf-level skills can appear directly under a business function "
+        "(e.g., claims-data-analysis under revenue-cycle) without requiring "
+        "an intermediate use-case-skill directory."
+    )
+
+    # SFS Repo Naming Convention
+    pdf.add_page()
+    pdf.section_title("SFS Repo Naming Convention")
+    pdf.body_text(
+        "The SFS skills repo (Snowflake-Solutions/cortex-code-skills) uses a flattened "
+        "naming convention. Skills sit in a single skills/ directory with a structured "
+        "prefix that encodes the taxonomy."
+    )
+    pdf.ln(2)
+    pdf.subsection_title("Naming Pattern")
+    pdf.set_font("Courier", "B", 12)
+    pdf.set_text_color(0, 100, 180)
+    pdf.cell(0, 8, "  hcls-{sub-industry}-{function}-{skill}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(40, 40, 40)
+    pdf.ln(4)
+
+    pdf.subsection_title("Naming Rules")
+    w_nr = [30, 60, 95]
+    pdf.table_header(["Component", "Values", "Notes"], w_nr)
+    nr_rows = [
+        ["hcls", "Fixed prefix", "Health Sciences industry\nidentifier"],
+        ["sub-industry", "provider, pharma,\npayer, cross", "Maps to sub-industry\ntaxonomy level"],
+        ["function", "imaging, cdata,\ndsafety, genomics,\nlab, claims, rwe,\nresearch, cke", "Short alias for\nbusiness function"],
+        ["skill", "dicom-parser,\npharmacovigilance,\nnextflow, etc.", "Use case skill name\n(leaf level)"],
+    ]
+    for i, row in enumerate(nr_rows):
+        pdf.table_row(row, w_nr, fill=(i % 2 == 0))
+
+    pdf.ln(6)
+    pdf.subsection_title("Example Mappings")
+    w_ex = [93, 93]
+    pdf.table_header(["Incubator Path", "SFS Name"], w_ex)
+    ex_rows = [
+        ["health-sciences/provider/\nclinical-research/healthcare-imaging/\ndicom-parser/", "hcls-provider-imaging-\ndicom-parser"],
+        ["health-sciences/pharma/\ndrug-safety/pharmacovigilance/", "hcls-pharma-dsafety-\npharmacovigilance"],
+        ["health-sciences/pharma/\ngenomics/variant-annotation/", "hcls-pharma-genomics-\nvariant-annotation"],
+        ["health-sciences/provider/\nclinical-data-management/\nclinical-nlp/", "hcls-provider-cdata-\nclinical-nlp"],
+        ["health-sciences/cross-industry/\nknowledge-extensions/cke-pubmed/", "hcls-cross-cke-\npubmed"],
+        ["health-sciences/provider/\nrevenue-cycle/claims-data-analysis/", "hcls-provider-claims-\ndata-analysis"],
+    ]
+    for i, row in enumerate(ex_rows):
+        pdf.table_row(row, w_ex, fill=(i % 2 == 0))
+
+    # Orchestrator Routing Instructions
+    pdf.ln(6)
+    pdf.subsection_title("Orchestrator Routing Instructions")
+    pdf.body_text(
+        "The health-sciences-solutions orchestrator profile uses the following "
+        "rules to route requests to the correct skills:"
+    )
+    pdf.bullet("Route by sub-industry FIRST: Hospital/clinic -> Provider, "
+               "Pharma/biotech/CRO -> Pharma, Health plan/TPA/PBM -> Payer")
+    pdf.bullet("When sub-industry is ambiguous: route by TASK, not customer type "
+               "(e.g., imaging tasks always go to Provider > Clinical Research)")
+    pdf.bullet("Cross-industry skills (CKEs, research strategy) are available to ALL sub-industries")
+    pdf.bullet("Accept overlaps: some skills serve multiple sub-industries - "
+               "route to the skill regardless of where it sits in the taxonomy")
+    pdf.sub_bullet("claims-data-analysis: serves both Provider and Payer")
+    pdf.sub_bullet("survival-analysis: serves both Pharma and Provider")
+    pdf.sub_bullet("clinical-nlp: serves both Provider and Pharma")
 
     # Accountability Matrix
     pdf.add_page()
