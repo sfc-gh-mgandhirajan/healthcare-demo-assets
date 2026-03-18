@@ -1,7 +1,7 @@
 ---
 name: dicom-parser
 description: "Parse DICOM medical image metadata and create standardized data models on Snowflake. Use when extracting DICOM tags, building radiology metadata tables, loading imaging study data, or analyzing medical imaging metadata. Triggers: DICOM parse, extract DICOM, DICOM tags, pydicom, DICOM schema, DICOM data model, DICOM to Snowflake."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # DICOM Metadata Parser

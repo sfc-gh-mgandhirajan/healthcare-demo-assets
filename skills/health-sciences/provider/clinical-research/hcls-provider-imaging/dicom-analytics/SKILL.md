@@ -1,7 +1,7 @@
 ---
 name: dicom-analytics
 description: "DICOM metadata analytics, radiology report NLP, and imaging search using Cortex AI functions and Cortex Search on Snowflake."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # DICOM Analytics & Metadata Intelligence

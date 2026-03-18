@@ -1,7 +1,7 @@
 ---
 name: imaging-viewer
 description: "Build DICOM imaging viewer and dashboard applications using Streamlit in Snowflake and SPCS for compute-heavy rendering."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # Medical Imaging Viewer & Dashboard

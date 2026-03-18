@@ -1,7 +1,7 @@
 ---
 name: data-model-knowledge
 description: "Query the DICOM data model knowledge repository (Cortex Search Service) to retrieve latest table definitions, column specifications, DICOM tags, PHI indicators, and relationship metadata at runtime. Use when building schemas, generating DDL, validating data models, or answering data model questions."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # Data Model Knowledge Repository

@@ -1,7 +1,7 @@
 ---
 name: dicom-ingestion
 description: "DICOM data ingestion pipelines on Snowflake. Ingest imaging metadata from PACS, stages, and external sources into Snowflake using streams, tasks, and dynamic tables."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # DICOM Data Ingestion Pipeline

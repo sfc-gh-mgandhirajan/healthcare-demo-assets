@@ -1,7 +1,7 @@
 ---
 name: imaging-governance
 description: "HIPAA-compliant governance for medical imaging data: PHI masking, de-identification, classification, row-access policies, and audit trails on Snowflake."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # Imaging Data Governance & HIPAA Compliance

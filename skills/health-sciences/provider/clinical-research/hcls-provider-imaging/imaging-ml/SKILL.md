@@ -1,7 +1,7 @@
 ---
 name: imaging-ml
 description: "Train and deploy ML models for medical imaging use cases on Snowflake: imaging classification, anomaly detection, pathology models, and radiology AI using Cortex ML and Model Registry."
-parent_skill: healthcare-imaging
+parent_skill: hcls-provider-imaging
 ---
 
 # Medical Imaging ML Models
