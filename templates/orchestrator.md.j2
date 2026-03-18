@@ -20,6 +20,7 @@ Industry / Sub-Industry / Business Function / Use Case Skill / Sub-Skill
 
 ```
 Health Sciences
+{% if skills|length > 0 %}
 |-- Provider
 |   |-- Clinical Research
 |   |   |-- {{ skills['hcls-provider-imaging'].name }} (router + {{ skills['hcls-provider-imaging'].sub_skills | length }} sub-skills)
@@ -54,6 +55,9 @@ Health Sciences
     +-- Knowledge Extensions
         |-- {{ skills['hcls-cross-cke-pubmed'].name }}
         +-- {{ skills['hcls-cross-cke-clinical-trials'].name }}
+{% else %}
+(No skills registered yet — skills graduate here from incubator)
+{% endif %}
 ```
 
 ## Routing Rules

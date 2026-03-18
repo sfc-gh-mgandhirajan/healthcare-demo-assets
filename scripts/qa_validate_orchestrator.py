@@ -4,8 +4,10 @@ import re
 import sys
 
 BASE = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/skills/health-sciences"
-ORCH = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/agents/health-sciences-solutions.md"
 ORCH_INC = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/agents/health-sciences-incubator.md"
+ORCH_PROD = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/agents/health-sciences-solutions.md"
+
+ORCH = ORCH_INC
 
 with open(ORCH) as f:
     orch_content = f.read()
@@ -135,63 +137,62 @@ if os.path.isdir(standalone):
 
 # CHECK 8: Twin orchestrator drift detection
 print("\n--- CHECK 8: Twin orchestrator drift (incubator vs production) ---")
-if os.path.exists(ORCH_INC):
-    with open(ORCH_INC) as f:
-        inc_content = f.read()
+if os.path.exists(ORCH_PROD):
+    with open(ORCH_PROD) as f:
+        prod_content = f.read()
 
-    allowed_diff_markers = {
-        "name:", "description:", "# Health Sciences",
-        "incubator", "Incubator", "production", "Production",
-        "approved", "experimental", "All skills referenced here",
-    }
+    prod_has_skills = "$hcls-" in prod_content
 
-    prod_lines = orch_content.splitlines()
-    inc_lines = inc_content.splitlines()
-
-    structural_sections = [
-        "## Routing Rules",
-        "## Skill Routing Tables",
-        "## Guardrails",
-        "## Getting Started",
-        "## Cortex Knowledge Extensions",
-    ]
-
-    drift_count = 0
-    for section in structural_sections:
-        def extract_section(lines, header):
-            capturing = False
-            result = []
-            for line in lines:
-                if line.strip() == header:
-                    capturing = True
-                    continue
-                if capturing and line.startswith("## ") and line.strip() != header:
-                    break
-                if capturing:
-                    result.append(line)
-            return result
-
-        prod_section = extract_section(prod_lines, section)
-        inc_section = extract_section(inc_lines, section)
-
-        if prod_section == inc_section:
-            print(f"  PASS: {section} -- identical")
-        else:
-            prod_filtered = [l for l in prod_section if l.strip()]
-            inc_filtered = [l for l in inc_section if l.strip()]
-            if prod_filtered == inc_filtered:
-                print(f"  PASS: {section} -- identical (whitespace only)")
-            else:
-                print(f"  FAIL: {section} -- STRUCTURAL DRIFT detected ({len(prod_filtered)} vs {len(inc_filtered)} lines)")
-                drift_count += 1
-                fails += 1
-
-    if drift_count == 0:
-        print(f"  RESULT: No structural drift between orchestrators")
+    if not prod_has_skills:
+        print("  SKIP: Production has no skills yet (empty scaffold) -- drift check deferred")
     else:
-        print(f"  RESULT: {drift_count} sections have drift -- regenerate from template!")
+        prod_lines = prod_content.splitlines()
+        inc_lines = orch_content.splitlines()
+
+        structural_sections = [
+            "## Routing Rules",
+            "## Skill Routing Tables",
+            "## Guardrails",
+            "## Getting Started",
+            "## Cortex Knowledge Extensions",
+        ]
+
+        drift_count = 0
+        for section in structural_sections:
+            def extract_section(lines, header):
+                capturing = False
+                result = []
+                for line in lines:
+                    if line.strip() == header:
+                        capturing = True
+                        continue
+                    if capturing and line.startswith("## ") and line.strip() != header:
+                        break
+                    if capturing:
+                        result.append(line)
+                return result
+
+            prod_section = extract_section(prod_lines, section)
+            inc_section = extract_section(inc_lines, section)
+
+            if prod_section == inc_section:
+                print(f"  PASS: {section} -- identical")
+            else:
+                prod_filtered = [l for l in prod_section if l.strip()]
+                inc_filtered = [l for l in inc_section if l.strip()]
+                if prod_filtered == inc_filtered:
+                    print(f"  PASS: {section} -- identical (whitespace only)")
+                else:
+                    print(f"  FAIL: {section} -- STRUCTURAL DRIFT detected ({len(prod_filtered)} vs {len(inc_filtered)} lines)")
+                    drift_count += 1
+                    fails += 1
+
+        if drift_count == 0:
+            print(f"  RESULT: No structural drift between orchestrators")
+        else:
+            print(f"  RESULT: {drift_count} sections have drift -- regenerate from template!")
 else:
-    print(f"  SKIP: {ORCH_INC} not found (incubator orchestrator not generated)")
+    print(f"  SKIP: {ORCH_PROD} not found (production orchestrator not generated)")
 
 # SUMMARY
 print(f"\n{'=' * 60}")

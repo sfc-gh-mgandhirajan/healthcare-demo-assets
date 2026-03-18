@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate twin orchestrator .md files from a single Jinja2 template + YAML registry.
+"""Generate twin orchestrator .md files from a single Jinja2 template + split YAML registries.
+
+Each profile has its own registry file:
+    templates/skills_incubator.yaml   -> agents/health-sciences-incubator.md
+    templates/skills_production.yaml  -> agents/health-sciences-solutions.md
 
 Usage:
     python scripts/generate_orchestrators.py [--profile incubator|production|both]
-
-Outputs:
-    agents/health-sciences-incubator.md   (incubator orchestrator)
-    agents/health-sciences-solutions.md   (production orchestrator)
 """
 
 import argparse
@@ -28,7 +28,10 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = ROOT / "templates"
 AGENTS_DIR = ROOT / "agents"
-REGISTRY_FILE = TEMPLATES_DIR / "skills_registry.yaml"
+REGISTRY_FILES = {
+    "incubator": TEMPLATES_DIR / "skills_incubator.yaml",
+    "production": TEMPLATES_DIR / "skills_production.yaml",
+}
 TEMPLATE_FILE = "orchestrator.md.j2"
 
 DOMAIN_ORDER = [
@@ -67,19 +70,18 @@ def prefix_dollar(name):
     return f"`${name}`"
 
 
-def load_registry():
-    with open(REGISTRY_FILE) as f:
+def load_registry(profile_type):
+    path = REGISTRY_FILES[profile_type]
+    with open(path) as f:
         return yaml.safe_load(f)
 
 
 def build_skills(registry, profile_type):
     skills = OrderedDict()
-    for name, data in registry["skills"].items():
+    raw_skills = registry.get("skills") or {}
+    for name, data in raw_skills.items():
         skill = SkillObj(name, data)
-        if profile_type == "incubator":
-            skill.available = True
-        else:
-            skill.available = skill.approved
+        skill.available = True
         skills[name] = skill
     return skills
 
@@ -120,7 +122,7 @@ def render(registry, profile_type):
 
     template = env.get_template(TEMPLATE_FILE)
 
-    profile_cfg = registry["profiles"][profile_type]
+    profile_cfg = registry["profile"]
     skills = build_skills(registry, profile_type)
     skills_by_domain = build_skills_by_domain(skills)
     available_patterns = filter_patterns(registry, skills)
@@ -145,18 +147,18 @@ def main():
     )
     args = parser.parse_args()
 
-    registry = load_registry()
     AGENTS_DIR.mkdir(exist_ok=True)
 
     profiles = ["incubator", "production"] if args.profile == "both" else [args.profile]
 
     for p in profiles:
+        registry = load_registry(p)
         output = render(registry, p)
         out_path = AGENTS_DIR / PROFILE_OUTPUT[p]
         out_path.write_text(output)
         print(f"Generated: {out_path.relative_to(ROOT)}")
 
-    if args.profile == "both":
+    if args.profile == "both" and all((AGENTS_DIR / PROFILE_OUTPUT[p]).exists() for p in ["incubator", "production"]):
         inc = (AGENTS_DIR / PROFILE_OUTPUT["incubator"]).read_text()
         prod = (AGENTS_DIR / PROFILE_OUTPUT["production"]).read_text()
         inc_lines = set(inc.splitlines())

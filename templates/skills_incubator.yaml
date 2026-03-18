@@ -1,47 +1,22 @@
-profiles:
-  incubator:
-    name: health-sciences-incubator
-    description: >-
-      Health Sciences incubator profile for experimental skill development on Snowflake.
-      Orchestrates skills across medical imaging, clinical data, drug safety, claims/RWE,
-      genomics, and lab data. Includes experimental and in-development skills.
-      Triggers: healthcare, clinical, EHR, FHIR, HL7, DICOM, imaging, radiology,
-      patient data, HIPAA, PHI, claims, RWE, pharmacovigilance, drug safety,
-      clinical trial, FAERS, genomics, variant, single-cell, RNA-seq, bioinformatics,
-      OMOP, CDM, NLP, clinical notes, lab instrument, Allotrope, survival analysis,
-      Kaplan-Meier, scvi-tools, nextflow, nf-core, React, dashboard, clinical app,
-      patient portal, healthcare UI, PubMed, biomedical literature, CKE,
-      knowledge extension, ClinicalTrials.gov, trial search, literature review.
-    title: Health Sciences Incubator Profile
-    intro: >-
-      You are a **Health Sciences Solutions Architect** working in the incubator
-      environment. You have access to all skills — including experimental and
-      in-development skills — for rapid prototyping and customer demos. Skills
-      in this environment may be rough or evolving. Always validate outputs.
-
-  production:
-    name: health-sciences-solutions
-    description: >-
-      Health Sciences industry solutions architect for Snowflake. Orchestrates
-      approved, production-grade skills across medical imaging, clinical data,
-      drug safety, claims/RWE, genomics, and lab data to build end-to-end
-      solutions for healthcare and life sciences. Integrates Cortex Knowledge
-      Extensions (CKEs) for PubMed biomedical literature and ClinicalTrials.gov
-      research. Triggers: healthcare, clinical, EHR, FHIR, HL7, DICOM, imaging,
-      radiology, patient data, HIPAA, PHI, claims, RWE, pharmacovigilance,
-      drug safety, clinical trial, FAERS, genomics, variant, single-cell, RNA-seq,
-      bioinformatics, OMOP, CDM, NLP, clinical notes, lab instrument, Allotrope,
-      survival analysis, Kaplan-Meier, scvi-tools, nextflow, nf-core, React,
-      dashboard, clinical app, patient portal, healthcare UI, PubMed, biomedical
-      literature, CKE, knowledge extension, ClinicalTrials.gov, trial search,
-      literature review.
-    title: Health Sciences Solutions Profile
-    intro: >-
-      You are a **Health Sciences Solutions Architect** specializing in building
-      end-to-end data solutions on Snowflake for healthcare and life sciences.
-      You combine deep domain knowledge with Snowflake platform expertise across
-      all major health sciences business functions. All skills referenced here
-      are approved, tested, and production-grade.
+profile:
+  name: health-sciences-incubator
+  description: >-
+    Health Sciences incubator profile for experimental skill development on Snowflake.
+    Orchestrates skills across medical imaging, clinical data, drug safety, claims/RWE,
+    genomics, and lab data. Includes experimental and in-development skills.
+    Triggers: healthcare, clinical, EHR, FHIR, HL7, DICOM, imaging, radiology,
+    patient data, HIPAA, PHI, claims, RWE, pharmacovigilance, drug safety,
+    clinical trial, FAERS, genomics, variant, single-cell, RNA-seq, bioinformatics,
+    OMOP, CDM, NLP, clinical notes, lab instrument, Allotrope, survival analysis,
+    Kaplan-Meier, scvi-tools, nextflow, nf-core, React, dashboard, clinical app,
+    patient portal, healthcare UI, PubMed, biomedical literature, CKE,
+    knowledge extension, ClinicalTrials.gov, trial search, literature review.
+  title: Health Sciences Incubator Profile
+  intro: >-
+    You are a **Health Sciences Solutions Architect** working in the incubator
+    environment. You have access to all skills -- including experimental and
+    in-development skills -- for rapid prototyping and customer demos. Skills
+    in this environment may be rough or evolving. Always validate outputs.
 
 skills:
   hcls-provider-imaging:
@@ -70,92 +45,77 @@ skills:
       - name: data-model-knowledge
         triggers: "DICOM data model, schema reference, model repository"
         description: "18-table DICOM data model reference docs"
-    approved: true
 
   hcls-provider-imaging-dicom-parser:
     triggers: "Parse DICOM standalone (without router)"
     description: "Standalone DICOM parser for quick parsing tasks"
     domain: "Provider > Clinical Research"
     standalone: true
-    approved: true
 
   hcls-provider-cdata-fhir:
     triggers: "FHIR, HL7, Patient resource, Observation, Bundle, ndjson"
     description: "FHIR R4 resources to relational tables"
     domain: "Provider > Clinical Data Management"
-    approved: true
 
   hcls-provider-cdata-clinical-nlp:
     triggers: "Clinical NLP, NER, clinical notes, discharge summary, ICD coding"
     description: "Structured extraction from clinical text"
     domain: "Provider > Clinical Data Management"
-    approved: true
 
   hcls-provider-cdata-omop:
     triggers: "OMOP, CDM, OHDSI, observational research, vocabulary mapping"
     description: "EHR/claims to OMOP CDM v5.4"
     domain: "Provider > Clinical Data Management"
-    approved: true
 
   hcls-provider-claims-data-analysis:
     triggers: "Claims data, RWE, 837, 835, medical claims, utilization, HEDIS"
     description: "Cohort building, utilization, treatment patterns"
     domain: "Provider > Revenue Cycle"
-    approved: true
 
   hcls-pharma-dsafety-pharmacovigilance:
     triggers: "FAERS, adverse events, drug safety, ADR, signal detection, MedDRA"
     description: "FDA FAERS signal detection with disproportionality metrics"
     domain: "Pharma > Drug Safety"
-    approved: true
 
   hcls-pharma-dsafety-clinical-trial-protocol:
     triggers: "Clinical trial protocol, generate protocol, FDA submission"
     description: "Protocol generation using waypoint architecture"
     domain: "Pharma > Drug Safety"
-    approved: true
 
   hcls-pharma-genomics-nextflow:
     triggers: "nf-core, Nextflow, FASTQ, variant calling, gene expression, GEO"
     description: "nf-core pipelines (rnaseq, sarek, atacseq)"
     domain: "Pharma > Genomics"
-    approved: true
 
   hcls-pharma-genomics-variant-annotation:
     triggers: "VCF annotation, ClinVar, gnomAD, pathogenic variants, ACMG"
     description: "Variant annotation with ClinVar/gnomAD"
     domain: "Pharma > Genomics"
-    approved: true
 
   hcls-pharma-genomics-single-cell-qc:
     triggers: "QC, single-cell, scRNA-seq, scanpy, MAD-based filtering"
     description: "Automated QC for scRNA-seq data"
     domain: "Pharma > Genomics"
-    approved: true
 
   hcls-pharma-genomics-scvi-tools:
     triggers: "scVI, scANVI, totalVI, batch correction, data integration"
     description: "Deep learning single-cell analysis"
     domain: "Pharma > Genomics"
-    approved: true
 
   hcls-pharma-genomics-survival-analysis:
     triggers: "Survival analysis, Kaplan-Meier, Cox regression, hazard ratio"
     description: "Time-to-event analysis with publication-ready plots"
     domain: "Pharma > Genomics"
-    approved: true
 
   hcls-pharma-lab-allotrope:
     triggers: "Instrument files, standardize lab data, Allotrope, ASM, LIMS"
     description: "Lab instrument outputs to Allotrope JSON/CSV"
     domain: "Pharma > Lab Operations"
-    approved: true
 
   hcls-cross-research-problem-selection:
     triggers: "Research problem, project ideation, evaluate project, scientific decisions"
     description: "Scientific problem selection using Fischbach & Walsh methodology"
     domain: "Cross-Industry > Research Strategy"
-    approved: true
 
   hcls-cross-cke-pubmed:
     triggers: "PubMed, biomedical literature, drug mechanism, clinical evidence, research papers"
@@ -169,7 +129,6 @@ skills:
       - hcls-cross-research-problem-selection
       - "hcls-provider-imaging (dicom-analytics)"
     invoke_when: "Drug-event associations, radiology research, clinical NLP context, research landscape review"
-    approved: true
 
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
@@ -182,7 +141,6 @@ skills:
       - hcls-provider-claims-data-analysis
       - hcls-pharma-genomics-survival-analysis
     invoke_when: "Trial design benchmarking, feasibility analysis, eligibility criteria, endpoint definitions"
-    approved: true
 
 overlaps:
   - skill: hcls-provider-claims-data-analysis
