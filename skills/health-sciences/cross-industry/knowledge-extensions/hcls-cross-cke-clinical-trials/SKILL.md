@@ -7,6 +7,35 @@ description: "Cortex Knowledge Extension: Clinical Trials Research Database. RAG
 
 This skill provides access to the **Clinical Trials Research Database** Cortex Knowledge Extension (CKE) from the Snowflake Marketplace. It is a shared Cortex Search Service that enables RAG-based semantic search across ClinicalTrials.gov data directly in Snowflake -- no data is copied into your account.
 
+## Preflight Check (REQUIRED -- Run Before Any Query)
+
+Before executing any Clinical Trials search, verify the Marketplace listing is installed:
+
+```sql
+SELECT COUNT(*) FROM CLINICAL_TRIALS_EMBEDDINGS.SHARED.CLINICAL_TRIALS_SEARCH_CORPUS LIMIT 1;
+```
+
+| Result | Status | Action |
+|--------|--------|--------|
+| Returns a count | READY | Proceed with queries using `CLINICAL_TRIALS_EMBEDDINGS` as the CKE database |
+| `SQL compilation error: does not exist` | MISSING | Guide user through Setup below, then retry |
+| Other error (permissions, etc.) | ERROR | Show error, suggest `GRANT IMPORTED PRIVILEGES ON DATABASE CLINICAL_TRIALS_EMBEDDINGS TO ROLE <role>` |
+
+### Fallback (When MISSING)
+
+If the listing is not installed and the user cannot install it now:
+- **Inform the user**: "Clinical Trials CKE is not available in this account. ClinicalTrials.gov search is unavailable."
+- **Continue without trial search enrichment** -- domain skills should still function for their primary task
+- **Suggest alternative**: "You can search ClinicalTrials.gov manually at https://clinicaltrials.gov/ and paste relevant trial details into the conversation"
+
+### Auto-Detection for Domain Skills
+
+When a domain skill (clinical-trial-protocol, claims-data-analysis, etc.) wants to invoke this CKE:
+1. Run the preflight probe above
+2. If READY -- execute the CKE query and enrich the domain result
+3. If MISSING -- skip enrichment, log a note: "Clinical Trials CKE not available -- skipping trial search enrichment"
+4. Never fail the parent skill just because a CKE is unavailable
+
 ## Marketplace Details
 
 | Field | Value |

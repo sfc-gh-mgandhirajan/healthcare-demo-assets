@@ -61,6 +61,8 @@ Some skills naturally serve multiple sub-industries. Route to the skill regardle
 
 Two CKEs from the Snowflake Marketplace are available as shared Cortex Search Services. They are **standalone composable skills** — domain skills invoke them on-demand when evidence adds value.
 
+**Preflight Pattern**: Before invoking any CKE, the skill runs a probe query to verify the Marketplace listing is installed. If MISSING, the skill skips CKE enrichment gracefully and continues with its primary task. See each CKE skill's Preflight Check section for details.
+
 | CKE Skill | Data Source | When Domain Skills Should Invoke It |
 |-----------|-------------|-------------------------------------|
 
@@ -93,7 +95,8 @@ When a user starts a health sciences task:
 1. **Identify the sub-industry** (Provider, Pharma, Payer) from the routing rules above
 2. **Route by task** if sub-industry is ambiguous
 3. **Invoke the matching skill(s)** using `$skill-name` syntax
-4. **For cross-domain work**, follow the composition patterns above
-5. **Apply governance guardrails** as a cross-cutting concern on all patient/clinical data
-6. **Leverage platform skills** for Snowflake infrastructure (Dynamic Tables, Streamlit, React, Cortex AI, dbt, governance)
-8. **Test and validate** before declaring success
+4. **Run preflight checks** -- skills with external dependencies (CKEs, Data Model Knowledge) will auto-detect availability and fall back gracefully if dependencies are missing
+5. **For cross-domain work**, follow the composition patterns above
+6. **Apply governance guardrails** as a cross-cutting concern on all patient/clinical data
+7. **Leverage platform skills** for Snowflake infrastructure (Dynamic Tables, Streamlit, React, Cortex AI, dbt, governance)
+9. **Test and validate** before declaring success

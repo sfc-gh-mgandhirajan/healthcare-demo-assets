@@ -7,6 +7,35 @@ description: "Cortex Knowledge Extension: PubMed Biomedical Research Corpus. RAG
 
 This skill provides access to the **PubMed Biomedical Research Corpus** Cortex Knowledge Extension (CKE) from the Snowflake Marketplace. It is a shared Cortex Search Service that enables RAG-based semantic search across PubMed biomedical literature directly in Snowflake -- no data is copied into your account.
 
+## Preflight Check (REQUIRED -- Run Before Any Query)
+
+Before executing any PubMed search, verify the Marketplace listing is installed:
+
+```sql
+SELECT COUNT(*) FROM PUBMED_ABSTRACTS_EMBEDDINGS.SHARED.PUBMED_SEARCH_CORPUS LIMIT 1;
+```
+
+| Result | Status | Action |
+|--------|--------|--------|
+| Returns a count | READY | Proceed with queries using `PUBMED_ABSTRACTS_EMBEDDINGS` as the CKE database |
+| `SQL compilation error: does not exist` | MISSING | Guide user through Setup below, then retry |
+| Other error (permissions, etc.) | ERROR | Show error, suggest `GRANT IMPORTED PRIVILEGES ON DATABASE PUBMED_ABSTRACTS_EMBEDDINGS TO ROLE <role>` |
+
+### Fallback (When MISSING)
+
+If the listing is not installed and the user cannot install it now:
+- **Inform the user**: "PubMed CKE is not available in this account. Biomedical literature search is unavailable."
+- **Continue without PubMed enrichment** -- domain skills should still function for their primary task
+- **Suggest alternative**: "You can search PubMed manually at https://pubmed.ncbi.nlm.nih.gov/ and paste relevant abstracts into the conversation"
+
+### Auto-Detection for Domain Skills
+
+When a domain skill (pharmacovigilance, clinical-nlp, etc.) wants to invoke this CKE:
+1. Run the preflight probe above
+2. If READY -- execute the CKE query and enrich the domain result
+3. If MISSING -- skip enrichment, log a note: "PubMed CKE not available -- skipping literature enrichment"
+4. Never fail the parent skill just because a CKE is unavailable
+
 ## Marketplace Details
 
 | Field | Value |

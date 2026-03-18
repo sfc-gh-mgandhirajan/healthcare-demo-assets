@@ -6,6 +6,47 @@ parent_skill: healthcare-imaging
 
 # Data Model Knowledge Repository
 
+## Preflight Check (REQUIRED -- Run Before Any Query)
+
+Before executing any data model search, verify both the reference table and Cortex Search Service exist:
+
+### Check 1: Reference Table
+
+```sql
+SELECT COUNT(*) FROM UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_DOCS LIMIT 1;
+```
+
+### Check 2: Cortex Search Service
+
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+    '{"query": "test", "columns": ["CONTENT"], "limit": 1}'
+);
+```
+
+| Check 1 | Check 2 | Status | Action |
+|---------|---------|--------|--------|
+| OK | OK | READY | Proceed with dynamic data model queries |
+| OK | FAIL | PARTIAL | Table exists but search service is missing -- guide user to recreate search service (see Setup) |
+| FAIL | FAIL | MISSING | Guide user through full Setup below |
+| ERROR | ERROR | ERROR | Show error, check permissions on `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE` |
+
+### Fallback (When MISSING or PARTIAL)
+
+If the Cortex Search Service is not available:
+- **Use hardcoded DICOM schema definitions** from `dicom-parser/SKILL.md` references section
+- **Inform the user**: "DICOM data model search service is not available -- using hardcoded schema definitions. Results may not reflect the latest data model updates."
+- **Never block the parent skill** -- the imaging router and sub-skills must continue to work with hardcoded fallbacks
+
+### Auto-Detection for Imaging Router
+
+The imaging router runs this preflight as part of its Step 0 (Data Model Knowledge pre-step):
+1. Run both probes above
+2. If READY -- use dynamic search results to ground DDL/pipeline generation
+3. If MISSING -- fall back to hardcoded schemas, note the fallback in output
+4. Set `$DMK_AVAILABLE` context flag for sub-skills to check
+
 ## When to Load
 
 Healthcare-imaging router or any skill that needs to reference the DICOM data model at runtime instead of relying on hardcoded schema definitions.

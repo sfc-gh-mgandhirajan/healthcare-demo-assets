@@ -9,6 +9,25 @@ description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflak
 
 1. **Load** `references/dicom-standards.md` for DICOM domain context
 2. **Verify** Snowflake connection is active and target database/schema exist
+3. **Run Preflight Check** for Data Model Knowledge (see below)
+
+## Preflight Check (REQUIRED -- Run at Skill Load)
+
+Before routing to any sub-skill, verify the DICOM Data Model Knowledge repository is available:
+
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
+    '{"query": "test", "columns": ["CONTENT"], "limit": 1}'
+);
+```
+
+| Result | Status | Behavior |
+|--------|--------|----------|
+| Returns results | READY | Step 0 (Data Model Knowledge pre-step) will use dynamic search results |
+| Error / does not exist | MISSING | Step 0 skipped -- sub-skills fall back to hardcoded schema definitions from SKILL.md references. Inform user: "DICOM data model search service not available -- using hardcoded schemas" |
+
+This preflight runs ONCE at router load. The result determines whether Step 0 below executes or is skipped.
 
 ## Intent Detection
 
@@ -22,9 +41,9 @@ description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflak
 | ML | "imaging model", "train imaging", "imaging classification ML", "pathology model", "radiology AI", "deploy imaging model", "imaging inference" | `imaging-ml/SKILL.md` |
 | MODEL_KNOWLEDGE | "data model reference", "DICOM schema lookup", "generate DDL from model", "what columns", "model repository", "PHI columns", "table relationships" | `data-model-knowledge/SKILL.md` |
 
-## Data Model Knowledge — Automatic Pre-Step
+## Data Model Knowledge — Automatic Pre-Step (Conditional on Preflight)
 
-**CRITICAL:** For intents PARSE, INGEST, ANALYTICS, and GOVERNANCE, **always execute Step 0** before loading the sub-skill. This grounds all schema work in the latest DICOM data model from the Cortex Search repository.
+**CRITICAL:** For intents PARSE, INGEST, ANALYTICS, and GOVERNANCE, **execute Step 0 if preflight status is READY**. If preflight status is MISSING, skip Step 0 and let sub-skills use hardcoded schema definitions.
 
 ### Step 0: Query Data Model Knowledge (automatic for PARSE, INGEST, ANALYTICS, GOVERNANCE)
 
@@ -59,6 +78,9 @@ SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
 Start
   |
   v
+Run Preflight Check (DICOM_MODEL_SEARCH_SVC)
+  |
+  v
 Detect Intent from table above
   |
   v
@@ -67,18 +89,24 @@ Is intent PARSE, INGEST, ANALYTICS, or GOVERNANCE?
   YES                            NO
   |                              |
   v                              v
-  Step 0: Query                  Skip Step 0
-  DICOM_MODEL_SEARCH_SVC         (VIEWER, ML, MODEL_KNOWLEDGE)
-  for relevant model context     |
-  |                              |
-  v                              v
-  +---> PARSE -----> dicom-parser/SKILL.md (DDL grounded by search results)
+  Preflight READY?               Skip Step 0
+  |          |                   (VIEWER, ML, MODEL_KNOWLEDGE)
+  YES        NO                  |
+  |          |                   |
+  v          v                   |
+  Step 0:    Skip Step 0         |
+  Query      (use hardcoded      |
+  DICOM_MODEL schemas)           |
+  _SEARCH_SVC                    |
+  |          |                   |
+  v          v                   v
+  +---> PARSE -----> dicom-parser/SKILL.md (DDL grounded by search results OR hardcoded)
   |
-  +---> INGEST ----> dicom-ingestion/SKILL.md (pipelines grounded by search results)
+  +---> INGEST ----> dicom-ingestion/SKILL.md (pipelines grounded by search results OR hardcoded)
   |
-  +---> ANALYTICS -> dicom-analytics/SKILL.md (views grounded by search results)
+  +---> ANALYTICS -> dicom-analytics/SKILL.md (views grounded by search results OR hardcoded)
   |
-  +---> GOVERNANCE > imaging-governance/SKILL.md (PHI columns from search results)
+  +---> GOVERNANCE > imaging-governance/SKILL.md (PHI columns from search results OR hardcoded)
   |
   +---> VIEWER ----> imaging-viewer/SKILL.md
   |
@@ -91,7 +119,7 @@ Is intent PARSE, INGEST, ANALYTICS, or GOVERNANCE?
 
 All sub-skills should apply these platform patterns:
 
-- **Data Model Knowledge (Auto Pre-Step)**: For PARSE, INGEST, ANALYTICS, and GOVERNANCE intents, the router **automatically** queries the `DICOM_MODEL_SEARCH_SVC` Cortex Search Service before loading the sub-skill. This grounds all schema-dependent work in the latest data model from the knowledge repository — not hardcoded DDL. See "Step 0" above.
+- **Data Model Knowledge (Preflight-Conditional Pre-Step)**: For PARSE, INGEST, ANALYTICS, and GOVERNANCE intents, the router **runs a preflight check** on `DICOM_MODEL_SEARCH_SVC`. If READY, it queries the Cortex Search Service before loading the sub-skill to ground all schema-dependent work in the latest data model. If MISSING, sub-skills fall back to hardcoded DDL from their SKILL.md references.
 - **DICOM Parsing**: The `dicom-parser` sub-skill contains a comprehensive 18-table DICOM data model and a pydicom-based parser script. Use it as the foundation before ingestion or analytics.
 - **Data Engineering**: Dynamic Tables for incremental refresh, Streams/Tasks for event-driven pipelines
 - **AI/ML**: Cortex AI functions (COMPLETE, EXTRACT, SENTIMENT), Cortex Search for imaging metadata, ML Registry for models
