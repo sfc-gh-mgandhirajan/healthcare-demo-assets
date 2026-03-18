@@ -483,6 +483,244 @@ def build_pdf():
     pdf.sub_bullet("survival-analysis: serves both Pharma and Provider")
     pdf.sub_bullet("clinical-nlp: serves both Provider and Pharma")
 
+    # Design Decisions Summary
+    pdf.add_page()
+    pdf.section_title("Design Decisions")
+    pdf.body_text(
+        "Six key design decisions were evaluated and resolved to guide the "
+        "framework's implementation. Each decision was analyzed through the lens "
+        "of the two-repo/two-profile lifecycle."
+    )
+
+    w_dd = [60, 125]
+    pdf.table_header(["Decision", "Resolution"], w_dd)
+    dd_rows = [
+        ["1. Skill Taxonomy\n& Naming", "5-level hierarchy (Industry > Sub-Industry > Business Function >\nUse Case Skill > Sub-Skill). Incubator uses deep nesting;\nSFS repo uses flat hcls-{sub}-{func}-{skill} convention."],
+        ["2. Orchestrator\n/ Router", "Twin orchestrators in twin profiles, generated from a single\nJinja2 template. Routing logic/taxonomy/guardrails identical;\nonly skill refs and profile metadata differ."],
+        ["3. CKE\nPackaging", "Standalone SFS skills with prerequisite checker. Preflight\ndetects Marketplace listing, guides setup if missing,\ngraceful fallback if skipped."],
+        ["4. Data Model\nKnowledge", "Same pattern as CKEs: preflight checker + setup scripts +\ngraceful fallback. Reusable for any skill needing\nSnowflake objects (OMOP vocab, FAERS ref data, etc.)."],
+        ["5. Profile\nVersioning", "Production: semver (v1.0.0) on SFS repo, immutable releases.\nIncubator: milestone tags (m{n}-{scope}), lightweight,\ndeletable, for demo stability."],
+        ["6. Contribution\nFlow", "Hybrid: field can file issues OR submit PRs on incubator.\nTiger Team triages. Only Tiger Team submits PRs to SFS repo."],
+    ]
+    for i, row in enumerate(dd_rows):
+        pdf.table_row(row, w_dd, fill=(i % 2 == 0))
+
+    # Twin Orchestrator Architecture
+    pdf.add_page()
+    pdf.section_title("Twin Orchestrator Architecture")
+    pdf.body_text(
+        "Both profiles have their own orchestrator .md file generated from a single "
+        "Jinja2 template plus a shared YAML skills registry. This eliminates drift "
+        "risk while allowing each profile to reference different skill sets."
+    )
+    pdf.ln(2)
+    pdf.subsection_title("Template Pipeline")
+    pdf.set_font("Courier", "", 9)
+    pdf.set_text_color(40, 40, 40)
+    tmpl_flow = [
+        "  templates/skills_registry.yaml    (single source of truth)",
+        "  templates/orchestrator.md.j2       (shared Jinja2 template)",
+        "       |",
+        "       +--[profile=incubator]-->  agents/health-sciences-incubator.md",
+        "       |                          (all skills available)",
+        "       |",
+        "       +--[profile=production]--> agents/health-sciences-solutions.md",
+        "                                  (approved skills only)",
+    ]
+    for line in tmpl_flow:
+        pdf.cell(0, 4.5, line, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(40, 40, 40)
+    pdf.subsection_title("What Differs")
+    w_td = [62, 62, 62]
+    pdf.table_header(["Section", "Incubator", "Production"], w_td)
+    td_rows = [
+        ["Profile name", "health-sciences-\nincubator", "health-sciences-\nsolutions"],
+        ["Introduction", "Experimental,\nvalidate outputs", "Approved, tested,\nproduction-grade"],
+        ["Skill availability", "ALL skills\n(approved + draft)", "Only approved=true\nskills"],
+        ["Routing logic", "IDENTICAL", "IDENTICAL"],
+        ["Taxonomy tree", "IDENTICAL", "IDENTICAL"],
+        ["Guardrails", "IDENTICAL", "IDENTICAL"],
+        ["Patterns", "ALL patterns", "Only patterns where\nall skills approved"],
+    ]
+    for i, row in enumerate(td_rows):
+        pdf.table_row(row, w_td, fill=(i % 2 == 0))
+
+    pdf.ln(4)
+    pdf.subsection_title("Drift Prevention")
+    pdf.bullet("Generate command: python scripts/generate_orchestrators.py --profile both")
+    pdf.bullet("Built-in drift check compares structural sections between outputs")
+    pdf.bullet("QA validator (scripts/qa_validate_orchestrator.py) cross-references against filesystem")
+    pdf.bullet("Rule: NEVER hand-edit agents/*.md directly - always edit template + registry, then regenerate")
+
+    # Preflight Checker Pattern
+    pdf.add_page()
+    pdf.section_title("Preflight Checker Pattern")
+    pdf.body_text(
+        "A reusable infrastructure pattern for skills that depend on external "
+        "Snowflake objects (Marketplace listings, Cortex Search services, tables). "
+        "Applies to CKEs, Data Model Knowledge, and any future dependency."
+    )
+    pdf.ln(2)
+    pdf.set_font("Courier", "", 9.5)
+    pdf.set_text_color(40, 40, 40)
+    pf_flow = [
+        "  Skill needs external dependency?",
+        "    --> Preflight check (detect if exists)",
+        "    --> Setup scripts (self-service provisioning)",
+        "    --> Graceful fallback (skill works without, better with)",
+    ]
+    for line in pf_flow:
+        pdf.cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(40, 40, 40)
+    pdf.subsection_title("Current Dependencies Using This Pattern")
+    w_pf = [45, 45, 50, 45]
+    pdf.table_header(["Dependency", "Type", "Preflight Check", "Fallback"], w_pf)
+    pf_rows = [
+        ["CKE PubMed", "Marketplace\nlisting", "Probe shared\nCortex Search svc", "No literature\nenrichment"],
+        ["CKE Clinical\nTrials", "Marketplace\nlisting", "Probe shared\nCortex Search svc", "No trial\nbenchmarking"],
+        ["DICOM Data\nModel Knowledge", "Table +\nCortex Search", "Probe table &\nsearch service", "Hardcoded schema\ndefinitions"],
+    ]
+    for i, row in enumerate(pf_rows):
+        pdf.table_row(row, w_pf, fill=(i % 2 == 0))
+
+    pdf.ln(4)
+    pdf.subsection_title("Implementation")
+    pdf.bullet("Module: shared/preflight/checker.py - reusable PreflightChecker class")
+    pdf.bullet("Configs: shared/preflight/configs.py - pre-built checkers for each dependency")
+    pdf.bullet("Report: prints READY/MISSING/ERROR status with setup instructions")
+    pdf.bullet("API: checker.add_table(), checker.add_cortex_search(), checker.add_marketplace_listing()")
+
+    # Milestone Tagging
+    pdf.add_page()
+    pdf.section_title("Incubator Milestone Tagging")
+    pdf.body_text(
+        "Lightweight git tags on the incubator repo that mark a known-good state "
+        "for a specific use case or demo, without the overhead of formal semantic versioning."
+    )
+    pdf.ln(2)
+    pdf.subsection_title("Naming Convention")
+    pdf.set_font("Courier", "B", 11)
+    pdf.set_text_color(0, 100, 180)
+    pdf.cell(0, 7, "  m{sequence}-{scope}-{optional-context}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(40, 40, 40)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.subsection_title("Example Milestones")
+    w_ms = [55, 130]
+    pdf.table_header(["Tag", "Meaning"], w_ms)
+    ms_rows = [
+        ["m1-imaging", "First stable milestone: imaging skills working end-to-end"],
+        ["m2-imaging-genomics", "Added genomics skills on top of m1"],
+        ["m3-rwe-demo", "Stable point for a specific RWE customer demo"],
+        ["m4-full-17skills", "All 17 skills reorganized and QA-validated"],
+        ["m5-pre-sfs-batch1", "Snapshot before first batch submitted to SFS"],
+    ]
+    for i, row in enumerate(ms_rows):
+        pdf.table_row(row, w_ms, fill=(i % 2 == 0))
+
+    pdf.ln(4)
+    pdf.subsection_title("When to Create a Milestone")
+    pdf.bullet("Domain skills pass QA validation for a demo")
+    pdf.bullet("Before submitting a batch to SFS repo")
+    pdf.bullet("Customer-specific engagement needing a frozen state")
+    pdf.bullet("After a major reorganization or refactor")
+
+    pdf.ln(2)
+    pdf.subsection_title("How Field Teams Use Milestones")
+    pdf.set_font("Courier", "", 9.5)
+    pdf.set_text_color(40, 40, 40)
+    ms_usage = [
+        "  # Stable demo experience",
+        "  cortex profile add health-sciences-incubator --ref m4-full-17skills",
+        "",
+        "  # Bleeding edge (latest main)",
+        "  cortex profile add health-sciences-incubator",
+    ]
+    for line in ms_usage:
+        pdf.cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(40, 40, 40)
+    pdf.subsection_title("Key Properties")
+    pdf.bullet("Zero overhead: git tag m4-full-17skills && git push --tags")
+    pdf.bullet("Self-documenting: tag name describes the scope")
+    pdf.bullet("Not semver: no compatibility promises, just 'this worked when tagged'")
+    pdf.bullet("Deletable: git tag -d m3-bad && git push --delete origin m3-bad")
+    pdf.bullet("Incubator only: production uses proper semver (v1.0.0) on SFS repo")
+
+    pdf.ln(4)
+    pdf.subsection_title("Milestones vs Production Versions")
+    w_mv = [50, 68, 68]
+    pdf.table_header(["", "Incubator Milestones", "Production Versions"], w_mv)
+    mv_rows = [
+        ["Format", "m{n}-{scope}", "v{major}.{minor}.{patch}"],
+        ["Promise", "This worked for\n{scope}", "Approved, tested,\nsupported"],
+        ["Who creates", "Any contributor", "Tiger Team only"],
+        ["Repo", "Incubator", "SFS skills repo"],
+        ["Ceremony", "git tag + push", "SFS PR + review +\nskill_evidence.yaml"],
+        ["Deletable", "Yes", "No (immutable)"],
+    ]
+    for i, row in enumerate(mv_rows):
+        pdf.table_row(row, w_mv, fill=(i % 2 == 0))
+
+    # Contribution Flow
+    pdf.add_page()
+    pdf.section_title("Contribution Flow")
+    pdf.body_text(
+        "Field teams can contribute improvements through two paths on the incubator repo. "
+        "Tiger Team triages all contributions and drives promotion to SFS."
+    )
+    pdf.ln(2)
+    pdf.subsection_title("Path A: Issue-Based (Low Barrier)")
+    pdf.bullet("Field team member files an issue on the incubator repo")
+    pdf.bullet("Describes the bug, enhancement, or new skill idea")
+    pdf.bullet("Contributor (or Tiger Team) picks up and implements")
+    pdf.bullet("Tiger Team reviews and promotes when ready")
+    pdf.ln(2)
+    pdf.subsection_title("Path B: PR-Based (Direct Contribution)")
+    pdf.bullet("Field team member forks the incubator repo")
+    pdf.bullet("Implements the change in their fork")
+    pdf.bullet("Submits PR to incubator repo (lightweight review)")
+    pdf.bullet("Tiger Team merges to incubator, later promotes to SFS")
+    pdf.ln(2)
+    pdf.set_font("Courier", "", 9)
+    pdf.set_text_color(40, 40, 40)
+    contrib_flow = [
+        "  Field Team",
+        "    |",
+        "    +--[issue]--> Incubator Repo (issue tracker)",
+        "    |                  |",
+        "    +--[fork+PR]---> Incubator Repo (PR merge)",
+        "                      |",
+        "                      v",
+        "               Tiger Team Triage",
+        "                      |",
+        "                      v",
+        "               SFS Skills Repo (Tiger Team PR only)",
+        "                      |",
+        "                      v",
+        "               Production Profile",
+    ]
+    for line in contrib_flow:
+        pdf.cell(0, 4.5, line, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(40, 40, 40)
+    pdf.subsection_title("Rules")
+    pdf.bullet("Incubator repo: open to all field teams (issues + PRs)")
+    pdf.bullet("SFS skills repo: Tiger Team only (formal PR with CI gates)")
+    pdf.bullet("No direct contributions to SFS repo from field teams")
+    pdf.bullet("Tiger Team triages all contributions before promotion")
+
     # Accountability Matrix
     pdf.add_page()
     pdf.section_title("Accountability Matrix")
