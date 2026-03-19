@@ -23,41 +23,112 @@ Each **skill** is a set of instructions (Markdown + optional scripts) that teach
 
 ## Quick Start
 
-### 1. Clone and register
+### Step 1: Clone the repository
 
 ```bash
 git clone https://github.com/sfc-gh-jrag/coco-healthcare-skills.git
+cd coco-healthcare-skills
 ```
 
-Add to your Cortex Code `skills.json`:
+### Step 2: Register skills
+
+Open your Cortex Code skills configuration file:
+
+```
+~/.snowflake/cortex/skills.json
+```
+
+Add the healthcare skills as a `local` entry. Replace `<ABSOLUTE_PATH_TO_REPO>` with the full path to your cloned repo (e.g., `/Users/yourname/coco-healthcare-skills`):
 
 ```json
 {
-  "remote": [
+  "local": [
     {
-      "url": "https://github.com/sfc-gh-jrag/coco-healthcare-skills",
-      "skills_path": "skills"
+      "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
+      "skills": [
+        { "name": "hcls-provider-imaging", "relative_path": "hcls-provider-imaging" },
+        { "name": "hcls-provider-imaging-dicom-parser", "relative_path": "hcls-provider-imaging-dicom-parser" },
+        { "name": "hcls-provider-cdata-fhir", "relative_path": "hcls-provider-cdata-fhir" },
+        { "name": "hcls-provider-cdata-clinical-nlp", "relative_path": "hcls-provider-cdata-clinical-nlp" },
+        { "name": "hcls-provider-cdata-omop", "relative_path": "hcls-provider-cdata-omop" },
+        { "name": "hcls-provider-cdata-clinical-docs", "relative_path": "hcls-provider-cdata-clinical-docs" },
+        { "name": "hcls-provider-claims-data-analysis", "relative_path": "hcls-provider-claims-data-analysis" },
+        { "name": "hcls-pharma-dsafety-pharmacovigilance", "relative_path": "hcls-pharma-dsafety-pharmacovigilance" },
+        { "name": "hcls-pharma-dsafety-clinical-trial-protocol", "relative_path": "hcls-pharma-dsafety-clinical-trial-protocol" },
+        { "name": "hcls-pharma-genomics-nextflow", "relative_path": "hcls-pharma-genomics-nextflow" },
+        { "name": "hcls-pharma-genomics-variant-annotation", "relative_path": "hcls-pharma-genomics-variant-annotation" },
+        { "name": "hcls-pharma-genomics-single-cell-qc", "relative_path": "hcls-pharma-genomics-single-cell-qc" },
+        { "name": "hcls-pharma-genomics-scvi-tools", "relative_path": "hcls-pharma-genomics-scvi-tools" },
+        { "name": "hcls-pharma-genomics-survival-analysis", "relative_path": "hcls-pharma-genomics-survival-analysis" },
+        { "name": "hcls-pharma-lab-allotrope", "relative_path": "hcls-pharma-lab-allotrope" },
+        { "name": "hcls-cross-research-problem-selection", "relative_path": "hcls-cross-research-problem-selection" },
+        { "name": "hcls-cross-cke-pubmed", "relative_path": "hcls-cross-cke-pubmed" },
+        { "name": "hcls-cross-cke-clinical-trials", "relative_path": "hcls-cross-cke-clinical-trials" }
+      ],
+      "added_at": "2026-03-19T00:00:00.000Z"
     }
   ]
 }
 ```
 
-### 2. Or copy individual skills locally
+> **Note**: If your `skills.json` already has entries (e.g., `remote`, `marketplace`, `stage`), merge the `local` array into the existing file — don't overwrite it. See `skills.json.template` for a clean starting point.
 
-```bash
-cp -r coco-healthcare-skills/skills/hcls-provider-cdata-clinical-docs ~/.cortex/skills/
-cp -r coco-healthcare-skills/skills/hcls-provider-imaging ~/.cortex/skills/
+### Step 3: Create the agent profile
+
+Create the incubator profile JSON at:
+
+```
+~/.snowflake/cortex/profiles/health-sciences-incubator.json
 ```
 
-### 3. Start using
+```json
+{
+  "name": "health-sciences-incubator",
+  "description": "Health Sciences incubator profile for experimental skill development on Snowflake. Orchestrates skills across medical imaging, clinical data, drug safety, claims/RWE, genomics, and lab data.",
+  "ownerTeam": "HCLS",
+  "version": "1",
+  "skillRepos": [
+    {
+      "source": "github:sfc-gh-jrag/coco-healthcare-skills",
+      "ref": "main",
+      "skills_path": "skills"
+    }
+  ],
+  "mcpServers": {},
+  "commandRepos": [],
+  "scripts": [],
+  "hooks": null,
+  "plugins": [],
+  "envVars": {},
+  "settingsOverrides": {},
+  "systemPromptPath": "<ABSOLUTE_PATH_TO_REPO>/agents/health-sciences-incubator.md",
+  "localModified": true
+}
+```
 
-Tell Cortex Code what you want to do. The agent profiles route your request to the right skill:
+Replace `<ABSOLUTE_PATH_TO_REPO>` with the full path to your cloned repo.
+
+### Step 4: Activate the profile
+
+In Cortex Code (CLI or Snowwork), run:
+
+```
+/agents
+```
+
+Select **health-sciences-incubator** from the list. This loads the orchestrator system prompt and makes all 18 skills available for routing.
+
+### Step 5: Start using
+
+Tell Cortex Code what you want to do. The orchestrator routes your request to the right skill:
 
 ```
 "Extract data from my clinical documents on stage"
 "Parse DICOM metadata and build a radiology data model"
 "Transform my FHIR bundles into relational tables"
 "Annotate my VCF file with ClinVar pathogenicity"
+"Detect safety signals for a drug in FAERS data"
+"Run a survival analysis on my patient cohort"
 ```
 
 ## Repository Structure
@@ -330,7 +401,7 @@ Health Sciences
 
 ## Agent Profiles
 
-Two orchestrator profiles in `agents/` control which skills are available:
+Two orchestrator profiles in `agents/` control which skills are available and how requests are routed:
 
 | Profile | File | Purpose |
 |---------|------|---------|
@@ -338,6 +409,22 @@ Two orchestrator profiles in `agents/` control which skills are available:
 | **Production** | `health-sciences-solutions.md` | Production-grade skills only — skills graduate here after validation |
 
 Profiles include routing rules (by sub-industry and task type), cross-domain composition patterns, CKE integration guidance, and HIPAA guardrails.
+
+### How Profiles Work
+
+Each profile is a Markdown file with YAML frontmatter (`name`, `description`, `tools`) that serves as a system prompt for Cortex Code. When you activate a profile via `/agents`, Cortex Code loads the system prompt and uses the routing rules inside it to direct your requests to the appropriate skill.
+
+### Configuration Files
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `skills.json` | `~/.snowflake/cortex/skills.json` | Registers skill paths so Cortex Code can discover them |
+| Profile JSON | `~/.snowflake/cortex/profiles/<profile-name>.json` | Defines the profile metadata, skill repos, and system prompt path |
+| Agent Markdown | `agents/<profile-name>.md` (in this repo) | The actual system prompt with routing rules and skill taxonomy |
+
+### Switching Between Profiles
+
+Use `/agents` in Cortex Code to list and switch between registered profiles. Only one profile is active at a time.
 
 ## Cross-Domain Composition Patterns
 
