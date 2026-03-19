@@ -10,25 +10,25 @@ These skills are adapted from [Anthropic's life-sciences repository](https://git
 
 | Skill | Description | Use When |
 |-------|-------------|----------|
-| [single-cell-rna-qc](skills/single-cell-rna-qc/) | Quality control for single-cell RNA-seq data | QC analysis, filtering low-quality cells, scanpy/scverse workflows |
-| [clinical-trial-protocol](skills/clinical-trial-protocol-skill/) | Generate clinical trial protocols for devices/drugs | Creating FDA submission docs, IDE/IND pathways |
-| [scvi-tools](skills/scvi-tools/) | Deep learning for single-cell omics | Batch correction, multi-modal analysis, label transfer |
-| [nextflow-development](skills/nextflow-development/) | Run nf-core bioinformatics pipelines | RNA-seq, variant calling, ATAC-seq analysis |
-| [instrument-data-to-allotrope](skills/instrument-data-to-allotrope/) | Convert instrument data to ASM format | Standardizing lab data for LIMS, data lakes |
-| [scientific-problem-selection](skills/scientific-problem-selection/) | Research problem selection framework | Project ideation, troubleshooting, strategic decisions |
+| [single-cell-rna-qc](skills/hcls-pharma-genomics-single-cell-qc/) | Quality control for single-cell RNA-seq data | QC analysis, filtering low-quality cells, scanpy/scverse workflows |
+| [clinical-trial-protocol](skills/hcls-pharma-dsafety-clinical-trial-protocol/) | Generate clinical trial protocols for devices/drugs | Creating FDA submission docs, IDE/IND pathways |
+| [scvi-tools](skills/hcls-pharma-genomics-scvi-tools/) | Deep learning for single-cell omics | Batch correction, multi-modal analysis, label transfer |
+| [nextflow-development](skills/hcls-pharma-genomics-nextflow/) | Run nf-core bioinformatics pipelines | RNA-seq, variant calling, ATAC-seq analysis |
+| [instrument-data-to-allotrope](skills/hcls-pharma-lab-allotrope/) | Convert instrument data to ASM format | Standardizing lab data for LIMS, data lakes |
+| [scientific-problem-selection](skills/hcls-cross-research-problem-selection/) | Research problem selection framework | Project ideation, troubleshooting, strategic decisions |
 
 ### Snowflake Healthcare Skills
 
 | Skill | Description | Use When |
 |-------|-------------|----------|
-| [fhir-data-transformation](skills/fhir-data-transformation/) | Transform FHIR R4 to Snowflake tables | Parsing FHIR bundles, healthcare interoperability |
-| [omop-cdm-modeling](skills/omop-cdm-modeling/) | OMOP Common Data Model ETL | Observational research, OHDSI analytics |
-| [variant-annotation](skills/variant-annotation/) | Annotate genomic variants | ClinVar, gnomAD, clinical variant interpretation |
-| [survival-analysis](skills/survival-analysis/) | Kaplan-Meier & Cox regression | Clinical outcomes, time-to-event analysis |
-| [pharmacovigilance](skills/pharmacovigilance/) | FDA FAERS adverse event analysis | Drug safety signals, ADR detection |
-| [claims-data-analysis](skills/claims-data-analysis/) | Healthcare claims RWE | Utilization, treatment patterns, PMPM costs |
-| [clinical-nlp](skills/clinical-nlp/) | Extract entities from clinical text | NER on notes, medication extraction, ICD coding |
-| [dicom-parser](skills/dicom-parser/) | Parse DICOM medical image metadata | DICOM tags, radiology metadata, imaging analytics |
+| [fhir-data-transformation](skills/hcls-provider-cdata-fhir/) | Transform FHIR R4 to Snowflake tables | Parsing FHIR bundles, healthcare interoperability |
+| [omop-cdm-modeling](skills/hcls-provider-cdata-omop/) | OMOP Common Data Model ETL | Observational research, OHDSI analytics |
+| [variant-annotation](skills/hcls-pharma-genomics-variant-annotation/) | Annotate genomic variants | ClinVar, gnomAD, clinical variant interpretation |
+| [survival-analysis](skills/hcls-pharma-genomics-survival-analysis/) | Kaplan-Meier & Cox regression | Clinical outcomes, time-to-event analysis |
+| [pharmacovigilance](skills/hcls-pharma-dsafety-pharmacovigilance/) | FDA FAERS adverse event analysis | Drug safety signals, ADR detection |
+| [claims-data-analysis](skills/hcls-provider-claims-data-analysis/) | Healthcare claims RWE | Utilization, treatment patterns, PMPM costs |
+| [clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Extract entities from clinical text | NER on notes, medication extraction, ICD coding |
+| [dicom-parser](skills/hcls-provider-imaging-dicom-parser/) | Parse DICOM medical image metadata | DICOM tags, radiology metadata, imaging analytics |
 
 ## Installation
 
@@ -36,12 +36,12 @@ Copy the skill folder to your `.cortex/skills/` directory:
 
 ```bash
 # Clone the repo
-git clone https://github.com/sfc-gh-beddy/coco-healthcare-skills.git
+git clone https://github.com/sfc-gh-jrag/coco-healthcare-skills.git
 
 # Copy skills you want
-cp -r coco-healthcare-skills/skills/single-cell-rna-qc ~/.cortex/skills/
-cp -r coco-healthcare-skills/skills/fhir-data-transformation ~/.cortex/skills/
-cp -r coco-healthcare-skills/skills/pharmacovigilance ~/.cortex/skills/
+cp -r coco-healthcare-skills/skills/hcls-pharma-genomics-single-cell-qc ~/.cortex/skills/
+cp -r coco-healthcare-skills/skills/hcls-provider-cdata-fhir ~/.cortex/skills/
+cp -r coco-healthcare-skills/skills/hcls-pharma-dsafety-pharmacovigilance ~/.cortex/skills/
 ```
 
 Or download individual skill folders directly from GitHub.
