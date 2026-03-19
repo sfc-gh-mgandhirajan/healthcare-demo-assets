@@ -147,14 +147,110 @@ After the final phase completes, use `ask_user_question`:
 
 ---
 
-## Schema Context Injection (Optional)
+## Setup
 
-For **EXTRACT**, **SEARCH**, and **AGENT** intents, optionally query the data model search service:
+1. **Load** `references/architecture.md` for pipeline architecture context
+2. **Load** `references/document_type_specs.yaml` for doc type definitions (authoritative spec layer)
+3. **Verify** Snowflake connection is active and target database/schema exist
+4. **Run Preflight Check** for Data Model Knowledge (see below)
+
+## Preflight Check (REQUIRED — Run at Skill Load)
+
+Before routing to any sub-skill, verify the Clinical Docs Data Model Knowledge repository is available:
+
 ```sql
 SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
     '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_MODEL_SEARCH_SVC',
-    '{"query": "{relevant_context}", "columns": ["table_name", "column_name", "data_type", "description", "contains_phi"]}'
+    '{"query": "test", "columns": ["SEARCH_TEXT"], "limit": 1}'
 );
+```
+
+| Result | Status | Behavior |
+|--------|--------|----------|
+| Returns results | READY | Step 0 (Data Model Knowledge pre-step) will use dynamic search results |
+| Error / does not exist | MISSING | Step 0 skipped — sub-skills fall back to `references/document_type_specs.yaml` and hardcoded schema definitions. Inform user: "Clinical docs data model search service not available — using local spec definitions" |
+
+This preflight runs ONCE at router load. The result determines whether Step 0 below executes or is skipped.
+
+## Data Model Knowledge — Automatic Pre-Step (Conditional on Preflight)
+
+**CRITICAL:** For intents EXTRACT, SEARCH, and AGENT, **execute Step 0 if preflight status is READY**. If preflight status is MISSING, skip Step 0 and let sub-skills use `references/document_type_specs.yaml`.
+
+### Step 0: Query Data Model Knowledge (automatic for EXTRACT, SEARCH, AGENT)
+
+Before generating any DDL, building pipelines, creating search services, or configuring agents:
+
+1. **Query the clinical docs model search service** for relevant tables/columns:
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_MODEL_SEARCH_SVC',
+    '{"query": "<context from user request>", "columns": ["table_name", "column_name", "data_type", "description", "contains_phi", "relationships"]}'
+);
+```
+
+2. **Optionally query the spec search service** for doc type definitions:
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_SPECS_SEARCH_SVC',
+    '{"query": "<doc type from user request>", "columns": ["doc_type", "field_name", "extraction_question", "data_type", "contains_phi"]}'
+);
+```
+
+3. **Use the search results** — not hardcoded definitions — as the source of truth for:
+   - Table names and column definitions (EXTRACT)
+   - Searchable columns and content structure (SEARCH)
+   - Semantic View column awareness (AGENT)
+   - PHI column identification (all)
+
+4. **Pass results to the sub-skill** as grounding context.
+
+| Intent | Step 0 Query Focus | What Gets Grounded |
+|--------|-------------------|--------------------|
+| EXTRACT | Config tables + extraction fields per doc type | Pipeline config, classification prompts, extraction schemas |
+| SEARCH | RAW_CONTENT columns + doc classification types | Cortex Search Service column selection |
+| AGENT | Pivot view columns + relationships + metrics | Semantic View dimensions, Cortex Agent tool config |
+| GOVERNANCE | PHI-flagged columns across all tables | Masking policy targets |
+
+## Workflow
+
+```
+Start
+  |
+  v
+Run Preflight Check (CLINICAL_DOCS_MODEL_SEARCH_SVC)
+  |
+  v
+Step 1: Verify Connection (GATE 1 + GATE 2)
+  |
+  v
+Detect Intent (GATE 3)
+  |
+  v
+Is intent EXTRACT, SEARCH, or AGENT?
+  |                              |
+  YES                            NO
+  |                              |
+  v                              v
+  Preflight READY?               Skip Step 0
+  |          |                   (VIEWER, MODEL_KNOWLEDGE)
+  YES        NO                  |
+  |          |                   |
+  v          v                   |
+  Step 0:    Skip Step 0         |
+  Query      (use specs YAML     |
+  CKE        + hardcoded defs)   |
+  services                       |
+  |          |                   |
+  v          v                   v
+  +---> EXTRACT --> clinical-document-extraction (grounded by CKE OR specs)
+  |
+  +---> SEARCH ---> clinical-docs-search (grounded by CKE OR specs)
+  |
+  +---> AGENT ----> clinical-docs-agent (grounded by CKE OR specs)
+  |
+  +---> VIEWER ---> clinical-docs-viewer
+  |
+  +---> MODEL_KNOWLEDGE -> data-model-knowledge (direct CKE queries)
 ```
 
 ## Sub-skills
@@ -174,6 +270,8 @@ SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
 | `references/architecture.md` | End-to-end architecture and data flow |
 | `references/cortex_ai_functions.md` | Cortex AI function reference |
 | `references/supported_document_types.md` | Supported types and format constraints |
+| `references/document_type_specs.yaml` | Authoritative doc type definitions (CKE spec layer) |
+| `references/metadata_as_cke.md` | CKE-driven metadata pattern and comparison with DICOM |
 
 ## Cross-Cutting Concerns
 

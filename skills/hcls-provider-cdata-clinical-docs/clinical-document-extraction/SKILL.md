@@ -25,6 +25,26 @@ This industry skill **delegates** to the bundled `document-intelligence` platfor
 
 ## Execution Flow
 
+### Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The clinical-docs router automatically runs this step before loading this skill. The search results from `CLINICAL_DOCS_MODEL_SEARCH_SVC` and `CLINICAL_DOCS_SPECS_SEARCH_SVC` provide the current schema and doc type specs.
+
+**Query extraction config and doc type definitions:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_SPECS_SEARCH_SVC',
+    '{"query": "extraction fields for all document types", "columns": ["doc_type", "field_name", "extraction_question", "data_type", "contains_phi", "view_name"]}'
+);
+```
+
+**Use the results to:**
+- Validate configured doc types against the spec CKE (Gate E4-E5)
+- Ground extraction prompts in the latest spec definitions
+- Build config table INSERTs from spec CKE instead of hardcoded values
+- Inform the OTHER onboarding loop (Gate E9) with similar doc type templates
+
+**If search service is unavailable**, fall back to `references/document_type_specs.yaml` on disk.
+
 ### Pre-Conditions (Tier 1 Gates — must complete before any pipeline execution)
 
 Each gate is a **separate skill load**. Gates complete sequentially and return confirmed parameters to the orchestrator.
@@ -54,6 +74,9 @@ Each phase is a **separate skill load**. The router MUST present phase results t
 ## Key Cortex AI Patterns
 
 ### Config-Driven Extraction (responseFormat from config table)
+
+The `CLINICAL_DOCS_EXTRACTION_CONFIG` table is the runtime config, derived from the authoritative spec layer at `references/document_type_specs.yaml`. The YAML spec defines doc types, fields, prompts, and PHI flags; the config table is seeded from it.
+
 ```sql
 SNOWFLAKE.CORTEX.AI_EXTRACT(
     file => TO_FILE(stage, path),
@@ -119,6 +142,8 @@ Split large DDL batches into 3-4 statements maximum.
 | Extraction workflow | `document-intelligence/references/extraction.md` | Test-before-batch |
 | Parsing workflow | `document-intelligence/references/parsing.md` | Mode selection |
 | Pipeline templates | `document-intelligence/references/pipeline.md` | Stream + Task patterns |
+| Doc type specs | `references/document_type_specs.yaml` | Authoritative field definitions (CKE spec layer) |
+| CKE metadata pattern | `references/metadata_as_cke.md` | How specs feed config dynamically |
 
 ## Prerequisites
 

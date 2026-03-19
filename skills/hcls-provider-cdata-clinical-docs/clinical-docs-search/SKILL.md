@@ -25,6 +25,26 @@ Creates a Cortex Search Service over the `CLINICAL_DOCUMENTS_RAW_CONTENT` table 
 - Pipeline must have processed documents (RAW_CONTENT table populated)
 - Run the extraction pipeline first via `clinical-document-extraction` sub-skill
 
+## Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The clinical-docs router automatically runs this step before loading this skill. The search results from `CLINICAL_DOCS_MODEL_SEARCH_SVC` provide the current schema context.
+
+**Query searchable columns and content structure:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_MODEL_SEARCH_SVC',
+    '{"query": "RAW_CONTENT searchable columns page content classification patient", "columns": ["table_name", "column_name", "data_type", "description", "contains_phi"]}'
+);
+```
+
+**Use the results to:**
+- Determine which columns to include in the Cortex Search Service `ATTRIBUTES` clause
+- Identify PHI-containing columns that need search filtering awareness
+- Validate `DOCUMENT_CLASSIFICATION` values match configured doc types
+- Ground search filter examples in actual column names
+
+**If search service is unavailable**, fall back to the hardcoded column list below (Step 1).
+
 ## Step 1: Create Cortex Search Service
 
 ### 🛑 MANDATORY STOP — GATE S1: Search Service Configuration

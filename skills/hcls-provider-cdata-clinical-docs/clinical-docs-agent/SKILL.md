@@ -28,6 +28,34 @@ Creates a Cortex Agent that provides a unified natural language interface combin
 - Extraction pipeline completed (tables populated)
 - Cortex Search Service created (`clinical-docs-search` sub-skill)
 
+## Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+
+The clinical-docs router automatically runs this step before loading this skill. The search results from `CLINICAL_DOCS_MODEL_SEARCH_SVC` and `CLINICAL_DOCS_SPECS_SEARCH_SVC` provide the current schema and doc type context.
+
+**Query pivot view columns and relationships for Semantic View grounding:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_MODEL_SEARCH_SVC',
+    '{"query": "pivot view columns dimensions metrics patient MRN diagnosis", "columns": ["table_name", "column_name", "data_type", "description", "contains_phi", "relationships"]}'
+);
+```
+
+**Query doc type specs for agent orchestration instruction:**
+```sql
+SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+    '{db}.DATA_MODEL_KNOWLEDGE.CLINICAL_DOCS_SPECS_SEARCH_SVC',
+    '{"query": "all configured document types", "columns": ["doc_type", "field_name", "extraction_question"]}'
+);
+```
+
+**Use the results to:**
+- Ground Semantic View DIMENSIONS and METRICS in actual column names from model CKE
+- Build the agent orchestration instruction with accurate doc type coverage from spec CKE
+- Identify PHI columns that need masking awareness in agent responses
+- Validate that referenced views and search services exist
+
+**If search service is unavailable**, fall back to `references/document_type_specs.yaml` on disk and the hardcoded Semantic View DDL below.
+
 ## Placeholders
 
 These values are provided by the parent router (`hcls-provider-cdata-clinical-docs`) after user confirmation.

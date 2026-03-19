@@ -10,9 +10,19 @@
 
 ## Adding a New Document Type
 
-### 1. Add extraction config rows
+### Preferred: Edit the Spec File
 
-Insert rows into `CLINICAL_DOCS_EXTRACTION_CONFIG` for the new type. Each row defines one extraction field. Mark identity fields with `IS_IDENTITY_FIELD`:
+The authoritative source for doc type definitions is `references/document_type_specs.yaml`. To add a new type:
+
+1. Add a new entry to `document_type_specs.yaml` following the existing pattern
+2. Seed the config table from the spec (generate INSERT SQL from the YAML fields)
+3. `CALL GENERATE_DYNAMIC_OBJECTS()`
+
+See `references/metadata_as_cke.md` for the full CKE-driven flow.
+
+### Alternative: Direct SQL INSERT
+
+If you prefer to work directly with the config table, insert rows into `CLINICAL_DOCS_EXTRACTION_CONFIG`. Each row defines one extraction field. Mark identity fields with `IS_IDENTITY_FIELD`:
 
 ```sql
 INSERT INTO {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG
@@ -25,7 +35,7 @@ VALUES
     ('EXTRACTION', 'OPERATIVE NOTE', 'SURGEON_NAME', 'Who was the primary surgeon?', 'SURGEON_NAME', 'VARCHAR(200)', 5, 'OPERATIVE_NOTES_V', '');
 ```
 
-### 2. Regenerate all dynamic objects (one command)
+### Regenerate all dynamic objects (one command)
 
 ```sql
 CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS();
@@ -39,9 +49,9 @@ This single call:
 - Recreates the Semantic View including the new pivot view
 - Refreshes the model corpus from INFORMATION_SCHEMA
 
-### 3. Done
+### Done
 
-No manual steps required. The new type is fully wired into:
+No manual steps required. Whether you added via spec file or direct SQL, the new type is fully wired into:
 - **Classification**: AI_EXTRACT will now classify docs as `OPERATIVE NOTE`
 - **Extraction**: Type-specific fields configured
 - **Pivot view**: Structured columnar access via `OPERATIVE_NOTES_V`
@@ -50,6 +60,8 @@ No manual steps required. The new type is fully wired into:
 - **Model knowledge**: Schema awareness via auto-refreshed corpus
 
 ## Candidate Document Types for Future Expansion
+
+Pre-defined candidate specs are included (commented out) in `references/document_type_specs.yaml`. Uncomment and customize when ready.
 
 | Type | Suggested Fields |
 |------|-----------------|
