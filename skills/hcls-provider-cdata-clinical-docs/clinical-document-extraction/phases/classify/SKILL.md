@@ -139,7 +139,7 @@ Use `ask_user_question` to ask: "Would you like to configure extraction for any 
      ```
   3. **Recommend** field config. **Confirm** with user via `ask_user_question`.
   4. INSERT into `CLINICAL_DOCS_EXTRACTION_CONFIG`
-  5. `CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS();`
+  5. `CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}');`
   6. Re-classify previously-OTHER docs:
      ```sql
      DELETE FROM {db}.{schema}.DOC_CLASSIFICATION_METADATA_ROWS

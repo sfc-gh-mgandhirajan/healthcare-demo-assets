@@ -115,8 +115,9 @@ Snowflake's `IDENTIFIER()` does NOT support `||` concatenation in DDL. Use `EXEC
 | `snow sql -c {connection} -q "..."` | Single simple statements. |
 | `snowflake_sql_execute` | Only when default connection matches target. |
 
-### 4. Hardcoded FQN Pattern
-Replace ALL `$V_DB`, `$V_SCHEMA` with actual values before execution via CLI. The CLI treats `$VAR` as shell variables.
+### 4. Parameterized Proc + Hardcoded FQN for DDL
+The `GENERATE_DYNAMIC_OBJECTS()` proc is **fully parameterized** — pass db/schema/warehouse/stage as arguments. No placeholder substitution needed.
+For DDL steps (CREATE TABLE, CREATE STAGE), replace `$V_DB`, `$V_SCHEMA` with actual values before execution via CLI. The CLI treats `$VAR` as shell variables.
 
 ### 5. Timeout Prevention
 Split large DDL batches into 3-4 statements maximum.
@@ -193,21 +194,24 @@ If this returns the wrong account, ask the user for the correct connection name 
 3. Run each numbered STEP section as a separate file
 4. If a section is too large, split at the `-- ===` comment boundaries
 
-### 4. Hardcoded FQN Pattern (Required for CLI Execution)
+### 4. Parameterized Proc + Hardcoded FQN for DDL (Required for CLI Execution)
 
 The setup scripts use session variables (`$V_DB`, `$V_SCHEMA`) which are **incompatible with `snow sql` CLI** because:
 - `snow sql -q` treats `$VAR` as shell variables (empty)
 - `snow sql -f` loses session state between semicolons
 
-**Required approach**: Generate SQL files with hardcoded FQN values:
+**Required approach for DDL Steps 0-5**: Generate SQL files with hardcoded FQN values:
 1. Read the script template
 2. Replace ALL `$V_DB`, `$V_SCHEMA`, `$V_WAREHOUSE` with actual values from user
-3. Replace ALL `v_fqn` references with `{db}.{schema}`
-4. Replace ALL `IDENTIFIER($V_...)` with hardcoded fully-qualified names
-5. Write to a temp file
-6. Execute via `snow sql -c {connection} -f <temp_file>`
+3. Replace ALL `IDENTIFIER($V_...)` with hardcoded fully-qualified names
+4. Write to a temp file
+5. Execute via `snow sql -c {connection} -f <temp_file>`
 
-> **Important**: The `GENERATE_DYNAMIC_OBJECTS()` stored procedure body also uses `v_fqn`. When creating it via CLI, hardcode the FQN inside the proc body as well.
+**Step 6 (GENERATE_DYNAMIC_OBJECTS) is different**: The proc is **fully parameterized**. No FQN substitution in the proc body. Just create it and call:
+```sql
+CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}');
+```
+Cursors inside the proc use the RESULTSET pattern (`EXECUTE IMMEDIATE` → `RESULTSET` → `CURSOR FOR rs`) so they can reference the parameter-derived variables at runtime.
 
 ### 5. Timeout Prevention
 
@@ -222,8 +226,12 @@ These rules prevent the 8 most common runtime errors encountered when building S
 | 1 | **No f-strings with `\n` inside `$$` blocks** | `SyntaxError: unterminated string literal` | Use `chr(10)` + string concatenation instead of f-strings containing `\n` in Python UDFs wrapped in `$$`. |
 | 2 | **No nested `$$` delimiters** | `syntax error: unexpected '$'` | Snowflake does not support `EXECUTE IMMEDIATE $$ ... CREATE PROCEDURE ... AS $$ ... $$ ... $$`. Use `{db}/{schema}` placeholders substituted at creation time instead. |
 | 3 | **`snow sql -f` cannot execute session variables + `$$`** | Empty variable expansion / partial execution | The CLI loses session state at `$$` boundaries and treats `$V_DB` as shell variables. Use `snowflake_sql_execute` tool or Snowsight worksheet instead. |
-| 4 | **DECLARE cursors cannot reference variables** | `syntax error ... unexpected 'v_fqn'` | Cursors declared in the DECLARE block are compiled before BEGIN runs, so they cannot use variables. Use literal `{db}.{schema}` FQN (substituted at creation time) in DECLARE cursor queries. |
+| 4 | **DECLARE cursors cannot reference variables** | `syntax error ... unexpected 'v_fqn'` | Cursors declared in the DECLARE block are compiled before BEGIN runs, so they cannot use variables. **Fix**: Use RESULTSET pattern inside BEGIN: `LET rs RESULTSET := (EXECUTE IMMEDIATE '...' \|\| :var); LET cur CURSOR FOR rs; FOR rec IN cur DO`. |
 | 5 | **INFORMATION_SCHEMA is not visible in-transaction** | Empty result set / missing rows | Views/tables created earlier in the same procedure are not visible in INFORMATION_SCHEMA until the transaction commits. Read from the config table (`CLINICAL_DOCS_EXTRACTION_CONFIG`) instead. |
 | 6 | **Inline FOR cursors don't support field access** | `invalid identifier 'REC.COLUMN_NAME'` | Only named cursors (declared in DECLARE) support `rec.FIELD_NAME` access. Always use named cursors. |
 | 7 | **DELETE before INSERT for config seeding** | Duplicate rows / PIVOT column collision | Always use DELETE + INSERT (idempotent pattern) when seeding config tables. Never INSERT without clearing first. |
 | 8 | **COALESCE requires 2+ arguments** | `COALESCE requires at least two arguments` | When dynamically building COALESCE from a variable-length list, always append `, NULL` to guarantee the minimum. |
+| 9 | **PIVOT column quoting** | `invalid identifier 'MRN'` | Snowflake PIVOT creates columns with literal single quotes in names. To reference them, use double-quoted identifiers containing single quotes: `"'MRN'"`. In dynamic SQL inside `$$`, produce: `'''' \|\| FIELD_NAME \|\| ''''`. |
+| 10 | **TO_FILE does not support FQN stage names** | `invalid argument for function [TO_FILE]` | `TO_FILE(@DB.SCHEMA.STAGE, path)` fails. Set `USE DATABASE/SCHEMA` context first, then use short stage name: `TO_FILE(@STAGE, path)`. |
+| 11 | **AI_EXTRACT unreliable for classification** | All docs classified identically | `AI_EXTRACT` with `responseFormat` may return the same classification for all documents. Use `AI_PARSE_DOCUMENT` + `AI_COMPLETE` (two-step) for classification instead. |
+| 12 | **Use AI_* top-level functions** | `Invalid argument types for function` | Use `AI_COMPLETE`, `AI_PARSE_DOCUMENT(TO_FILE(...))`, `AI_EXTRACT`, `AI_AGG`. Do NOT use deprecated `SNOWFLAKE.CORTEX.COMPLETE` or `SNOWFLAKE.CORTEX.PARSE_DOCUMENT(@stage, path, opts)`. The `SNOWFLAKE.CORTEX.SEARCH_PREVIEW` and `SNOWFLAKE.CORTEX.DATA_AGENT_RUN` are Cortex Search/Agent APIs and remain unchanged. |

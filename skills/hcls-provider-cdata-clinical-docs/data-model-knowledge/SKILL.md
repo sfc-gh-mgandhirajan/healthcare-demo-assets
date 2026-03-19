@@ -158,7 +158,7 @@ WITH model_knowledge AS (
         '{"query": "{TABLE_NAME} columns definitions constraints", "columns": ["table_name", "column_name", "data_type", "constraints", "description"]}'
     ) AS context
 )
-SELECT SNOWFLAKE.CORTEX.COMPLETE(
+SELECT AI_COMPLETE(
     'llama3.1-70b',
     'Generate a Snowflake CREATE TABLE DDL statement from this data model reference. Use the exact column names, data types, and constraints from the reference. Reference: ' || context::STRING
 ) AS generated_ddl

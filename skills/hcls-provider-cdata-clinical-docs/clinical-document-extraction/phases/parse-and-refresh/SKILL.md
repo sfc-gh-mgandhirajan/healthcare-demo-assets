@@ -165,7 +165,7 @@ The Semantic View **cannot be created until pivot views contain data**.
 SELECT COUNT(*) FROM {db}.{schema}.DISCHARGE_SUMMARY_V;
 
 -- Regenerate dynamic objects (creates SV)
-CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS();
+CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}');
 ```
 
 `GENERATE_DYNAMIC_OBJECTS()` wraps SV creation in TRY/CATCH — if pivot views are empty, it logs a warning and skips. Re-run after data is loaded.

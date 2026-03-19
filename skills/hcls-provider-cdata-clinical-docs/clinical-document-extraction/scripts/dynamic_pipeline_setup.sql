@@ -368,13 +368,13 @@ def inject_descriptions(page_content, image_data):
 -- IMPORTANT — EXECUTION CONSTRAINTS:
 --   * This block CANNOT be run via `snow sql -f` (session variables + $$ conflict).
 --   * This block CANNOT use nested $$ (Snowflake does not support it).
---   * The agent MUST create this procedure by executing the CREATE OR REPLACE
---     PROCEDURE statement directly via snowflake_sql_execute, substituting the
---     values of $V_DB, $V_SCHEMA, $V_WAREHOUSE, $V_STAGE into the {db}, {schema},
---     {warehouse}, {stage} placeholders below.
---   * The cursor in DECLARE uses {db}.{schema} literally because DECLARE cursors
---     cannot reference variables (variables are only available after BEGIN).
---   * All cursors MUST be named cursors in DECLARE — inline FOR cursors do NOT
+--   * The proc is FULLY PARAMETERIZED — pass db, schema, warehouse, stage as args:
+--     CALL GENERATE_DYNAMIC_OBJECTS('MY_DB', 'MY_SCHEMA', 'MY_WH', 'MY_STAGE')
+--     No hardcoded {db}/{schema} placeholders to substitute at creation time.
+--   * Cursors use RESULTSET pattern inside BEGIN (EXECUTE IMMEDIATE → RESULTSET
+--     → CURSOR FOR rs → FOR rec IN cur) to avoid the DECLARE cursor limitation
+--     where variables are not yet available at compile time.
+--   * All FOR loops use named cursors from RESULTSETs — inline FOR cursors do NOT
 --     support field access by name (e.g. rec.COLUMN_NAME fails silently).
 --   * COALESCE always appends ', NULL' to handle single-pivot-view deployments.
 --   * Step 7 reads from the config table, NOT INFORMATION_SCHEMA, because views
@@ -392,21 +392,22 @@ def inject_descriptions(page_content, image_data):
 --     Target SQL:   "'MRN'" AS MRN
 --     Inside ':     '''' || FIELD_NAME || ''''   (two levels of '' escaping)
 -- =============================================================================
--- >>> AGENT: Execute this directly. Replace {db}, {schema}, {warehouse}, {stage}
--- >>> with the session variable values before running.
+-- >>> AGENT: Execute this directly via snowflake_sql_execute.
+-- >>> The proc is parameterized — no placeholder substitution needed.
+-- >>> Call: CALL {schema_prefix}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}')
 -- =============================================================================
 
-CREATE OR REPLACE PROCEDURE IDENTIFIER($V_DB || '.' || $V_SCHEMA || '.GENERATE_DYNAMIC_OBJECTS')()
+CREATE OR REPLACE PROCEDURE IDENTIFIER($V_DB || '.' || $V_SCHEMA || '.GENERATE_DYNAMIC_OBJECTS')(P_DB VARCHAR, P_SCHEMA VARCHAR, P_WAREHOUSE VARCHAR, P_STAGE VARCHAR)
 RETURNS VARCHAR
 LANGUAGE SQL
 EXECUTE AS CALLER
 AS
 $$
 DECLARE
-    v_db VARCHAR DEFAULT '{db}';
-    v_schema VARCHAR DEFAULT '{schema}';
-    v_warehouse VARCHAR DEFAULT '{warehouse}';
-    v_stage VARCHAR DEFAULT '{stage}';
+    v_db VARCHAR;
+    v_schema VARCHAR;
+    v_warehouse VARCHAR;
+    v_stage VARCHAR;
     v_fqn VARCHAR;
     v_stage_fqn VARCHAR;
     v_ddl VARCHAR;
@@ -430,43 +431,15 @@ DECLARE
     v_sv_dimensions VARCHAR DEFAULT '';
     v_sv_metrics VARCHAR DEFAULT '';
     v_first_pv VARCHAR DEFAULT '';
-
-    -- Named cursor — uses {db}.{schema} directly because DECLARE cannot reference variables.
-    -- The agent substitutes these at procedure creation time. The proc remains fully dynamic:
-    -- it discovers ALL doc types, fields, and views from whatever is in the config table.
-    pivot_view_cursor CURSOR FOR
-        SELECT DISTINCT VIEW_NAME, DOC_TYPE
-        FROM {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG
-        WHERE CONFIG_TYPE = 'EXTRACTION'
-        AND VIEW_NAME IS NOT NULL AND VIEW_NAME != ''
-        ORDER BY VIEW_NAME;
-
-    -- Named cursor for building DIMENSIONS from config (replaces INFORMATION_SCHEMA join)
-    dim_cursor CURSOR FOR
-        SELECT VIEW_NAME, FIELD_NAME, DOC_TYPE
-        FROM {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG
-        WHERE CONFIG_TYPE = 'EXTRACTION'
-        ORDER BY VIEW_NAME, DISPLAY_ORDER;
-
-    -- Named cursor for pivot view doc path dimensions
-    pv_dim_cursor CURSOR FOR
-        SELECT DISTINCT VIEW_NAME
-        FROM {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG
-        WHERE CONFIG_TYPE = 'EXTRACTION' AND VIEW_NAME IS NOT NULL
-        ORDER BY VIEW_NAME;
-
-    -- Named cursor for config-based model reference refresh (replaces INFORMATION_SCHEMA)
-    model_ref_cursor CURSOR FOR
-        SELECT FIELD_NAME, VIEW_NAME, DOC_TYPE, TARGET_COLUMN, DATA_TYPE, IS_IDENTITY_FIELD,
-            CASE
-                WHEN CONFIG_TYPE = 'CLASSIFICATION' THEN 'Classification'
-                WHEN VIEW_NAME IS NOT NULL AND VIEW_NAME != '' THEN 'Pivot View'
-                ELSE 'Extraction Output'
-            END AS CATEGORY
-        FROM {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG
-        ORDER BY CONFIG_TYPE, DOC_TYPE, DISPLAY_ORDER;
+    v_dup_count NUMBER DEFAULT 0;
+    -- NO cursors in DECLARE — they use RESULTSET pattern in BEGIN
+    -- to avoid the limitation where DECLARE cursors cannot reference variables.
 
 BEGIN
+    v_db := P_DB;
+    v_schema := P_SCHEMA;
+    v_warehouse := P_WAREHOUSE;
+    v_stage := P_STAGE;
     v_fqn := v_db || '.' || v_schema;
     v_stage_fqn := v_db || '.' || v_schema || '.' || v_stage;
 
@@ -475,8 +448,6 @@ BEGIN
     --    Duplicates arise from repeated CSV loads, re-running Step 1 INSERTs,
     --    or partial re-configurations. Clean before seeding downstream tables.
     -- =====================================================================
-    LET v_dup_count NUMBER DEFAULT 0;
-
     EXECUTE IMMEDIATE '
         SELECT COUNT(*) FROM (
             SELECT CONFIG_TYPE, DOC_TYPE, FIELD_NAME
@@ -563,7 +534,10 @@ BEGIN
     -- 3. GENERATE PIVOT VIEWS dynamically for each doc type
     --    Uses IS_IDENTITY_FIELD for configurable identity columns
     -- =====================================================================
-    FOR pivot_rec IN pivot_view_cursor DO
+    LET pivot_rs RESULTSET := (EXECUTE IMMEDIATE
+        'SELECT DISTINCT VIEW_NAME, DOC_TYPE FROM ' || :v_fqn || '.CLINICAL_DOCS_EXTRACTION_CONFIG WHERE CONFIG_TYPE = ''EXTRACTION'' AND VIEW_NAME IS NOT NULL AND VIEW_NAME != '''' ORDER BY VIEW_NAME');
+    LET pivot_cur CURSOR FOR pivot_rs;
+    FOR pivot_rec IN pivot_cur DO
         v_view_name := pivot_rec.VIEW_NAME;
         v_doc_type := pivot_rec.DOC_TYPE;
         v_alias_counter := v_alias_counter + 1;
@@ -730,8 +704,11 @@ BEGIN
     --    because views created earlier in this proc are not yet committed.
     -- =====================================================================
     IF (v_sv_tables != '') THEN
-        -- Build DIMENSIONS from config table (named cursor: dim_cursor)
-        FOR dim_rec IN dim_cursor DO
+        -- Build DIMENSIONS from config table (dynamic RESULTSET cursor)
+        LET dim_rs RESULTSET := (EXECUTE IMMEDIATE
+            'SELECT VIEW_NAME, FIELD_NAME, DOC_TYPE FROM ' || :v_fqn || '.CLINICAL_DOCS_EXTRACTION_CONFIG WHERE CONFIG_TYPE = ''EXTRACTION'' ORDER BY VIEW_NAME, DISPLAY_ORDER');
+        LET dim_cur CURSOR FOR dim_rs;
+        FOR dim_rec IN dim_cur DO
             IF (v_sv_dimensions != '') THEN
                 v_sv_dimensions := v_sv_dimensions || ',';
             END IF;
@@ -742,8 +719,11 @@ BEGIN
                 REPLACE(dim_rec.FIELD_NAME, '_', ' ') || ' field''';
         END FOR;
 
-        -- Add document path dimensions for each pivot view (named cursor: pv_dim_cursor)
-        FOR pv_rec IN pv_dim_cursor DO
+        -- Add document path dimensions for each pivot view (dynamic RESULTSET cursor)
+        LET pv_dim_rs RESULTSET := (EXECUTE IMMEDIATE
+            'SELECT DISTINCT VIEW_NAME FROM ' || :v_fqn || '.CLINICAL_DOCS_EXTRACTION_CONFIG WHERE CONFIG_TYPE = ''EXTRACTION'' AND VIEW_NAME IS NOT NULL ORDER BY VIEW_NAME');
+        LET pv_dim_cur CURSOR FOR pv_dim_rs;
+        FOR pv_rec IN pv_dim_cur DO
             IF (v_sv_dimensions != '') THEN
                 v_sv_dimensions := v_sv_dimensions || ',';
             END IF;
@@ -899,9 +879,10 @@ $$;
 -- Next steps (spec-first flow):
 -- 1. Define doc types in references/document_type_specs.yaml (authoritative spec)
 -- 2. Seed CLINICAL_DOCS_EXTRACTION_CONFIG from specs (INSERT or COPY INTO from CSV)
--- 3. CALL GENERATE_DYNAMIC_OBJECTS()  -- seeds config, updates classification
---    question, creates pivot views + task + Semantic View,
---    refreshes Schema CKE (model corpus) + Spec CKE (doc type specs)
+-- 3. CALL GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}')
+--    Parameterized — pass the user-chosen db/schema/warehouse/stage.
+--    Seeds config, updates classification question, creates pivot views + task +
+--    Semantic View, refreshes Schema CKE (model corpus) + Spec CKE (doc type specs)
 -- 4. Upload clinical PDFs to stage
 -- 5. Run extraction pipeline (stored procs from stored_procedures.sql)
 --
