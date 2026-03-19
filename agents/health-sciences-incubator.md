@@ -27,7 +27,8 @@ Health Sciences
 |   |-- Clinical Data Management
 |   |   |-- hcls-provider-cdata-fhir
 |   |   |-- hcls-provider-cdata-clinical-nlp
-|   |   +-- hcls-provider-cdata-omop
+|   |   |-- hcls-provider-cdata-omop
+|   |   +-- hcls-provider-cdata-clinical-docs (router + 5 sub-skills)
 |   +-- Revenue Cycle
 |       +-- hcls-provider-claims-data-analysis
 |
@@ -95,6 +96,7 @@ Some skills naturally serve multiple sub-industries. Route to the skill regardle
 - `$hcls-provider-claims-data-analysis` — serves Provider (revenue cycle) and Payer (claims processing)
 - `$hcls-pharma-genomics-survival-analysis` — serves Pharma (clinical outcomes) and Provider (clinical research)
 - `$hcls-provider-cdata-clinical-nlp` — serves Provider (EHR extraction) and Pharma (safety narrative mining)
+- `$hcls-provider-cdata-clinical-docs` — serves 
 
 ## Cortex Knowledge Extensions (CKE Tools)
 
@@ -104,14 +106,14 @@ Two CKEs from the Snowflake Marketplace are available as shared Cortex Search Se
 
 | CKE Skill | Data Source | When Domain Skills Should Invoke It |
 |-----------|-------------|-------------------------------------|
-| `$hcls-cross-cke-pubmed` | PubMed biomedical literature | Drug-event associations, radiology research, clinical NLP context, research landscape review |
+| `$hcls-cross-cke-pubmed` | PubMed biomedical literature | Drug-event associations, radiology research, clinical NLP context, research landscape review, clinical document grounding |
 | `$hcls-cross-cke-clinical-trials` | ClinicalTrials.gov registry | Trial design benchmarking, feasibility analysis, eligibility criteria, endpoint definitions |
 
 ### CKE Routing
 
 | Triggers | CKE Skill | Domain Skills That Use It |
 |----------|-----------|---------------------------|
-| PubMed, biomedical literature, drug mechanism, clinical evidence, research papers | `$hcls-cross-cke-pubmed` | `$hcls-pharma-dsafety-pharmacovigilance`, `$hcls-provider-cdata-clinical-nlp`, `$hcls-cross-research-problem-selection`, `$hcls-provider-imaging (dicom-analytics)` |
+| PubMed, biomedical literature, drug mechanism, clinical evidence, research papers | `$hcls-cross-cke-pubmed` | `$hcls-pharma-dsafety-pharmacovigilance`, `$hcls-provider-cdata-clinical-nlp`, `$hcls-cross-research-problem-selection`, `$hcls-provider-imaging (dicom-analytics)`, `$hcls-provider-cdata-clinical-docs` |
 | ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria | `$hcls-cross-cke-clinical-trials` | `$hcls-pharma-dsafety-clinical-trial-protocol`, `$hcls-provider-claims-data-analysis`, `$hcls-pharma-genomics-survival-analysis` |
 
 ## Skill Routing Tables
@@ -137,6 +139,12 @@ Two CKEs from the Snowflake Marketplace are available as shared Cortex Search Se
 | FHIR, HL7, Patient resource, Observation, Bundle, ndjson | `$hcls-provider-cdata-fhir` | FHIR R4 resources to relational tables |
 | Clinical NLP, NER, clinical notes, discharge summary, ICD coding | `$hcls-provider-cdata-clinical-nlp` | Structured extraction from clinical text |
 | OMOP, CDM, OHDSI, observational research, vocabulary mapping | `$hcls-provider-cdata-omop` | EHR/claims to OMOP CDM v5.4 |
+| clinical document, document extraction, PDF extraction, discharge summary extraction, pathology report extraction, radiology report extraction, clinical docs pipeline, AI_PARSE_DOCUMENT, AI_EXTRACT, AI_AGG, document classification, clinical search, clinical agent, clinical document viewer | `$hcls-provider-cdata-clinical-docs` | Router: clinical document intelligence with defense-in-depth guardrails (extraction, search, agent, viewer) |
+| extract, parse, pipeline, classify documents, ingest, process documents | `$hcls-provider-cdata-clinical-docs` > `clinical-document-extraction` | Phased extraction: gates -> classify -> extract -> parse-and-refresh |
+| search documents, find in documents, Cortex Search clinical | `$hcls-provider-cdata-clinical-docs` > `clinical-docs-search` | Cortex Search Service over parsed clinical content |
+| clinical agent, natural language query, Cortex Agent clinical, semantic view clinical | `$hcls-provider-cdata-clinical-docs` > `clinical-docs-agent` | Cortex Agent combining Analyst (Semantic View) + Search |
+| document viewer, clinical dashboard, Streamlit clinical viewer | `$hcls-provider-cdata-clinical-docs` > `clinical-docs-viewer` | Streamlit document viewer (delegates to developing-with-streamlit) |
+| clinical data model, schema reference, table structure clinical | `$hcls-provider-cdata-clinical-docs` > `data-model-knowledge` | Cortex Search over schema metadata |
 
 ### Provider > Revenue Cycle
 
@@ -231,6 +239,14 @@ When the user needs a solution spanning multiple business functions, compose ski
 2. Platform: `build-react-app` > build React/Next.js app with Snowflake data
 3. Platform: `deploy-to-spcs` > deploy containerized app to SPCS
 4. Platform: `data-policy` > enforce PHI masking at the API layer
+
+### Pattern: Clinical Document Intelligence
+1. `$hcls-provider-cdata-clinical-docs` > extract structured data from clinical documents (PDF, DOCX, images)
+2. `$hcls-provider-cdata-clinical-nlp` > enrich with NER on extracted text fields
+3. `$hcls-cross-cke-pubmed` > ground findings in biomedical literature
+4. `$hcls-provider-cdata-fhir` > map extracted data to FHIR resources
+5. Platform: `data-governance` > PHI masking and row-access policies
+6. Platform: `semantic-view-optimization` > semantic views for analytics
 
 ## Guardrails
 

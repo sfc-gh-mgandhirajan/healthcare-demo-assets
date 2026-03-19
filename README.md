@@ -32,7 +32,8 @@ Health Sciences
 │   ├── Clinical Data Management
 │   │   ├── hcls-provider-cdata-fhir
 │   │   ├── hcls-provider-cdata-clinical-nlp
-│   │   └── hcls-provider-cdata-omop
+│   │   ├── hcls-provider-cdata-omop
+│   │   └── hcls-provider-cdata-clinical-docs (router + 5 sub-skills)
 │   └── Revenue Cycle
 │       └── hcls-provider-claims-data-analysis
 │
@@ -73,6 +74,7 @@ Health Sciences
 | [hcls-provider-cdata-fhir](skills/hcls-provider-cdata-fhir/) | Transform FHIR R4 resources (Patient, Observation, Condition, etc.) into relational Snowflake tables |
 | [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Extract structured entities (diagnoses, medications, procedures) from clinical text using NLP |
 | [hcls-provider-cdata-omop](skills/hcls-provider-cdata-omop/) | Transform EHR/claims data to OMOP CDM v5.4 for observational research |
+| [hcls-provider-cdata-clinical-docs](skills/hcls-provider-cdata-clinical-docs/) | Router: Clinical document intelligence with defense-in-depth guardrails — routes to 5 sub-skills: clinical-document-extraction, clinical-docs-search, clinical-docs-agent, clinical-docs-viewer, data-model-knowledge |
 
 ### Provider — Revenue Cycle
 

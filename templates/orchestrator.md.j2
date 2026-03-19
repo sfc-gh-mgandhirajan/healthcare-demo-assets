@@ -28,7 +28,8 @@ Health Sciences
 |   |-- Clinical Data Management
 |   |   |-- {{ skills['hcls-provider-cdata-fhir'].name }}
 |   |   |-- {{ skills['hcls-provider-cdata-clinical-nlp'].name }}
-|   |   +-- {{ skills['hcls-provider-cdata-omop'].name }}
+|   |   |-- {{ skills['hcls-provider-cdata-omop'].name }}
+|   |   +-- {{ skills['hcls-provider-cdata-clinical-docs'].name }} (router + {{ skills['hcls-provider-cdata-clinical-docs'].sub_skills | length }} sub-skills)
 |   +-- Revenue Cycle
 |       +-- {{ skills['hcls-provider-claims-data-analysis'].name }}
 |

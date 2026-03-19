@@ -67,6 +67,27 @@ skills:
     description: "EHR/claims to OMOP CDM v5.4"
     domain: "Provider > Clinical Data Management"
 
+  hcls-provider-cdata-clinical-docs:
+    triggers: "clinical document, document extraction, PDF extraction, discharge summary extraction, pathology report extraction, radiology report extraction, clinical docs pipeline, AI_PARSE_DOCUMENT, AI_EXTRACT, AI_AGG, document classification, clinical search, clinical agent, clinical document viewer"
+    description: "Router: clinical document intelligence with defense-in-depth guardrails (extraction, search, agent, viewer)"
+    domain: "Provider > Clinical Data Management"
+    sub_skills:
+      - name: clinical-document-extraction
+        triggers: "extract, parse, pipeline, classify documents, ingest, process documents"
+        description: "Phased extraction: gates -> classify -> extract -> parse-and-refresh"
+      - name: clinical-docs-search
+        triggers: "search documents, find in documents, Cortex Search clinical"
+        description: "Cortex Search Service over parsed clinical content"
+      - name: clinical-docs-agent
+        triggers: "clinical agent, natural language query, Cortex Agent clinical, semantic view clinical"
+        description: "Cortex Agent combining Analyst (Semantic View) + Search"
+      - name: clinical-docs-viewer
+        triggers: "document viewer, clinical dashboard, Streamlit clinical viewer"
+        description: "Streamlit document viewer (delegates to developing-with-streamlit)"
+      - name: data-model-knowledge
+        triggers: "clinical data model, schema reference, table structure clinical"
+        description: "Cortex Search over schema metadata"
+
   hcls-provider-claims-data-analysis:
     triggers: "Claims data, RWE, 837, 835, medical claims, utilization, HEDIS"
     description: "Cohort building, utilization, treatment patterns"
@@ -128,7 +149,8 @@ skills:
       - hcls-provider-cdata-clinical-nlp
       - hcls-cross-research-problem-selection
       - "hcls-provider-imaging (dicom-analytics)"
-    invoke_when: "Drug-event associations, radiology research, clinical NLP context, research landscape review"
+      - hcls-provider-cdata-clinical-docs
+    invoke_when: "Drug-event associations, radiology research, clinical NLP context, research landscape review, clinical document grounding"
 
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
@@ -149,6 +171,13 @@ overlaps:
     serves: "Pharma (clinical outcomes) and Provider (clinical research)"
   - skill: hcls-provider-cdata-clinical-nlp
     serves: "Provider (EHR extraction) and Pharma (safety narrative mining)"
+  - skill: hcls-provider-cdata-clinical-docs
+    overlaps_with: hcls-provider-cdata-clinical-nlp
+    resolution: >-
+      clinical-nlp = text-only NER/entity extraction from clinical notes (no document pipeline).
+      clinical-docs = full document pipeline (PDF/DOCX -> AI_PARSE_DOCUMENT + AI_EXTRACT + AI_AGG -> Search/Agent/Viewer).
+      Route "discharge summary extraction from PDF" to clinical-docs.
+      Route "extract entities from clinical text" to clinical-nlp.
 
 patterns:
   - name: "Imaging + Clinical Integration"
@@ -240,3 +269,16 @@ patterns:
       - platform: "build-react-app > build React/Next.js app with Snowflake data"
       - platform: "deploy-to-spcs > deploy containerized app to SPCS"
       - platform: "data-policy > enforce PHI masking at the API layer"
+
+  - name: "Clinical Document Intelligence"
+    steps:
+      - skill: hcls-provider-cdata-clinical-docs
+        note: "> extract structured data from clinical documents (PDF, DOCX, images)"
+      - skill: hcls-provider-cdata-clinical-nlp
+        note: "> enrich with NER on extracted text fields"
+      - skill: hcls-cross-cke-pubmed
+        note: "> ground findings in biomedical literature"
+      - skill: hcls-provider-cdata-fhir
+        note: "> map extracted data to FHIR resources"
+      - platform: "data-governance > PHI masking and row-access policies"
+      - platform: "semantic-view-optimization > semantic views for analytics"
