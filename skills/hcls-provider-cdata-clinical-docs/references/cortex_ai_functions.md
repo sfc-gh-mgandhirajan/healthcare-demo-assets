@@ -33,7 +33,7 @@ Extracts structured fields from files using natural language prompts.
 
 ### Config-Driven Pattern
 ```sql
-SNOWFLAKE.CORTEX.AI_EXTRACT(
+AI_EXTRACT(
     file => TO_FILE(stage, path),
     responseFormat => BUILD_DOC_TYPE_EXTRACTION_JSON(doc_type)
 )

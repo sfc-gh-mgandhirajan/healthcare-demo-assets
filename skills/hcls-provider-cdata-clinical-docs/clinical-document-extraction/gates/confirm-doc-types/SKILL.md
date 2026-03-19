@@ -52,7 +52,7 @@ If the user specifies a type not in the defaults:
 
 2. **Option A — AI auto-detection**: Upload a sample PDF to the stage, then:
    ```sql
-   SELECT SNOWFLAKE.CORTEX.AI_EXTRACT(
+   SELECT AI_EXTRACT(
        file => TO_FILE('@{db}.{schema}.{stage}', '{sample_file}'),
        responseFormat => OBJECT_CONSTRUCT('DOCUMENT_CLASSIFICATION', 'How would you classify this document?')
    );

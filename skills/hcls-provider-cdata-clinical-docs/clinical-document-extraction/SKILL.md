@@ -78,7 +78,7 @@ Each phase is a **separate skill load**. The router MUST present phase results t
 The `CLINICAL_DOCS_EXTRACTION_CONFIG` table is the runtime config, derived from the authoritative spec layer at `references/document_type_specs.yaml`. The YAML spec defines doc types, fields, prompts, and PHI flags; the config table is seeded from it.
 
 ```sql
-SNOWFLAKE.CORTEX.AI_EXTRACT(
+AI_EXTRACT(
     file => TO_FILE(stage, path),
     responseFormat => {db}.{schema}.BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON()
 )

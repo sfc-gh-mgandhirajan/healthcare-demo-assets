@@ -43,7 +43,7 @@ ALTER WAREHOUSE {warehouse} SET WAREHOUSE_SIZE = '3XLARGE';
 For each document classification found in the classify phase:
 
 ```sql
-SELECT SNOWFLAKE.CORTEX.AI_EXTRACT(
+SELECT AI_EXTRACT(
     file => TO_FILE('@{db}.{schema}.{stage}', '{sample_file_for_type}'),
     responseFormat => {db}.{schema}.BUILD_DOC_TYPE_EXTRACTION_JSON('{DOC_TYPE}')
 ) AS test_result;

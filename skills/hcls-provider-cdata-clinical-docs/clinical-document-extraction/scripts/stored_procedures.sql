@@ -65,7 +65,7 @@ BEGIN
             SELECT
                 dh.DOCUMENT_RELATIVE_PATH,
                 dh.DOCUMENT_STAGE,
-                SNOWFLAKE.CORTEX.AI_EXTRACT(
+                AI_EXTRACT(
                     file => TO_FILE(dh.DOCUMENT_STAGE, dh.DOCUMENT_RELATIVE_PATH),
                     responseFormat => ' || :v_fqn || '.BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON()
                 ) AS ai_extract_response
@@ -151,7 +151,7 @@ BEGIN
                 docs.DOCUMENT_RELATIVE_PATH,
                 docs.DOCUMENT_STAGE,
                 docs.DOCUMENT_CLASSIFICATION,
-                SNOWFLAKE.CORTEX.AI_EXTRACT(
+                AI_EXTRACT(
                     file => TO_FILE(docs.DOCUMENT_STAGE, docs.DOCUMENT_RELATIVE_PATH),
                     responseFormat => ' || :v_fqn || '.BUILD_DOC_TYPE_EXTRACTION_JSON(docs.DOCUMENT_CLASSIFICATION)
                 ) AS ai_extract_response

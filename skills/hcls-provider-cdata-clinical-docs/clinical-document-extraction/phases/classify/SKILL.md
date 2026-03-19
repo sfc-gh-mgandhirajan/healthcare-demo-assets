@@ -64,7 +64,7 @@ ALTER WAREHOUSE {warehouse} SET WAREHOUSE_SIZE = '3XLARGE';
 **Test before batch**: Classify ONE document first, display results, confirm quality.
 
 ```sql
-SELECT SNOWFLAKE.CORTEX.AI_EXTRACT(
+SELECT AI_EXTRACT(
     file => TO_FILE('@{db}.{schema}.{stage}', '{first_file_path}'),
     responseFormat => {db}.{schema}.BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON()
 ) AS test_result;
@@ -129,7 +129,7 @@ Use `ask_user_question` to ask: "Would you like to configure extraction for any 
      ```
   2. Auto-detect fields:
      ```sql
-     SELECT SNOWFLAKE.CORTEX.AI_EXTRACT(
+     SELECT AI_EXTRACT(
          file => TO_FILE('{stage}', '{sample_path}'),
          responseFormat => OBJECT_CONSTRUCT(
              'DOCUMENT_TYPE', 'What type of clinical document is this?',
