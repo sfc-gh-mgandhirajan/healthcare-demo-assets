@@ -317,6 +317,22 @@ The clinical documents skill enforces a three-layer guardrail system:
 
 Every decision point requires explicit user confirmation via `ask_user_question`. The pipeline is split into **Tier 1 gates** (pre-conditions) and **Tier 2 phases** (execution), with mandatory re-entry between phases.
 
+**Gates (Tier 1 — pre-conditions):**
+
+| Gate | Purpose |
+|------|---------|
+| `confirm-environment` | Validate Snowflake connection, database, schema, warehouse, stage |
+| `confirm-doc-types` | Discover and confirm document types to process |
+| `confirm-pipeline-config` | Review and approve extraction config before execution |
+
+**Phases (Tier 2 — execution):**
+
+| Phase | Purpose |
+|-------|---------|
+| `parse-and-refresh` | AI_PARSE_DOCUMENT + GENERATE_DYNAMIC_OBJECTS to build/refresh pipeline objects |
+| `classify` | AI_COMPLETE-based document classification (single-page and AI_AGG multi-page) |
+| `extract` | AI_EXTRACT type-specific field extraction (single-page and AI_AGG multi-page) |
+
 ## Skill Naming Convention and Organization
 
 Skills follow a flat directory structure with a structured prefix encoding the taxonomy hierarchy:
@@ -488,6 +504,8 @@ The pipeline is fully config-driven. To add a new document type:
 | `references/document_type_specs.yaml` | Authoritative doc type definitions (fields, prompts, PHI flags) |
 | `references/architecture.md` | Pipeline architecture and design decisions |
 | `references/metadata_as_cke.md` | CKE pattern documentation and DICOM comparison |
+| `references/cortex_ai_functions.md` | Cortex AI function reference (AI_PARSE_DOCUMENT, AI_EXTRACT, AI_AGG, AI_COMPLETE) |
+| `references/supported_document_types.md` | Supported input formats and document type catalog |
 | `clinical-document-extraction/scripts/dynamic_pipeline_setup.sql` | All DDL — tables, UDFs, CKE search services, GENERATE_DYNAMIC_OBJECTS proc |
 | `clinical-document-extraction/scripts/proc_preprocess_clinical_docs.sql` | Preprocessing — splits large PDFs, populates DOCUMENT_HIERARCHY |
 | `clinical-document-extraction/scripts/proc_parse_with_images.sql` | AI_PARSE_DOCUMENT — OCR/layout with optional image extraction |
@@ -495,6 +513,7 @@ The pipeline is fully config-driven. To add a new document type:
 | `clinical-document-extraction/scripts/proc_extract_type_specific.sql` | AI_EXTRACT — doc-type-specific field extraction |
 | `clinical-document-extraction/scripts/proc_classify_aggregated.sql` | AI_AGG-based classification for multi-page split docs |
 | `clinical-document-extraction/scripts/proc_extract_with_ai_agg.sql` | AI_AGG-based extraction for multi-page split docs |
+| `clinical-document-extraction/scripts/stored_procedures.sql` | Modular stored procedure definitions for each pipeline step |
 
 > **Note**: `dynamic_pipeline_setup.sql` is designed for **Snowsight worksheet execution** (single session). It will NOT work with `snow sql -f` due to session variable scoping, nested `$$` delimiters, and EXECUTE IMMEDIATE parsing. For CLI/CoCo execution, decompose into individual steps — see the execution notes in the file header.
 
@@ -557,7 +576,19 @@ coco-healthcare-skills/
 ├── shared/                              # Shared infrastructure
 │   └── preflight/                       #   Prerequisite checker pattern
 ├── references/                          # Data model spreadsheets
+│   ├── dicom_data_model_reference.xlsx  #   DICOM 18-table model (source of truth)
+│   └── dicom_model_search_corpus.csv    #   Pre-exported CKE corpus
 ├── scripts/                             # Setup, generation, and QA scripts
+│   ├── generate_orchestrators.py        #   Generate agent profiles from templates
+│   ├── setup_dicom_model_knowledge_repo.sql  # DICOM CKE search service setup
+│   ├── generate_industry_framework_pdf.py    # ISF PDF generator
+│   ├── generate_dicom_model_spreadsheet.py   # DICOM model spreadsheet generator
+│   ├── export_search_corpus_csv.py      #   Export CKE corpus to CSV
+│   ├── generate_pdf_guide.py            #   PDF guide generator
+│   └── qa_validate_orchestrator.py      #   QA validation for orchestrator
+├── Industry_Solutions_Framework.pdf     # ISF reference document
+├── Healthcare_Solutions_on_Snowflake.pdf # Healthcare solutions overview
+├── skills.json.template                 # Clean starting point for skills config
 └── README.md
 ```
 
@@ -662,7 +693,8 @@ cortex profile add health-sciences-incubator                         # bleeding 
 
 | Document | Description |
 |----------|-------------|
-| [Industry Solutions Framework PDF](Industry_Solutions_Framework_-_Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Consolidated 25-page reference covering architecture, lifecycle, taxonomy, skills inventory, patterns, and getting started |
+| [Industry Solutions Framework](Industry_Solutions_Framework.pdf) | Architecture, lifecycle, taxonomy, skills inventory, patterns, and getting started |
+| [Healthcare Solutions on Snowflake](Healthcare_Solutions_on_Snowflake.pdf) | Healthcare solutions overview and value proposition |
 | [agents/health-sciences-incubator.md](agents/health-sciences-incubator.md) | Orchestrator agent with routing rules, taxonomy tree, CKE integration, cross-domain patterns, and HIPAA guardrails |
 
 ## Contributing
