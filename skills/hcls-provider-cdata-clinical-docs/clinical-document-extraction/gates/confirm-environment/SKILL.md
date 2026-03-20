@@ -67,13 +67,29 @@ Use `ask_user_question` to ask where source files are located:
 | Option | Description |
 |--------|-------------|
 | Already on Snowflake stage | Files are on `@{db}.{schema}.{stage}` |
-| Local files to upload | Use `snow stage copy` to upload |
+| Local files to upload | Use `PUT` via `snowflake_sql_execute` (NEVER use `snow stage copy` — CLI connection differs) |
 | Cloud storage (S3/Azure/GCS) | Create storage integration + external stage |
 | External system (EHR/API/Kafka) | Invoke `openflow` skill for CDC connectors |
 
 **DO NOT assume file location from prior context.**
 
-If files are already on stage, validate:
+### File Upload (Local files)
+
+If uploading local files, use PUT via `snowflake_sql_execute` — **NEVER** `snow stage copy`:
+```sql
+PUT file:///path/to/file.pdf @{db}.{schema}.{stage} AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+```
+**CRITICAL**: `snow stage copy`, `snow sql -q`, and `snow sql -f` all use a different CLI connection/role that may not have access to the target database. Always use `snowflake_sql_execute` for file operations.
+
+### Validate Files on Stage
+
+Before querying DIRECTORY(), ensure it is enabled:
+```sql
+ALTER STAGE @{db}.{schema}.{stage} SET DIRECTORY = (ENABLE = TRUE);
+ALTER STAGE @{db}.{schema}.{stage} REFRESH;
+```
+
+Then validate:
 ```sql
 SELECT COUNT(*) AS file_count,
        SUM(SIZE) / (1024*1024) AS total_size_mb

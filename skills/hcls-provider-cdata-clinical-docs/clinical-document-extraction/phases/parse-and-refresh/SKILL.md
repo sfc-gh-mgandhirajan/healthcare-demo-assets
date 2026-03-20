@@ -163,12 +163,34 @@ The Semantic View **cannot be created until pivot views contain data**.
 ```sql
 -- Verify pivot views have data
 SELECT COUNT(*) FROM {db}.{schema}.DISCHARGE_SUMMARY_V;
-
--- Regenerate dynamic objects (creates SV)
-CALL {db}.{schema}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}');
 ```
 
-`GENERATE_DYNAMIC_OBJECTS()` wraps SV creation in TRY/CATCH — if pivot views are empty, it logs a warning and skips. Re-run after data is loaded.
+**CRITICAL**: `GENERATE_DYNAMIC_OBJECTS()` stored procedure **CANNOT** be created via `snowflake_sql_execute` — two patterns in the `$$` body are incompatible (Constraints #16: `EXECUTE IMMEDIATE...INTO :var` → `unexpected 'INTO'`, and #17: `IDENTIFIER(var||'...')` → `unexpected 'v_fqn'`). **DO NOT attempt to CREATE the procedure.** Instead, execute each step from the proc body individually:
+
+1. **Step 0**: Deduplicate config table
+2. **Steps 1-2b**: Seed classification + extraction configs from master config
+3. **Step 3**: Create pivot views (see PIVOT Quoting below)
+4. **Step 4**: Create MRN_PATIENT_MAPPING view
+5. **Step 5**: Create REFRESH_RAW_CONTENT_TASK
+6. **Step 6**: Create Semantic View (see Semantic View Syntax below)
+7. **Steps 7-7b**: Refresh CKE tables
+
+Use `dynamic_pipeline_setup.sql` Steps 0-7b as templates. Replace `:v_fqn` with `'{db}.{schema}'`.
+
+### PIVOT Column Quoting (CRITICAL)
+When creating pivot views manually (not via GENERATE_DYNAMIC_OBJECTS):
+- Snowflake PIVOT creates columns with literal single quotes: `'MRN'`, `'PATIENT_NAME'`
+- Reference them as `"'MRN'"` (double-quoted with embedded single quotes)
+- Example: `"'MRN'" AS MRN, UPPER("'PATIENT_NAME'") AS PATIENT_NAME`
+- **WRONG**: `"MRN"` or `MRN` → causes `invalid identifier 'MRN'`
+
+### Semantic View Syntax (CRITICAL)
+DIMENSIONS use `TABLE.DIMENSION_NAME AS ACTUAL_COLUMN_NAME` (dimension name first, NOT the column!):
+- **CORRECT**: `DISCHARGE_SUMMARY_V.DS_MRN AS MRN`
+- **WRONG**: `DISCHARGE_SUMMARY_V.MRN AS DS_MRN`
+
+METRICS use `TABLE.METRIC_NAME AS AGGREGATE_EXPRESSION`:
+- Example: `DISCHARGE_SUMMARY_V.PAT_CNT AS COUNT(DISTINCT MRN)`
 
 ---
 

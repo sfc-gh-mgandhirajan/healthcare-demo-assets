@@ -304,6 +304,12 @@ EXECUTE IMMEDIATE
 
 -- =============================================================================
 -- STEP 5: UDFs (config-driven — read from config tables at runtime)
+-- NOTE: BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON returns an OBJECT of
+--   {FIELD_NAME: EXTRACTION_QUESTION} pairs from the classification config.
+--   This UDF is used by the EXTRACT_DOCUMENT_CLASSIFICATION_METADATA proc to
+--   build the AI_COMPLETE classification prompt (NOT for AI_EXTRACT responseFormat).
+--   The proc joins the classification prompt with AI_PARSE_DOCUMENT output text.
+--   BUILD_DOC_TYPE_EXTRACTION_JSON is still used with AI_EXTRACT for field extraction.
 -- =============================================================================
 EXECUTE IMMEDIATE
 $$
@@ -392,9 +398,24 @@ def inject_descriptions(page_content, image_data):
 --     Target SQL:   "'MRN'" AS MRN
 --     Inside ':     '''' || FIELD_NAME || ''''   (two levels of '' escaping)
 -- =============================================================================
--- >>> AGENT: Execute this directly via snowflake_sql_execute.
--- >>> The proc is parameterized — no placeholder substitution needed.
--- >>> Call: CALL {schema_prefix}.GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}')
+-- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+-- >>> AGENT: DO NOT EXECUTE THIS CREATE PROCEDURE BLOCK.
+-- >>> IT WILL FAIL EVERY TIME VIA snowflake_sql_execute. TWO KNOWN BLOCKERS:
+-- >>>   1. EXECUTE IMMEDIATE '...' INTO :var  → "unexpected 'INTO'"  (Constraint #16)
+-- >>>   2. IDENTIFIER(v_fqn || '...')          → "unexpected 'v_fqn'" (Constraint #17)
+-- >>>
+-- >>> INSTEAD: Read each numbered sub-step (0 through 7b) below as a TEMPLATE.
+-- >>> For each sub-step, write a standalone SQL statement:
+-- >>>   - Replace :v_fqn  → '{db}.{schema}'
+-- >>>   - Replace :v_db   → '{db}'
+-- >>>   - Replace :v_stage_fqn → '{db}.{schema}.{stage}'
+-- >>>   - For cursor loops (Step 3, 6, 7), query the config table first to get
+-- >>>     the rows, then execute each iteration's SQL individually.
+-- >>> Execute each via snowflake_sql_execute — they are plain SQL, no $$ needed.
+-- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+-- =============================================================================
+-- TEMPLATE ONLY — The CREATE PROCEDURE below is for Snowsight worksheet
+-- execution. CoCo agents must decompose into individual SQL statements.
 -- =============================================================================
 
 CREATE OR REPLACE PROCEDURE IDENTIFIER($V_DB || '.' || $V_SCHEMA || '.GENERATE_DYNAMIC_OBJECTS')(P_DB VARCHAR, P_SCHEMA VARCHAR, P_WAREHOUSE VARCHAR, P_STAGE VARCHAR)

@@ -82,6 +82,12 @@ GROUP BY DOCUMENT_CLASSIFICATION;
 
 If `{mode}` = step-by-step, use `ask_user_question`: "Extraction quality acceptable? Continue to document parsing?"
 
+### PIVOT Column Quoting Reminder
+Extraction results feed into pivot views. When pivot views are later created:
+- Snowflake PIVOT creates columns with literal single quotes: `'MRN'`, `'PATIENT_NAME'`
+- Reference them as `"'MRN'"` (double-quoted with embedded single quotes)
+- **WRONG**: `"MRN"` or `MRN` → causes `invalid identifier 'MRN'`
+
 ---
 
 ## Return

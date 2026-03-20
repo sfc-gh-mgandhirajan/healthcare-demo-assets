@@ -52,7 +52,9 @@ If `{mode}` = step-by-step, use `ask_user_question`: "Review preprocessing resul
 
 ---
 
-## Step 2: Classify Documents
+## Step 2: Classify Documents (AI_PARSE_DOCUMENT + AI_COMPLETE)
+
+**Why two-step?** `AI_EXTRACT` for classification was unreliable — it returned the same type for all documents. The two-step approach (parse first, then classify with AI_COMPLETE) produces accurate per-document classifications.
 
 If `{warehouse_size_decision}` = auto-resize:
 ```sql
@@ -61,12 +63,26 @@ ALTER WAREHOUSE {warehouse} SET WAREHOUSE_SIZE = '3XLARGE';
 
 ### 🛑 MANDATORY STOP — GATE E8: Classification Quality Gate
 
-**Test before batch**: Classify ONE document first, display results, confirm quality.
+**Test before batch**: Classify ONE document first using the two-step approach, display results, confirm quality.
 
 ```sql
-SELECT AI_EXTRACT(
-    file => TO_FILE('@{db}.{schema}.{stage}', '{first_file_path}'),
-    responseFormat => {db}.{schema}.BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON()
+-- Step 1: Parse the document to get text
+SET test_text = (
+    SELECT AI_PARSE_DOCUMENT(
+        TO_FILE('@{db}.{schema}.{stage}', '{first_file_path}'),
+        {'mode': 'OCR'}
+    ):content::VARCHAR
+);
+
+-- Step 2: Classify using AI_COMPLETE with parsed text
+SELECT AI_COMPLETE(
+    'llama3.1-70b',
+    CONCAT(
+        'You are a clinical document classifier. Classify the following document and respond with ONLY a JSON object containing: DOCUMENT_CLASSIFICATION (one of: ',
+        (SELECT LISTAGG(DISTINCT DOC_TYPE, ', ') FROM {db}.{schema}.CLINICAL_DOCS_EXTRACTION_CONFIG WHERE CONFIG_TYPE = 'EXTRACTION'),
+        ', OTHER), COMPLEX_TABLES_FLAG (YES/NO), IMAGE_FLAG (YES/NO).\n\nDocument text:\n',
+        LEFT($test_text, 50000)
+    )
 ) AS test_result;
 ```
 
@@ -84,6 +100,11 @@ Use `ask_user_question` to ask: "Here is the classification result for one sampl
 CALL {db}.{schema}.EXTRACT_DOCUMENT_CLASSIFICATION_METADATA();
 ```
 
+Note: The procedure internally calls `AI_PARSE_DOCUMENT` (OCR) then `AI_COMPLETE` for each document. An optional `MODEL_NAME` parameter (default: `'llama3.1-70b'`) can be overridden:
+```sql
+CALL {db}.{schema}.EXTRACT_DOCUMENT_CLASSIFICATION_METADATA(MODEL_NAME => 'claude-3-5-sonnet');
+```
+
 **Report** classification distribution:
 ```sql
 SELECT FIELD_VALUE AS CLASSIFICATION, COUNT(*) AS DOC_COUNT
@@ -91,6 +112,50 @@ FROM {db}.{schema}.DOC_CLASSIFICATION_METADATA_ROWS
 WHERE FIELD_NAME = 'DOCUMENT_CLASSIFICATION'
 GROUP BY FIELD_VALUE;
 ```
+
+### Post-Classification Normalization (CRITICAL)
+AI models return classifications with underscores (e.g., `DISCHARGE_SUMMARY`) but the config table uses spaces (e.g., `DISCHARGE SUMMARY`). **Always normalize immediately after classification:**
+```sql
+UPDATE {db}.{schema}.DOC_CLASSIFICATION_METADATA_ROWS
+SET FIELD_VALUE = REPLACE(FIELD_VALUE, '_', ' ')
+WHERE FIELD_NAME = 'DOCUMENT_CLASSIFICATION' AND FIELD_VALUE LIKE '%\_%' ESCAPE '\';
+```
+
+---
+
+## Step 2b: Classify Split (Aggregated) Documents
+
+If preprocessing created split documents, their parent documents are NOT classified by the step above. Check and handle:
+
+```sql
+SELECT COUNT(DISTINCT dh.DOCUMENT_RELATIVE_PATH) AS unclassified_parents
+FROM {db}.{schema}.DOCUMENT_HIERARCHY dh
+WHERE dh.PARENT_DOCUMENT_RELATIVE_PATH IS NULL
+  AND EXISTS (
+      SELECT 1 FROM {db}.{schema}.DOCUMENT_HIERARCHY child
+      WHERE child.PARENT_DOCUMENT_RELATIVE_PATH = dh.DOCUMENT_RELATIVE_PATH
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM {db}.{schema}.DOC_CLASSIFICATION_METADATA_ROWS dcm
+      WHERE dcm.DOCUMENT_RELATIVE_PATH = dh.DOCUMENT_RELATIVE_PATH
+        AND dcm.FIELD_NAME = 'DOCUMENT_CLASSIFICATION'
+  );
+```
+
+If count > 0, parse split docs first, then classify via AI_AGG:
+```sql
+CALL {db}.{schema}.CLINICAL_DOCUMENTS_PARSE_WITH_IMAGES_V2();
+CALL {db}.{schema}.CLASSIFY_AGGREGATED_DOCUMENTS();
+```
+
+Then normalize the aggregated classifications too:
+```sql
+UPDATE {db}.{schema}.DOC_CLASSIFICATION_METADATA_ROWS
+SET FIELD_VALUE = REPLACE(FIELD_VALUE, '_', ' ')
+WHERE FIELD_NAME = 'DOCUMENT_CLASSIFICATION' AND FIELD_VALUE LIKE '%\_%' ESCAPE '\';
+```
+
+This ensures split document parents are classified BEFORE the extraction phase.
 
 ---
 

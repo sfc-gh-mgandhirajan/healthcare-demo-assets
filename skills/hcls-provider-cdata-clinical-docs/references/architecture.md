@@ -17,8 +17,9 @@
                     └──────────────┬───────────────────┘
                                    │
                     ┌──────────────▼───────────────────┐
-                    │  4.2 AI_EXTRACT (single docs)     │
+                    │  4.2 AI_PARSE_DOCUMENT + AI_COMPLETE│
                     │  Classification (non-split only)   │
+                    │  Parse(OCR) → Classify(LLM)        │
                     │  → DOC_CLASSIFICATION_METADATA_ROWS│
                     └──────────────┬───────────────────┘
                                    │
@@ -105,7 +106,7 @@
 | Architecture Step | SKILL.md Step | Procedure / Function | Input Table | Output Table |
 |-------------------|---------------|----------------------|-------------|-------------|
 | Preprocess | 4.1 | PREPROCESS_CLINICAL_DOCS | Stage files | DOCUMENT_HIERARCHY |
-| Classify (single) | 4.2 | EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | DOCUMENT_HIERARCHY + Stage | DOC_CLASSIFICATION_METADATA_ROWS |
+| Classify (single) | 4.2 | EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | DOCUMENT_HIERARCHY + Stage (AI_PARSE_DOCUMENT + AI_COMPLETE) | DOC_CLASSIFICATION_METADATA_ROWS |
 | OTHER detection | 4.2c | (interactive in SKILL.md) | DOC_CLASSIFICATION_METADATA_ROWS | CLINICAL_DOCS_EXTRACTION_CONFIG (new rows) |
 | Extract (single) | 4.3 | EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES | DOC_CLASSIFICATION_METADATA_ROWS + Stage | DOC_TYPE_SPECIFIC_VALUES_EXTRACT_OUTPUT |
 | Parse | 4.4 | CLINICAL_DOCUMENTS_PARSE_WITH_IMAGES_V2 | DOCUMENT_HIERARCHY + Stage | DOCS_PARSE_OUTPUT |
@@ -161,7 +162,7 @@
 | Procedure | Purpose | AI Function |
 |-----------|---------|-------------|
 | GENERATE_DYNAMIC_OBJECTS | Creates/refreshes all dynamic objects (7 steps) | — |
-| EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | Classify single (non-split) documents | AI_EXTRACT |
+| EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | Classify single (non-split) documents | AI_PARSE_DOCUMENT + AI_COMPLETE |
 | EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES | Extract fields from single documents | AI_EXTRACT |
 | CLASSIFY_AGGREGATED_DOCUMENTS | Classify split documents across pages | AI_AGG |
 | EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES_WITH_AI_AGG | Extract fields from split documents | AI_AGG |

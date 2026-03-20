@@ -113,6 +113,15 @@ Reference: https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view
 
 **Clause order matters**: TABLES → RELATIONSHIPS → FACTS → DIMENSIONS → METRICS → COMMENT
 
+**PIVOT view dimension aliases MUST match the original column name**:
+When creating DIMENSIONS over PIVOT views (e.g., `DISCHARGE_SUMMARY_V`, `PATHOLOGY_REPORTS_V`), the column reference (right side of `AS`) **must exactly match** the physical column name in the underlying pivot view. PIVOT views generate columns from `FIELD_NAME` values — if the column is `MRN`, the dimension must be `TABLE.MRN AS MRN`, **not** `TABLE.MRN AS DS_MRN`. Using a non-matching alias causes `invalid identifier` errors at query time.
+
+- WRONG: `DISCHARGE_SUMMARY.MRN AS DS_MRN` — `DS_MRN` does not exist in the pivot view → `invalid identifier`
+- RIGHT: `DISCHARGE_SUMMARY.MRN AS MRN` — matches the actual pivot column name
+- RIGHT: `DISCHARGE_SUMMARY.PATIENT_NAME AS PATIENT_NAME` — matches the actual pivot column name
+
+> **Rule**: For PIVOT-backed tables, always verify column names with `SELECT * FROM <pivot_view> LIMIT 1` and use those exact names in both sides of the dimension definition.
+
 **Metrics must be aggregate expressions**:
 - WRONG: `alias.los AS DATEDIFF(DAY, col1, col2)` — scalar, not aggregate
 - RIGHT: `alias.avg_los AS AVG(DATEDIFF(DAY, col1, col2))` — wrapped in aggregate

@@ -7,7 +7,7 @@ tools: ["snowflake_sql_execute"]
 
 # Clinical Document Extraction — Orchestrator
 
-An interactive, config-driven pipeline for extracting structured intelligence from clinical documents (PDF, DOCX, PNG, JPG, TIFF, TXT) using Snowflake Cortex AI functions (`AI_PARSE_DOCUMENT`, `AI_EXTRACT`, `AI_AGG`).
+An interactive, config-driven pipeline for extracting structured intelligence from clinical documents (PDF, DOCX, PNG, JPG, TIFF, TXT) using Snowflake Cortex AI functions (`AI_PARSE_DOCUMENT`, `AI_COMPLETE`, `AI_EXTRACT`, `AI_AGG`). Classification uses a two-step approach: `AI_PARSE_DOCUMENT` (OCR) → `AI_COMPLETE` for reliable per-document typing. Field extraction uses `AI_EXTRACT`.
 
 ## Platform Skill Synergy
 
@@ -73,14 +73,28 @@ Each phase is a **separate skill load**. The router MUST present phase results t
 
 ## Key Cortex AI Patterns
 
-### Config-Driven Extraction (responseFormat from config table)
+### Two-Step Classification (AI_PARSE_DOCUMENT + AI_COMPLETE)
 
-The `CLINICAL_DOCS_EXTRACTION_CONFIG` table is the runtime config, derived from the authoritative spec layer at `references/document_type_specs.yaml`. The YAML spec defines doc types, fields, prompts, and PHI flags; the config table is seeded from it.
+**AI_EXTRACT was unreliable for classification** — it returned the same type for all documents. The pipeline uses a two-step approach:
+
+```sql
+-- Step 1: Parse to get text
+AI_PARSE_DOCUMENT(TO_FILE(stage, path), {'mode': 'OCR'}):content::VARCHAR
+
+-- Step 2: Classify with AI_COMPLETE
+AI_COMPLETE('llama3.1-70b', classification_prompt || parsed_text)
+```
+
+The classification prompt is built dynamically from `DOCUMENT_CLASSIFICATION_EXTRACTION_FIELD_CONFIG` (seeded from `CLINICAL_DOCS_EXTRACTION_CONFIG`). The response is a JSON with `DOCUMENT_CLASSIFICATION`, `COMPLEX_TABLES_FLAG`, `IMAGE_FLAG`.
+
+### Config-Driven Field Extraction (responseFormat from config table)
+
+The `CLINICAL_DOCS_EXTRACTION_CONFIG` table is the runtime config, derived from the authoritative spec layer at `references/document_type_specs.yaml`. Type-specific field extraction still uses `AI_EXTRACT`:
 
 ```sql
 AI_EXTRACT(
     file => TO_FILE(stage, path),
-    responseFormat => {db}.{schema}.BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON()
+    responseFormat => {db}.{schema}.BUILD_DOC_TYPE_EXTRACTION_JSON(doc_type)
 )
 ```
 
@@ -111,9 +125,9 @@ Snowflake's `IDENTIFIER()` does NOT support `||` concatenation in DDL. Use `EXEC
 ### 3. Execution Method
 | Method | When to Use |
 |--------|------------|
-| `snow sql -c {connection} -f <file>` | Default for DDL. Write SQL to temp file. |
-| `snow sql -c {connection} -q "..."` | Single simple statements. |
-| `snowflake_sql_execute` | Only when default connection matches target. |
+| `snowflake_sql_execute` | **DEFAULT for ALL SQL** — DDL, queries, simple procs |
+
+**NEVER use `snow` CLI** (`snow stage copy`, `snow sql -q`, `snow sql -f`). The CLI uses a different connection/role than `snowflake_sql_execute`, causing "Database not found" errors.
 
 ### 4. Parameterized Proc + Hardcoded FQN for DDL
 The `GENERATE_DYNAMIC_OBJECTS()` proc is **fully parameterized** — pass db/schema/warehouse/stage as arguments. No placeholder substitution needed.
@@ -179,20 +193,26 @@ SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_DATABASE();
 ```
 If this returns the wrong account, ask the user for the correct connection name and pass it via the `connection` parameter of `snowflake_sql_execute`.
 
-### 3. Execution Method: snow sql CLI vs snowflake_sql_execute
+### 3. Execution Method
 
 | Method | When to Use | Notes |
 |--------|------------|-------|
-| `snow sql -c {connection} -f <file>` | **DEFAULT for DDL** | Write SQL to temp file first. Respects connection. **Fails on EXECUTE IMMEDIATE with `||` and nested `$$`.** |
-| `snow sql -c {connection} -q "..."` | **Single simple statements** | Respects connection. Avoid for `$$` or `$VAR` references (shell mangles them). |
-| `snowflake_sql_execute` tool | **DEFAULT for all SQL** | Supports `connection` parameter, handles `$$` and complex quoting natively. |
+| `snowflake_sql_execute` tool | **DEFAULT for ALL SQL** | Supports `connection` parameter, handles quoting natively. Use for DDL, queries, simple procs. |
 | Snowflake worksheet (Snowsight) | **Fallback** | Full file works. Best for manual execution. |
 
-**Recommended approach for CoCo agents:**
-1. **Always use `snow sql -c {connection}`** — never assume the default connection is correct
-2. For complex SQL (EXECUTE IMMEDIATE, `$$`, stored procs): write to a temp file, then `snow sql -c {connection} -f /tmp/step_N.sql`
-3. Run each numbered STEP section as a separate file
-4. If a section is too large, split at the `-- ===` comment boundaries
+**CRITICAL — DO NOT USE `snow` CLI**: `snow stage copy`, `snow sql -q`, and `snow sql -f` all use a separate CLI connection/role that may differ from `snowflake_sql_execute`. This causes "Database not found" errors. **Always use `snowflake_sql_execute` for everything.**
+
+**CRITICAL — GENERATE_DYNAMIC_OBJECTS** (see also Constraints #16 and #17):
+> **DO NOT CREATE THIS STORED PROCEDURE.** It **WILL** fail via `snowflake_sql_execute` every time — two separate patterns inside the `$$` body are incompatible with the CoCo tool:
+> - `EXECUTE IMMEDIATE '...' INTO :var` → `unexpected 'INTO'` (Constraint #16)
+> - `IDENTIFIER(v_fqn || '...')` → `unexpected 'v_fqn'` (Constraint #17)
+>
+> **Required approach — execute steps individually:**
+> 1. Open `scripts/dynamic_pipeline_setup.sql` Step 6 and read each numbered sub-step (0 through 7b)
+> 2. For each sub-step, write a standalone SQL statement replacing `:v_fqn` → `'{db}.{schema}'`, `:v_db` → `'{db}'`, `:v_stage_fqn` → `'{db}.{schema}.{stage}'`
+> 3. Execute each via `snowflake_sql_execute` — they are plain SQL (no `$$`, no variables)
+> 4. Run sequentially — later steps depend on earlier results
+> 5. For the Step 3 cursor loop, query the config table first to get the list of view names/doc types, then create each pivot view individually
 
 ### 4. Parameterized Proc + Hardcoded FQN for DDL (Required for CLI Execution)
 
@@ -233,5 +253,11 @@ These rules prevent the 8 most common runtime errors encountered when building S
 | 8 | **COALESCE requires 2+ arguments** | `COALESCE requires at least two arguments` | When dynamically building COALESCE from a variable-length list, always append `, NULL` to guarantee the minimum. |
 | 9 | **PIVOT column quoting** | `invalid identifier 'MRN'` | Snowflake PIVOT creates columns with literal single quotes in names. To reference them, use double-quoted identifiers containing single quotes: `"'MRN'"`. In dynamic SQL inside `$$`, produce: `'''' \|\| FIELD_NAME \|\| ''''`. |
 | 10 | **TO_FILE does not support FQN stage names** | `invalid argument for function [TO_FILE]` | `TO_FILE(@DB.SCHEMA.STAGE, path)` fails. Set `USE DATABASE/SCHEMA` context first, then use short stage name: `TO_FILE(@STAGE, path)`. |
-| 11 | **AI_EXTRACT unreliable for classification** | All docs classified identically | `AI_EXTRACT` with `responseFormat` may return the same classification for all documents. Use `AI_PARSE_DOCUMENT` + `AI_COMPLETE` (two-step) for classification instead. |
+| 11 | **AI_EXTRACT unreliable for classification — RESOLVED** | All docs classified identically | `AI_EXTRACT` with `responseFormat` returned the same classification for all documents. **Fixed**: `EXTRACT_DOCUMENT_CLASSIFICATION_METADATA` now uses `AI_PARSE_DOCUMENT` (OCR) + `AI_COMPLETE` (two-step) for classification. Field extraction still uses `AI_EXTRACT`. |
 | 12 | **Use AI_* top-level functions** | `Invalid argument types for function` | Use `AI_COMPLETE`, `AI_PARSE_DOCUMENT(TO_FILE(...))`, `AI_EXTRACT`, `AI_AGG`. Do NOT use deprecated `SNOWFLAKE.CORTEX.COMPLETE` or `SNOWFLAKE.CORTEX.PARSE_DOCUMENT(@stage, path, opts)`. The `SNOWFLAKE.CORTEX.SEARCH_PREVIEW` and `SNOWFLAKE.CORTEX.DATA_AGENT_RUN` are Cortex Search/Agent APIs and remain unchanged. |
+| 13 | **Semantic View DIMENSIONS syntax** | `invalid identifier` or `syntax error` | DIMENSIONS use `TABLE.DIM_NAME AS COLUMN_NAME` (dimension name first, column name second). Example: `DISCHARGE_SUMMARY_V.DS_MRN AS MRN`. This is the OPPOSITE of normal SQL aliasing (`SELECT col AS alias`). |
+| 14 | **Classification underscore normalization** | Config mismatch / empty extraction results | AI models return classifications with underscores (`DISCHARGE_SUMMARY`) but config uses spaces (`DISCHARGE SUMMARY`). After classification, always run: `UPDATE ... SET FIELD_VALUE = REPLACE(FIELD_VALUE, '_', ' ') WHERE FIELD_NAME = 'DOCUMENT_CLASSIFICATION'`. |
+| 15 | **Split documents must be classified before extraction** | NULL classification for split docs | Split documents (from preprocessing) have parent documents that are NOT classified by `EXTRACT_DOCUMENT_CLASSIFICATION_METADATA`. Parse split docs first, then call `CLASSIFY_AGGREGATED_DOCUMENTS()` BEFORE the extraction phase. |
+| 16 | **`EXECUTE IMMEDIATE ... INTO :var` inside `$$` fails via snowflake_sql_execute** | `syntax error ... unexpected 'INTO'` | The `snowflake_sql_execute` tool cannot parse `EXECUTE IMMEDIATE '...' INTO :v_dup_count` inside a `$$`-delimited stored procedure body. This pattern works in Snowsight worksheets but fails when sent through the CoCo tool. **Fix**: Do NOT create the proc. Execute each step as individual SQL statements, replacing `:v_dup_count` with a direct query. |
+| 17 | **`IDENTIFIER(var \|\| '...')` inside `$$` fails via snowflake_sql_execute** | `syntax error ... unexpected 'v_fqn'` | `SELECT ... FROM IDENTIFIER(v_fqn \|\| '.TABLE_NAME')` inside a `$$` proc body causes parse errors when sent through `snowflake_sql_execute`. **Fix**: Do NOT create the proc. Execute each step as individual SQL with hardcoded FQN values (e.g., `FROM {db}.{schema}.TABLE_NAME`). |
+| 18 | **Semantic View DIMENSION aliases over PIVOT views must match original column names** | `invalid identifier` | PIVOT views generate columns from `FIELD_NAME` values. Semantic View dimension aliases (the `AS <name>` part) **must exactly match** the physical column name in the pivot view. `TABLE.MRN AS MRN` works; `TABLE.MRN AS DS_MRN` fails because `DS_MRN` does not exist. Always run `SELECT * FROM <pivot_view> LIMIT 1` to verify column names before defining dimensions. |
