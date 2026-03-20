@@ -1,36 +1,89 @@
-# Healthcare & Life Sciences Skills for Cortex Code
+# Industry Solutions Architect for Health Sciences
 
-A collection of domain-specific skills for [Cortex Code](https://docs.snowflake.com/user-guide/snowflake-cortex/cortex-agents) focused on healthcare and life sciences workflows on Snowflake. These skills turn Cortex Code into an AI-powered assistant that understands clinical documents, medical imaging, genomics, pharmacovigilance, and more — all running natively on Snowflake.
+An **Industry Solutions Architect** is a composable skill-based system on [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code) that builds end-to-end healthcare and life sciences data and AI pipelines on Snowflake — delivering business outcomes from a single natural language conversation.
 
-## What This Repository Does
+Instead of writing boilerplate pipelines from scratch, a solutions architect describes the business problem. An orchestrator agent understands the healthcare domain, selects the right combination of industry skills and Snowflake platform capabilities, and composes them into a working solution — from data ingestion through governance to analytics and applications.
 
-Each **skill** is a set of instructions (Markdown + optional scripts) that teaches Cortex Code how to perform a specific healthcare task. When you register these skills, Cortex Code can:
+### What makes this different
 
-- **Parse and extract** structured data from clinical documents (discharge summaries, pathology reports, radiology reports) using Cortex AI functions
-- **Build DICOM imaging pipelines** with an 18-table data model, metadata search, and ML-ready embeddings
-- **Transform healthcare data** between standards (FHIR R4, OMOP CDM v5.4, HL7)
-- **Run genomics pipelines** (nf-core, scVI, variant annotation, survival analysis)
-- **Detect drug safety signals** from FDA FAERS data
-- **Search biomedical literature** via PubMed and ClinicalTrials.gov Cortex Knowledge Extensions
+- **Composable skills, not monolithic scripts.** Each skill encodes deep domain expertise (DICOM imaging, FHIR interoperability, FAERS pharmacovigilance, genomics pipelines, claims analytics) as a reusable building block.
+- **Orchestrator-driven composition.** A single orchestrator agent detects intent, routes across healthcare business domains, and chains multiple skills together with Snowflake platform skills to deliver complete solutions.
+- **Knowledge-grounded.** Cortex Knowledge Extensions (CKEs) provide on-demand RAG search over PubMed and ClinicalTrials.gov. A Data Model Knowledge repository grounds schema generation in live reference models via Cortex Search.
+- **Governance by default.** HIPAA guardrails — PHI masking, row-access policies, audit trails, de-identification — are enforced as cross-cutting concerns across every workflow.
+- **Scales like lego blocks.** New skills snap into the framework as independent building blocks. Router skills cluster related capabilities under a business function (e.g., imaging router with parse/ingest/analytics/governance sub-skills). Adding a new domain or business function is just adding another skill directory — the orchestrator picks it up automatically.
 
-## Prerequisites
+### Example
 
+A user asks:
+
+> *"Design a Phase III clinical trial for a novel GLP-1 receptor agonist targeting Type 2 Diabetes with cardiovascular outcome endpoints."*
+
+The orchestrator automatically composes multiple skills into a solution chain: research problem validation → competitor trial search (ClinicalTrials.gov CKE) → literature review (PubMed CKE) → protocol generation → survival endpoint design → claims-based feasibility analysis. No skill names needed.
+
+## Architecture
+
+```
++------------------------------------------------------------------+
+|  ORCHESTRATOR AGENT: health-sciences-incubator.md                |
+|  Intent Detection → Domain Routing → Skill Composition           |
++------------------------------------------------------------------+
+       |            |             |             |
+       v            v             v             v
+  +---------+  +---------+  +---------+  +-----------+
+  |Provider |  |Provider |  | Pharma  |  |  Pharma   |
+  |Imaging  |  |ClinData |  |DrugSafe |  | Genomics  |
+  |         |  |         |  |         |  |           |
+  +---------+  +---------+  +---------+  +-----------+
+       |   +--------+ +--------+ +----------+    |
+       |   |Claims  | |  Lab   | |Research  |    |
+       |   |        | |        | |          |    |
+       |   +--------+ +--------+ +----------+    |
+       |                                          |
+       |     SHARED KNOWLEDGE (on-demand)         |
+       |     hcls-cross-cke-pubmed                |
+       |     hcls-cross-cke-clinical-trials       |
++------------------------------------------------------------------+
+|  SNOWFLAKE PLATFORM SKILLS (bundled)                             |
+|  Dynamic Tables | Cortex AI | Streamlit | SPCS | dbt | ML       |
+|  Governance | Cortex Search | Cortex Agent | React App           |
++------------------------------------------------------------------+
+       ^
+       |
++------------------------------------------------------------------+
+|  DATA MODEL KNOWLEDGE REPOSITORY                                 |
+|  Cortex Search over reference models (DICOM: 18 tables, 222 col)|
+|  Auto pre-step: grounds DDL, COPY INTO, masking in live schema   |
++------------------------------------------------------------------+
+```
+
+**How it works:**
+
+1. User describes a healthcare business problem in natural language
+2. Orchestrator detects the domain from trigger keywords and context
+3. One or more industry skills are selected and composed into a pipeline
+4. Skills invoke Snowflake platform skills for infrastructure (Dynamic Tables, Cortex AI, Streamlit, etc.)
+5. For schema-dependent tasks, Data Model Knowledge auto-fires to ground outputs in live reference models
+6. CKEs are invoked on-demand when literature or trial evidence adds value
+7. HIPAA governance guardrails are applied across all workflows
+
+## Getting Started
+
+### Prerequisites
+
+- [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code) CLI or IDE, authenticated to your Snowflake account
 - A Snowflake account with [Cortex AI functions](https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions) enabled
-- [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code) (CLI or IDE)
 - For clinical document skills: `AI_PARSE_DOCUMENT`, `AI_EXTRACT`, `AI_AGG` access
 - For search/agent skills: Cortex Search and Cortex Agent access
 - For genomics skills: local Python environment with relevant packages
 
-## Quick Start
-
-### Step 1: Clone the repository
+### Step 1: Clone the Repository
 
 ```bash
 git clone https://github.com/sfc-gh-jrag/coco-healthcare-skills.git
 cd coco-healthcare-skills
 ```
 
-### Step 2: Register skills
+### Step 2: Register Skills
 
 Open your Cortex Code skills configuration file:
 
@@ -73,7 +126,7 @@ Add the healthcare skills as a `local` entry. Replace `<ABSOLUTE_PATH_TO_REPO>` 
 
 > **Note**: If your `skills.json` already has entries (e.g., `remote`, `marketplace`, `stage`), merge the `local` array into the existing file — don't overwrite it. See `skills.json.template` for a clean starting point.
 
-### Step 3: Create the agent profile
+### Step 3: Create the Agent Profile
 
 Create the incubator profile JSON at:
 
@@ -108,47 +161,112 @@ Create the incubator profile JSON at:
 
 Replace `<ABSOLUTE_PATH_TO_REPO>` with the full path to your cloned repo.
 
-### Step 4: Activate the profile
+### Step 4: Validate
 
-In Cortex Code (CLI or Snowwork), run:
+```bash
+# Verify skills loaded
+/skill                    # Should list hcls-* skills
 
-```
-/agents
-```
+# Verify orchestrator agent
+/agents                   # Should show health-sciences-incubator
 
-Select **health-sciences-incubator** from the list. This loads the orchestrator system prompt and makes all 18 skills available for routing.
-
-### Step 5: Start using
-
-Tell Cortex Code what you want to do. The orchestrator routes your request to the right skill:
-
-```
-"Extract data from my clinical documents on stage"
-"Parse DICOM metadata and build a radiology data model"
-"Transform my FHIR bundles into relational tables"
-"Annotate my VCF file with ClinVar pathogenicity"
-"Detect safety signals for a drug in FAERS data"
-"Run a survival analysis on my patient cohort"
+# Check profile details
+cortex profile show health-sciences-incubator
 ```
 
-## Repository Structure
+### Step 5: Optional Dependencies
+
+**Cortex Knowledge Extensions (CKEs):** Install PubMed and/or Clinical Trials CKE from Snowflake Marketplace for literature/trial evidence grounding. Skills work without CKEs but provide richer results with them.
+
+**Data Model Knowledge:** Run `scripts/setup_dicom_model_knowledge_repo.sql` to create the Cortex Search Service over the DICOM data model.
+
+### Step 6: Start Using
+
+Ask healthcare questions in natural language. The orchestrator automatically routes to the right skills:
 
 ```
-coco-healthcare-skills/
-├── agents/                    # Agent profiles (orchestrators)
-│   ├── health-sciences-incubator.md   # All skills enabled — prototyping and demos
-│   └── health-sciences-solutions.md   # Production-grade skills only
-├── skills/                    # All skills (18 total)
-│   ├── hcls-cross-*           # Cross-industry skills (CKEs, research)
-│   ├── hcls-pharma-*          # Pharma & life sciences skills
-│   └── hcls-provider-*        # Healthcare provider skills
-├── references/                # Shared reference data
-├── scripts/                   # Utility scripts (PDF gen, orchestrators)
-├── shared/preflight/          # Shared preflight checker module
-└── templates/                 # YAML registries & Jinja2 templates
+"I have DICOM files from our radiology department on S3.
+ Build a pipeline to parse, ingest, and analyze the imaging metadata."
+
+"Transform our FHIR R4 bundles into analytics-ready tables on Snowflake."
+
+"Analyze FDA FAERS data for adverse events associated with aspirin."
+
+"Design a Phase III clinical trial for a novel GLP-1 receptor agonist
+ targeting Type 2 Diabetes with cardiovascular outcome endpoints."
+
+"I have whole-genome sequencing FASTQs. Run variant calling and annotate
+ pathogenic variants with ClinVar and gnomAD frequencies."
+
+"Build a retrospective cohort of T2D patients from claims data and
+ analyze treatment patterns and medication adherence."
+
+"Build a real-world evidence study: cohort from claims, standardize
+ to OMOP, run survival analysis, validate against published literature."
 ```
 
-## Architecture Concepts
+### Step 7: Keep Updated
+
+```bash
+cortex skill update                                  # Refresh skills from GitHub
+cortex profile sync health-sciences-incubator        # Sync full profile
+```
+
+## Skills Inventory
+
+### Provider > Clinical Research
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-provider-imaging](skills/hcls-provider-imaging/) | Router skill covering full DICOM imaging lifecycle (parse, ingest, analytics, viewer, governance, ML, data model knowledge) |
+| [hcls-provider-imaging-dicom-parser](skills/hcls-provider-imaging-dicom-parser/) | Standalone DICOM metadata parser with comprehensive data model |
+
+### Provider > Clinical Data Management
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-provider-cdata-fhir](skills/hcls-provider-cdata-fhir/) | Transform FHIR R4 resources (Patient, Observation, Condition, etc.) into analytics-ready Snowflake tables |
+| [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Extract structured entities from clinical text (NER, ICD coding, medication extraction) via Cortex AI / spaCy |
+| [hcls-provider-cdata-omop](skills/hcls-provider-cdata-omop/) | Transform EHR/claims data to OMOP CDM v5.4 with vocabulary mapping (SNOMED, LOINC, RxNorm) |
+
+### Provider > Revenue Cycle
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-provider-claims-data-analysis](skills/hcls-provider-claims-data-analysis/) | Claims-based RWE: cohort building, utilization metrics, treatment patterns, medication adherence (PDC), HEDIS measures |
+
+### Pharma > Drug Safety
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-pharma-dsafety-pharmacovigilance](skills/hcls-pharma-dsafety-pharmacovigilance/) | FDA FAERS adverse event analysis with PRR/ROR signal detection |
+| [hcls-pharma-dsafety-clinical-trial-protocol](skills/hcls-pharma-dsafety-clinical-trial-protocol/) | Generate clinical trial protocols via waypoint architecture for FDA submissions (IDE/IND pathways) |
+
+### Pharma > Genomics & Bioinformatics
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-pharma-genomics-nextflow](skills/hcls-pharma-genomics-nextflow/) | Run nf-core pipelines (rnaseq, sarek, atacseq) on sequencing data from local FASTQs or GEO/SRA |
+| [hcls-pharma-genomics-variant-annotation](skills/hcls-pharma-genomics-variant-annotation/) | Annotate genomic variants with ClinVar pathogenicity, gnomAD allele frequencies, ACMG classification |
+| [hcls-pharma-genomics-single-cell-qc](skills/hcls-pharma-genomics-single-cell-qc/) | Automated QC for single-cell RNA-seq using scverse best practices with MAD-based filtering |
+| [hcls-pharma-genomics-scvi-tools](skills/hcls-pharma-genomics-scvi-tools/) | Deep learning single-cell analysis (scVI, scANVI, totalVI, PeakVI, MultiVI, veloVI) |
+| [hcls-pharma-genomics-survival-analysis](skills/hcls-pharma-genomics-survival-analysis/) | Kaplan-Meier curves, Cox proportional hazards, time-to-event analysis with publication-ready plots |
+
+### Pharma > Lab Operations
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-pharma-lab-allotrope](skills/hcls-pharma-lab-allotrope/) | Convert laboratory instrument files (PDF, CSV, Excel, TXT) to Allotrope Simple Model JSON/CSV |
+
+### Cross-Industry
+
+| Skill | Description |
+|-------|-------------|
+| [hcls-cross-research-problem-selection](skills/hcls-cross-research-problem-selection/) | Systematic research problem selection using Fischbach & Walsh decision trees |
+| [hcls-cross-cke-pubmed](skills/hcls-cross-cke-pubmed/) | RAG-based semantic search over PubMed biomedical literature (Cortex Knowledge Extension) |
+| [hcls-cross-cke-clinical-trials](skills/hcls-cross-cke-clinical-trials/) | RAG-based semantic search over ClinicalTrials.gov registry (Cortex Knowledge Extension) |
+
+## Framework Architecture
 
 ### Skill Types
 
@@ -198,6 +316,103 @@ The clinical documents skill enforces a three-layer guardrail system:
 | 3 | `hooks.json` | Hard blocks on DDL/DML without user confirmation |
 
 Every decision point requires explicit user confirmation via `ask_user_question`. The pipeline is split into **Tier 1 gates** (pre-conditions) and **Tier 2 phases** (execution), with mandatory re-entry between phases.
+
+## Skill Naming Convention and Organization
+
+Skills follow a flat directory structure with a structured prefix encoding the taxonomy hierarchy:
+
+```
+hcls-{sub-industry}-{function}-{skill}
+```
+
+| Component | Values | Description |
+|-----------|--------|-------------|
+| `hcls` | Fixed prefix | Health Sciences industry identifier |
+| sub-industry | `provider`, `pharma`, `payer`, `cross` | Customer segment |
+| function | `imaging`, `cdata`, `dsafety`, `genomics`, `lab`, `claims`, `research`, `cke` | Business function |
+| skill | `fhir`, `pharmacovigilance`, `nextflow`, etc. | Use case skill name |
+
+Cortex Code requires skills at exactly **1 level of nesting** from the scan root: `skills/{name}/SKILL.md`. The five-level taxonomy (Industry > Sub-Industry > Business Function > Use Case Skill > Sub-Skill) is encoded in the name prefix, not directory depth.
+
+### Skill Taxonomy Tree
+
+```
+Health Sciences
+├── Provider
+│   ├── Clinical Research
+│   │   ├── hcls-provider-imaging (router + 7 sub-skills)
+│   │   └── hcls-provider-imaging-dicom-parser (standalone)
+│   ├── Clinical Data Management
+│   │   ├── hcls-provider-cdata-fhir
+│   │   ├── hcls-provider-cdata-clinical-nlp
+│   │   ├── hcls-provider-cdata-omop
+│   │   └── hcls-provider-cdata-clinical-docs (router + 5 sub-skills)
+│   └── Revenue Cycle
+│       └── hcls-provider-claims-data-analysis
+│
+├── Pharma
+│   ├── Drug Safety
+│   │   ├── hcls-pharma-dsafety-pharmacovigilance
+│   │   └── hcls-pharma-dsafety-clinical-trial-protocol
+│   ├── Genomics
+│   │   ├── hcls-pharma-genomics-nextflow
+│   │   ├── hcls-pharma-genomics-variant-annotation
+│   │   ├── hcls-pharma-genomics-single-cell-qc
+│   │   ├── hcls-pharma-genomics-scvi-tools
+│   │   └── hcls-pharma-genomics-survival-analysis
+│   └── Lab Operations
+│       └── hcls-pharma-lab-allotrope
+│
+└── Cross-Industry
+    ├── Research Strategy
+    │   └── hcls-cross-research-problem-selection
+    └── Knowledge Extensions
+        ├── hcls-cross-cke-pubmed
+        └── hcls-cross-cke-clinical-trials
+```
+
+### Skill Structure
+
+```
+hcls-{sub}-{func}-{skill}/
+├── SKILL.md           # Main instructions (required)
+├── scripts/           # Python helper scripts
+├── references/        # Domain documentation
+└── assets/            # Templates (optional)
+```
+
+### Sub-Skills (for router skills)
+
+Router skills (e.g., `hcls-provider-imaging`) contain sub-skills nested inside:
+
+```
+hcls-provider-imaging/
+├── SKILL.md                    # Router with intent detection + Step 0 pre-query
+├── dicom-parser/SKILL.md       # Sub-skill (parent_skill: hcls-provider-imaging)
+├── dicom-ingestion/SKILL.md
+├── dicom-analytics/SKILL.md
+├── imaging-viewer/SKILL.md
+├── imaging-governance/SKILL.md
+├── imaging-ml/SKILL.md
+└── data-model-knowledge/SKILL.md
+```
+
+## Cross-Domain Composition Patterns
+
+The orchestrator composes multiple skills for complex solutions:
+
+| Pattern | Description |
+|---------|-------------|
+| Imaging + Clinical Integration | DICOM parse → FHIR ingest → Clinical NLP → PubMed enrichment → Streamlit |
+| Clinical Data Warehouse | FHIR → OMOP CDM → Governance → Semantic views → Dashboards |
+| Drug Safety Signal Detection | FAERS analysis → PubMed search → Clinical NLP → Claims correlation → Dashboard |
+| Genomics + Clinical Outcomes | nf-core pipeline → Variant annotation → Survival analysis → ML models |
+| Single-Cell Analysis Pipeline | scRNA-seq QC → scvi-tools integration → ML Registry |
+| Real-World Evidence Study | Claims cohort → Clinical Trials search → OMOP → Survival → PubMed → Dashboard |
+| Clinical Trial Design | Problem validation → Trial search → Literature review → Protocol → Power analysis → Feasibility |
+| Lab Data Modernization | Allotrope conversion → Dynamic Tables pipeline → Analytics dashboard |
+| Clinical Data App (React) | Domain skills → React/Next.js app → SPCS deployment → PHI masking |
+| Document Intelligence | Clinical docs extraction → Search → Agent → Governance |
 
 ---
 
@@ -314,100 +529,36 @@ dicom_data_model_reference.xlsx → CSV → DICOM_MODEL_REFERENCE table
 
 Sub-skills query the search service for table definitions, column types, DICOM tag mappings, and PHI indicators. DDL can be generated dynamically using `CORTEX.COMPLETE()` grounded by search results.
 
----
+## Snowflake Objects
 
-## All Skills Reference
+| Object | Fully Qualified Name |
+|--------|---------------------|
+| Data Model Table | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_REFERENCE` |
+| Cortex Search Service | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC` |
+| Stage | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.dicom_model_stage` |
 
-### Provider — Clinical Data Management
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-provider-cdata-clinical-docs](skills/hcls-provider-cdata-clinical-docs/) | Router (5 sub-skills) | Clinical document intelligence with AI extraction, search, and agent |
-| [hcls-provider-cdata-fhir](skills/hcls-provider-cdata-fhir/) | Standalone | Transform FHIR R4 resources into relational Snowflake tables |
-| [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Standalone | Extract structured entities from clinical text using NLP |
-| [hcls-provider-cdata-omop](skills/hcls-provider-cdata-omop/) | Standalone | Transform EHR/claims data to OMOP CDM v5.4 |
-
-### Provider — Clinical Research
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-provider-imaging](skills/hcls-provider-imaging/) | Router (7 sub-skills) | DICOM medical imaging — parsing, ingestion, analytics, governance, ML |
-| [hcls-provider-imaging-dicom-parser](skills/hcls-provider-imaging-dicom-parser/) | Standalone | Standalone DICOM metadata parser (also available as sub-skill) |
-
-### Provider — Revenue Cycle
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-provider-claims-data-analysis](skills/hcls-provider-claims-data-analysis/) | Standalone | Claims RWE — cohort building, utilization, PMPM costs, treatment patterns |
-
-### Pharma — Drug Safety
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-pharma-dsafety-pharmacovigilance](skills/hcls-pharma-dsafety-pharmacovigilance/) | Standalone | FDA FAERS adverse event analysis — PRR/ROR signal detection |
-| [hcls-pharma-dsafety-clinical-trial-protocol](skills/hcls-pharma-dsafety-clinical-trial-protocol/) | Standalone | Generate clinical trial protocols for FDA submissions |
-
-### Pharma — Genomics
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-pharma-genomics-nextflow](skills/hcls-pharma-genomics-nextflow/) | Standalone | nf-core bioinformatics pipelines (rnaseq, sarek, atacseq) |
-| [hcls-pharma-genomics-scvi-tools](skills/hcls-pharma-genomics-scvi-tools/) | Standalone | Deep learning single-cell analysis (scVI, scANVI, totalVI, PeakVI) |
-| [hcls-pharma-genomics-single-cell-qc](skills/hcls-pharma-genomics-single-cell-qc/) | Standalone | Automated scRNA-seq QC with MAD-based filtering |
-| [hcls-pharma-genomics-survival-analysis](skills/hcls-pharma-genomics-survival-analysis/) | Standalone | Kaplan-Meier, Cox regression, time-to-event modeling |
-| [hcls-pharma-genomics-variant-annotation](skills/hcls-pharma-genomics-variant-annotation/) | Standalone | VCF annotation with ClinVar, gnomAD, ACMG classification |
-
-### Pharma — Lab Operations
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-pharma-lab-allotrope](skills/hcls-pharma-lab-allotrope/) | Standalone | Convert lab instrument files to Allotrope Simple Model JSON |
-
-### Cross-Industry
-
-| Skill | Type | Description |
-|-------|------|-------------|
-| [hcls-cross-research-problem-selection](skills/hcls-cross-research-problem-selection/) | Standalone | Scientific problem selection framework |
-| [hcls-cross-cke-pubmed](skills/hcls-cross-cke-pubmed/) | CKE | RAG search over PubMed biomedical literature via Marketplace |
-| [hcls-cross-cke-clinical-trials](skills/hcls-cross-cke-clinical-trials/) | CKE | RAG search over ClinicalTrials.gov via Marketplace |
-
-## Skill Taxonomy
-
-Skills follow a five-level naming convention: `Industry / Sub-Industry / Business Function / Use Case / Sub-Skill`
+## Repository Structure
 
 ```
-Health Sciences
-├── Provider
-│   ├── Clinical Research
-│   │   ├── hcls-provider-imaging (router + 7 sub-skills)
-│   │   └── hcls-provider-imaging-dicom-parser (standalone)
-│   ├── Clinical Data Management
-│   │   ├── hcls-provider-cdata-fhir
-│   │   ├── hcls-provider-cdata-clinical-nlp
-│   │   ├── hcls-provider-cdata-omop
-│   │   └── hcls-provider-cdata-clinical-docs (router + 5 sub-skills)
-│   └── Revenue Cycle
-│       └── hcls-provider-claims-data-analysis
-│
-├── Pharma
-│   ├── Drug Safety
-│   │   ├── hcls-pharma-dsafety-pharmacovigilance
-│   │   └── hcls-pharma-dsafety-clinical-trial-protocol
-│   ├── Genomics
-│   │   ├── hcls-pharma-genomics-nextflow
-│   │   ├── hcls-pharma-genomics-variant-annotation
-│   │   ├── hcls-pharma-genomics-single-cell-qc
-│   │   ├── hcls-pharma-genomics-scvi-tools
-│   │   └── hcls-pharma-genomics-survival-analysis
-│   └── Lab Operations
-│       └── hcls-pharma-lab-allotrope
-│
-└── Cross-Industry
-    ├── Research Strategy
-    │   └── hcls-cross-research-problem-selection
-    └── Knowledge Extensions
-        ├── hcls-cross-cke-pubmed
-        └── hcls-cross-cke-clinical-trials
+coco-healthcare-skills/
+├── agents/                              # Orchestrator agent files
+│   ├── health-sciences-incubator.md     #   Incubator orchestrator (all skills)
+│   └── health-sciences-solutions.md     #   Production orchestrator (approved only)
+├── skills/                              # Flat skill directories
+│   ├── hcls-provider-imaging/           #   Router + sub-skills inside
+│   ├── hcls-provider-cdata-fhir/
+│   ├── hcls-pharma-dsafety-pharmacovigilance/
+│   ├── hcls-cross-cke-pubmed/
+│   └── ...
+├── templates/                           # Orchestrator generation templates
+│   ├── orchestrator.md.j2              #   Shared Jinja2 template
+│   ├── skills_incubator.yaml           #   Incubator skills registry
+│   └── skills_production.yaml          #   Production skills registry
+├── shared/                              # Shared infrastructure
+│   └── preflight/                       #   Prerequisite checker pattern
+├── references/                          # Data model spreadsheets
+├── scripts/                             # Setup, generation, and QA scripts
+└── README.md
 ```
 
 ## Agent Profiles
@@ -437,46 +588,98 @@ Each profile is a Markdown file with YAML frontmatter (`name`, `description`, `t
 
 Use `/agents` in Cortex Code to list and switch between registered profiles. Only one profile is active at a time.
 
-## Cross-Domain Composition Patterns
+## Skill Development Lifecycle
 
-Skills can be composed for end-to-end solutions:
-
-| Pattern | Skills Involved |
-|---------|----------------|
-| **Clinical Data Warehouse** | FHIR → OMOP CDM → governance → semantic views |
-| **Imaging + Clinical** | dicom-parser → FHIR → clinical-nlp → PubMed CKE → Streamlit |
-| **Drug Safety** | pharmacovigilance → PubMed CKE → clinical-nlp → claims analysis |
-| **Genomics Pipeline** | nextflow → variant-annotation → survival-analysis → ML |
-| **Single-Cell** | single-cell-qc → scvi-tools → ML Registry |
-| **Real-World Evidence** | claims → ClinicalTrials CKE → OMOP → survival-analysis → PubMed CKE |
-| **Clinical Trial Design** | research-problem-selection → ClinicalTrials CKE → PubMed CKE → protocol generation |
-| **Document Intelligence** | clinical-docs extraction → search → agent → governance |
-
-## Contributing a New Skill
-
-Each skill follows this layout:
+This repo is the **incubator** in a two-repo model:
 
 ```
-skills/{skill-name}/
-├── SKILL.md           # Main instructions (required)
-├── scripts/           # Python/SQL helper scripts (optional)
-├── references/        # Domain documentation (optional)
-└── assets/            # Templates, sample data (optional)
+Snowflake-Solutions/health-sciences-incubator    ← THIS REPO (Phase 0 & 1)
+        │
+        │  Skills mature here, then graduate ↓
+        │
+Snowflake-Solutions/cortex-code-skills           ← SFS production repo (Phase 2)
 ```
 
-To add a new skill:
+| Phase | Repo | Who | What |
+|-------|------|-----|------|
+| **Phase 0: Setup** | This repo (incubator) | Tiger Team | Create repo, guidelines, profile, orchestrator |
+| **Phase 1: Incubate** | This repo (incubator) | Anyone (SEs, SAs, field) | Branch, create, test, iterate on skills |
+| **Phase 2: Harden** | SFS cortex-code-skills | Tiger Team only | Audit, test, promote: draft → review → staging → production |
+| **Phase 3: Publish** | Snowflake registry | Tiger Team | Publish production profile for field teams |
+| **Phase 4: Consume** | Field environments | Field teams | `cortex profile add health-sciences-solutions` |
 
-1. Create the skill folder under `skills/` following the naming convention
-2. Write `SKILL.md` with frontmatter (`name`, `description`, optional `parent_skill`, `tools`)
-3. Register in `templates/skills_incubator.yaml`
-4. Regenerate orchestrators: `python scripts/generate_orchestrators.py --profile incubator`
-5. Add to the taxonomy tree and skills reference table in this README
+### Adding a New Skill
+
+A contributor creates their skill directory under `skills/` and then refreshes the orchestrator so it can route to the new skill. This workflow is designed to become a skill itself — ask the orchestrator to "add a new skill" and it walks through these steps automatically.
+
+1. Create the skill directory following the naming convention: `skills/hcls-{sub}-{func}-{skill}/`
+2. Add `SKILL.md` with proper frontmatter (`name`, `description`, `tools`)
+3. Register the skill in `templates/skills_incubator.yaml` (triggers, description, domain, and any sub-skills or CKE metadata)
+4. Regenerate the orchestrator:
+   ```bash
+   python scripts/generate_orchestrators.py --profile incubator
+   ```
+5. Verify `agents/health-sciences-incubator.md` includes the new skill in the taxonomy tree and routing tables
+6. Commit the skill directory, registry update, and regenerated orchestrator
 
 For router skills with sub-skills, see `hcls-provider-cdata-clinical-docs/` or `hcls-provider-imaging/` as templates.
 
+### Incubator Milestone Tagging
+
+The incubator does **not** use semantic versioning. Instead, lightweight git tags called **milestones** mark known-good states for specific use cases or demos.
+
+```
+m{sequence}-{scope}-{optional-context}
+```
+
+| Tag | Meaning |
+|-----|---------|
+| `m1-imaging` | First stable milestone: imaging skills working end-to-end |
+| `m2-imaging-genomics` | Added genomics skills on top of m1 |
+| `m3-rwe-demo` | Stable point for a specific RWE customer demo |
+| `m4-full-skills` | All skills reorganized and QA-validated |
+| `m5-pre-sfs-batch1` | Snapshot before first batch submitted to SFS |
+
+**When to create a milestone:**
+- Domain skills pass QA validation for a demo
+- Before submitting a batch to the SFS production repo
+- Customer-specific engagement needing a frozen state
+- After a major reorganization or refactor
+
+**How field teams use milestones:**
+```bash
+cortex profile add health-sciences-incubator --ref m4-full-skills   # stable demo
+cortex profile add health-sciences-incubator                         # bleeding edge (latest main)
+```
+
+**Key properties:**
+- Zero overhead: `git tag m4-full-skills && git push --tags`
+- Not semver — no compatibility promises, just "this worked when tagged"
+- Deletable: `git tag -d m3-bad && git push --delete origin m3-bad`
+- Incubator only — production uses proper semver (`v1.0.0`) on the SFS repo with immutable releases
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Industry Solutions Framework PDF](Industry_Solutions_Framework_-_Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Consolidated 25-page reference covering architecture, lifecycle, taxonomy, skills inventory, patterns, and getting started |
+| [agents/health-sciences-incubator.md](agents/health-sciences-incubator.md) | Orchestrator agent with routing rules, taxonomy tree, CKE integration, cross-domain patterns, and HIPAA guardrails |
+
+## Contributing
+
+This is the **incubator** — contributions are welcome from SEs, SAs, and field teams.
+
+1. Branch from `main`
+2. Create your skill under `skills/` following the `hcls-{sub}-{func}-{skill}` naming convention
+3. Add `SKILL.md` with proper frontmatter (`name`, `description`, `tools`)
+4. Include `scripts/`, `references/`, and `assets/` as needed
+5. Test via: `cortex profile add health-sciences-incubator` or `cortex skill add <path>`
+6. Push your branch and signal to Tiger Team when ready for Phase 2 promotion
+
 ## Acknowledgments
 
-- [Anthropic Life Sciences](https://github.com/anthropics/life-sciences) — original skill foundations
+- [Snowflake Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)
+- [Anthropic Life Sciences](https://github.com/anthropics/life-sciences) — foundational genomics/research skills
 - [scverse](https://scverse.org/) — single-cell analysis ecosystem
 - [nf-core](https://nf-co.re/) — bioinformatics pipeline community
 - [OHDSI](https://ohdsi.org/) — OMOP Common Data Model
