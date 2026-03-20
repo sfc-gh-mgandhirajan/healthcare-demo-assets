@@ -255,13 +255,16 @@ document_type_specs.yaml (authoritative source of truth)
 The pipeline is fully config-driven. To add a new document type:
 
 1. Add an entry to `references/document_type_specs.yaml`
-2. Seed the config table from the spec
-3. `CALL GENERATE_DYNAMIC_OBJECTS()` — one call creates everything:
-   - Classification prompt update (LISTAGG of all types)
-   - New pivot view
-   - Refresh task rebuild with new JOIN
-   - Semantic View update
-   - Schema CKE + Spec CKE refresh
+2. Seed the config table from the spec (INSERT rows or COPY INTO from CSV)
+3. `CALL GENERATE_DYNAMIC_OBJECTS('{db}', '{schema}', '{warehouse}', '{stage}')` — one parameterized call does everything:
+   - Config deduplication (removes duplicate rows from repeated loads)
+   - Classification + type-specific extraction config seeding
+   - Classification prompt update (LISTAGG of all discovered types)
+   - New pivot view per doc type
+   - MRN_PATIENT_MAPPING view creation
+   - Refresh task rebuild with dynamic JOINs to all pivot views
+   - Semantic View update (DIMENSIONS + METRICS from config table)
+   - Schema CKE + Spec CKE corpus refresh
 
 ### Key Reference Files
 
@@ -270,7 +273,15 @@ The pipeline is fully config-driven. To add a new document type:
 | `references/document_type_specs.yaml` | Authoritative doc type definitions (fields, prompts, PHI flags) |
 | `references/architecture.md` | Pipeline architecture and design decisions |
 | `references/metadata_as_cke.md` | CKE pattern documentation and DICOM comparison |
-| `clinical-document-extraction/scripts/dynamic_pipeline_setup.sql` | All DDL — tables, procs, CKE services, search services |
+| `clinical-document-extraction/scripts/dynamic_pipeline_setup.sql` | All DDL — tables, UDFs, CKE search services, GENERATE_DYNAMIC_OBJECTS proc |
+| `clinical-document-extraction/scripts/proc_preprocess_clinical_docs.sql` | Preprocessing — splits large PDFs, populates DOCUMENT_HIERARCHY |
+| `clinical-document-extraction/scripts/proc_parse_with_images.sql` | AI_PARSE_DOCUMENT — OCR/layout with optional image extraction |
+| `clinical-document-extraction/scripts/proc_classify_metadata.sql` | AI_COMPLETE-based document classification |
+| `clinical-document-extraction/scripts/proc_extract_type_specific.sql` | AI_EXTRACT — doc-type-specific field extraction |
+| `clinical-document-extraction/scripts/proc_classify_aggregated.sql` | AI_AGG-based classification for multi-page split docs |
+| `clinical-document-extraction/scripts/proc_extract_with_ai_agg.sql` | AI_AGG-based extraction for multi-page split docs |
+
+> **Note**: `dynamic_pipeline_setup.sql` is designed for **Snowsight worksheet execution** (single session). It will NOT work with `snow sql -f` due to session variable scoping, nested `$$` delimiters, and EXECUTE IMMEDIATE parsing. For CLI/CoCo execution, decompose into individual steps — see the execution notes in the file header.
 
 ---
 
