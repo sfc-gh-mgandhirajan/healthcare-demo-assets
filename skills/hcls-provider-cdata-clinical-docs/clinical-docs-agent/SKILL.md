@@ -113,14 +113,46 @@ Reference: https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view
 
 **Clause order matters**: TABLES → RELATIONSHIPS → FACTS → DIMENSIONS → METRICS → COMMENT
 
-**PIVOT view dimension aliases MUST match the original column name**:
-When creating DIMENSIONS over PIVOT views (e.g., `DISCHARGE_SUMMARY_V`, `PATHOLOGY_REPORTS_V`), the column reference (right side of `AS`) **must exactly match** the physical column name in the underlying pivot view. PIVOT views generate columns from `FIELD_NAME` values — if the column is `MRN`, the dimension must be `TABLE.MRN AS MRN`, **not** `TABLE.MRN AS DS_MRN`. Using a non-matching alias causes `invalid identifier` errors at query time.
+⚠️ **CRITICAL — Semantic View DIMENSIONS/METRICS syntax is REVERSED from normal SQL**:
 
-- WRONG: `DISCHARGE_SUMMARY.MRN AS DS_MRN` — `DS_MRN` does not exist in the pivot view → `invalid identifier`
-- RIGHT: `DISCHARGE_SUMMARY.MRN AS MRN` — matches the actual pivot column name
-- RIGHT: `DISCHARGE_SUMMARY.PATIENT_NAME AS PATIENT_NAME` — matches the actual pivot column name
+The `CREATE SEMANTIC VIEW` syntax for DIMENSIONS and METRICS is:
+```
+TABLE_REF.NEW_DIMENSION_NAME AS EXISTING_COLUMN_NAME
+         ^^^^^^^^^^^^^^^^^^      ^^^^^^^^^^^^^^^^^^^^
+         (you invent this)       (must exist in the table)
+```
 
-> **Rule**: For PIVOT-backed tables, always verify column names with `SELECT * FROM <pivot_view> LIMIT 1` and use those exact names in both sides of the dimension definition.
+This is the **OPPOSITE** of standard SQL aliasing (`SELECT column AS alias`). In standard SQL the alias is on the **right** of `AS`; in Semantic Views the new name is on the **LEFT** of `AS` and the existing column is on the **RIGHT**.
+
+**Examples**:
+```sql
+DIMENSIONS (
+    -- TABLE_REF.NEW_NAME AS EXISTING_COLUMN
+    DISCHARGE_SUMMARY_V.DS_MRN AS MRN,                     -- ✅ MRN is a real column
+    DISCHARGE_SUMMARY_V.DS_PATIENT AS PATIENT_NAME,         -- ✅ PATIENT_NAME is a real column
+    RADIOLOGY_REPORTS_V.RR_IMPRESSION AS IMPRESSION          -- ✅ IMPRESSION is a real column
+)
+METRICS (
+    -- TABLE_REF.NEW_NAME AS AGGREGATE_EXPRESSION
+    DISCHARGE_SUMMARY_V.PAT_CT AS COUNT(DISTINCT MRN)       -- ✅ MRN is a real column
+)
+```
+
+**Common mistake** (will fail with `invalid identifier`):
+```sql
+-- ❌ WRONG — standard SQL alias syntax does NOT work here
+DISCHARGE_SUMMARY_V.MRN AS DS_MRN           -- DS_MRN is not a column → invalid identifier
+DISCHARGE_SUMMARY_V.PATIENT_NAME AS DS_PAT   -- DS_PAT is not a column → invalid identifier
+```
+
+> **Rule**: The **right side** of `AS` in DIMENSIONS must be an existing column name in the table (or an aggregate expression in METRICS). Always verify column names with `DESCRIBE VIEW <view_name>` before defining dimensions.
+
+**When multiple tables share column names** (e.g., MRN, PATIENT_NAME), use unique dimension names on the LEFT:
+```sql
+DISCHARGE_SUMMARY_V.DS_MRN AS MRN,          -- unique name DS_MRN, references column MRN
+OPERATIVE_NOTES_V.ON_MRN AS MRN,            -- unique name ON_MRN, references column MRN
+PATHOLOGY_REPORTS_V.PR_MRN AS MRN            -- unique name PR_MRN, references column MRN
+```
 
 **Metrics must be aggregate expressions**:
 - WRONG: `alias.los AS DATEDIFF(DAY, col1, col2)` — scalar, not aggregate

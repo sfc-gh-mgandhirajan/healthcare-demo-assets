@@ -723,6 +723,14 @@ BEGIN
     --
     --    DIMENSIONS are built from the config table (NOT INFORMATION_SCHEMA)
     --    because views created earlier in this proc are not yet committed.
+    --
+    --    ⚠️ CRITICAL — DIMENSIONS SYNTAX IS REVERSED FROM NORMAL SQL:
+    --       Format:  TABLE_REF.NEW_DIMENSION_NAME AS EXISTING_COLUMN_NAME
+    --       The NEW name is on the LEFT of AS, the EXISTING column on the RIGHT.
+    --       This is the OPPOSITE of standard SQL (SELECT col AS alias).
+    --       Example: DISCHARGE_SUMMARY_V.DS_MRN AS MRN
+    --                (DS_MRN = new dimension, MRN = physical column in the view)
+    --       WRONG:   TABLE.MRN AS DS_MRN → "invalid identifier" (DS_MRN not a column)
     -- =====================================================================
     IF (v_sv_tables != '') THEN
         -- Build DIMENSIONS from config table (dynamic RESULTSET cursor)
@@ -905,7 +913,12 @@ $$;
 --    Seeds config, updates classification question, creates pivot views + task +
 --    Semantic View, refreshes Schema CKE (model corpus) + Spec CKE (doc type specs)
 -- 4. Upload clinical PDFs to stage
--- 5. Run extraction pipeline (stored procs from stored_procedures.sql)
+-- 5. Create pipeline stored procedures from individual proc_*.sql files:
+--    proc_preprocess_clinical_docs.sql, proc_classify_metadata.sql,
+--    proc_extract_type_specific.sql, proc_classify_aggregated.sql,
+--    proc_extract_with_ai_agg.sql, proc_parse_with_images.sql
+--    Replace {db}/{schema}/{stage} tokens with actual values before execution.
+--    (Legacy monolithic version: stored_procedures.sql — retained for reference)
 --
 -- CKE services (created separately — see data-model-knowledge/SKILL.md):
 --   - CLINICAL_DOCS_MODEL_SEARCH_SVC  (Schema CKE — over MODEL_REFERENCE table)

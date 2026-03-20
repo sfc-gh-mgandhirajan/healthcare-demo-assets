@@ -164,6 +164,30 @@ Split large DDL batches into 3-4 statements maximum.
 
 1. Cortex AI features enabled (AI_PARSE_DOCUMENT, AI_EXTRACT, AI_AGG)
 2. Pipeline objects created via `scripts/dynamic_pipeline_setup.sql`
+3. Pipeline stored procedures created from modular `scripts/proc_*.sql` files (see §"Creating Pipeline Stored Procedures" below)
+
+## Creating Pipeline Stored Procedures (Modular Files)
+
+The 6 pipeline stored procedures are defined as **individual SQL files** in `scripts/proc_*.sql`. Each file uses `$$` delimiters (no nested EXECUTE IMMEDIATE escaping) and `{db}/{schema}` placeholder tokens.
+
+| File | Procedure | Language |
+|------|-----------|----------|
+| `proc_preprocess_clinical_docs.sql` | PREPROCESS_CLINICAL_DOCS | Python |
+| `proc_classify_metadata.sql` | EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | SQL |
+| `proc_extract_type_specific.sql` | EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES | SQL |
+| `proc_classify_aggregated.sql` | CLASSIFY_AGGREGATED_DOCUMENTS | SQL |
+| `proc_extract_with_ai_agg.sql` | EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES_WITH_AI_AGG | SQL |
+| `proc_parse_with_images.sql` | CLINICAL_DOCUMENTS_PARSE_WITH_IMAGES_V2 | SQL |
+
+**To create each procedure:**
+1. Read the file contents
+2. Replace `{db}` → actual database name, `{schema}` → actual schema name
+3. For `proc_preprocess_clinical_docs.sql`, also replace `{stage}` → actual stage name
+4. Execute via `snowflake_sql_execute` — the `$$` delimiters work directly with no escaping issues
+
+**Why modular?** The legacy `stored_procedures.sql` wraps all 6 procs in a single EXECUTE IMMEDIATE block with 4+ levels of quote escaping (`''''text''''`). This makes it impossible to execute via `snowflake_sql_execute` or `snow sql`. The modular files eliminate all escaping complexity.
+
+> **Legacy file**: `stored_procedures.sql` is retained for reference but should NOT be used for procedure creation. Use the individual `proc_*.sql` files instead.
 
 ## Execution Notes (CRITICAL for CoCo agents)
 
@@ -255,9 +279,9 @@ These rules prevent the 8 most common runtime errors encountered when building S
 | 10 | **TO_FILE does not support FQN stage names** | `invalid argument for function [TO_FILE]` | `TO_FILE(@DB.SCHEMA.STAGE, path)` fails. Set `USE DATABASE/SCHEMA` context first, then use short stage name: `TO_FILE(@STAGE, path)`. |
 | 11 | **AI_EXTRACT unreliable for classification — RESOLVED** | All docs classified identically | `AI_EXTRACT` with `responseFormat` returned the same classification for all documents. **Fixed**: `EXTRACT_DOCUMENT_CLASSIFICATION_METADATA` now uses `AI_PARSE_DOCUMENT` (OCR) + `AI_COMPLETE` (two-step) for classification. Field extraction still uses `AI_EXTRACT`. |
 | 12 | **Use AI_* top-level functions** | `Invalid argument types for function` | Use `AI_COMPLETE`, `AI_PARSE_DOCUMENT(TO_FILE(...))`, `AI_EXTRACT`, `AI_AGG`. Do NOT use deprecated `SNOWFLAKE.CORTEX.COMPLETE` or `SNOWFLAKE.CORTEX.PARSE_DOCUMENT(@stage, path, opts)`. The `SNOWFLAKE.CORTEX.SEARCH_PREVIEW` and `SNOWFLAKE.CORTEX.DATA_AGENT_RUN` are Cortex Search/Agent APIs and remain unchanged. |
-| 13 | **Semantic View DIMENSIONS syntax** | `invalid identifier` or `syntax error` | DIMENSIONS use `TABLE.DIM_NAME AS COLUMN_NAME` (dimension name first, column name second). Example: `DISCHARGE_SUMMARY_V.DS_MRN AS MRN`. This is the OPPOSITE of normal SQL aliasing (`SELECT col AS alias`). |
+| 13 | **Semantic View DIMENSIONS syntax is REVERSED from normal SQL** | `invalid identifier` or `syntax error` | **CRITICAL**: DIMENSIONS use `TABLE.NEW_DIM_NAME AS EXISTING_COLUMN` — the NEW name is on the LEFT, the EXISTING column is on the RIGHT. This is the **OPPOSITE** of standard SQL (`SELECT col AS alias`). Example: `DISCHARGE_SUMMARY_V.DS_MRN AS MRN` (DS_MRN = new dimension name, MRN = physical column). **WRONG**: `TABLE.MRN AS DS_MRN` (DS_MRN is not a column). Always run `DESCRIBE VIEW <view>` to verify column names before defining dimensions. |
 | 14 | **Classification underscore normalization** | Config mismatch / empty extraction results | AI models return classifications with underscores (`DISCHARGE_SUMMARY`) but config uses spaces (`DISCHARGE SUMMARY`). After classification, always run: `UPDATE ... SET FIELD_VALUE = REPLACE(FIELD_VALUE, '_', ' ') WHERE FIELD_NAME = 'DOCUMENT_CLASSIFICATION'`. |
 | 15 | **Split documents must be classified before extraction** | NULL classification for split docs | Split documents (from preprocessing) have parent documents that are NOT classified by `EXTRACT_DOCUMENT_CLASSIFICATION_METADATA`. Parse split docs first, then call `CLASSIFY_AGGREGATED_DOCUMENTS()` BEFORE the extraction phase. |
 | 16 | **`EXECUTE IMMEDIATE ... INTO :var` inside `$$` fails via snowflake_sql_execute** | `syntax error ... unexpected 'INTO'` | The `snowflake_sql_execute` tool cannot parse `EXECUTE IMMEDIATE '...' INTO :v_dup_count` inside a `$$`-delimited stored procedure body. This pattern works in Snowsight worksheets but fails when sent through the CoCo tool. **Fix**: Do NOT create the proc. Execute each step as individual SQL statements, replacing `:v_dup_count` with a direct query. |
 | 17 | **`IDENTIFIER(var \|\| '...')` inside `$$` fails via snowflake_sql_execute** | `syntax error ... unexpected 'v_fqn'` | `SELECT ... FROM IDENTIFIER(v_fqn \|\| '.TABLE_NAME')` inside a `$$` proc body causes parse errors when sent through `snowflake_sql_execute`. **Fix**: Do NOT create the proc. Execute each step as individual SQL with hardcoded FQN values (e.g., `FROM {db}.{schema}.TABLE_NAME`). |
-| 18 | **Semantic View DIMENSION aliases over PIVOT views must match original column names** | `invalid identifier` | PIVOT views generate columns from `FIELD_NAME` values. Semantic View dimension aliases (the `AS <name>` part) **must exactly match** the physical column name in the pivot view. `TABLE.MRN AS MRN` works; `TABLE.MRN AS DS_MRN` fails because `DS_MRN` does not exist. Always run `SELECT * FROM <pivot_view> LIMIT 1` to verify column names before defining dimensions. |
+| 18 | **Semantic View DIMENSION — right side of AS must be a real column** | `invalid identifier` | In `TABLE.X AS Y`, Y **must be an existing physical column** in the table/view. PIVOT views generate columns from `FIELD_NAME` values (e.g., MRN, PATIENT_NAME). `TABLE.DS_MRN AS MRN` works (MRN exists); `TABLE.MRN AS DS_MRN` fails (DS_MRN does not exist). Always verify with `DESCRIBE VIEW <pivot_view>` first. See also constraint 13. |

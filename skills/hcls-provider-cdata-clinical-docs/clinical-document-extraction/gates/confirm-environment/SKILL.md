@@ -154,7 +154,10 @@ scripts/dynamic_pipeline_setup.sql
 1. Read script file contents
 2. Replace all `$V_DB`, `$V_SCHEMA`, `$V_WAREHOUSE` with confirmed values
 3. Run each STEP section as a separate `snowflake_sql_execute` call
-4. Then run `scripts/stored_procedures.sql` the same way
+4. Then create the 6 pipeline stored procedures from `scripts/proc_*.sql` files:
+   - Read each file, replace `{db}` / `{schema}` / `{stage}` tokens with confirmed values
+   - Execute each via `snowflake_sql_execute` (they use `$$` delimiters — no escaping issues)
+   - Files: `proc_preprocess_clinical_docs.sql`, `proc_classify_metadata.sql`, `proc_extract_type_specific.sql`, `proc_classify_aggregated.sql`, `proc_extract_with_ai_agg.sql`, `proc_parse_with_images.sql`
 
 > See parent orchestrator's **Execution Notes** section for critical `IDENTIFIER()`, connection, and FQN constraints.
 

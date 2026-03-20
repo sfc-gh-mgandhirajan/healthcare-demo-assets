@@ -147,7 +147,7 @@
 | Tables | 1 (optional) | DATA_MODEL_KNOWLEDGE | CLINICAL_DOCS_SPECS_REFERENCE (loaded from document_type_specs.yaml) |
 | Views | Auto-generated pivot views + MRN_PATIENT_MAPPING (auto-grows with doc types) | {schema} | One pivot view per doc type with a VIEW_NAME in extraction config |
 | UDFs | 3 | {schema} | BUILD_DOCUMENT_CLASIFICATION_EXTRACTION_JSON, BUILD_DOC_TYPE_EXTRACTION_JSON, INJECT_IMAGE_DESCRIPTIONS |
-| Stored Procedures | 7 | {schema} | GENERATE_DYNAMIC_OBJECTS + 6 pipeline procs (see below) |
+| Stored Procedures | 7 | {schema} | GENERATE_DYNAMIC_OBJECTS + 6 pipeline procs (modular `proc_*.sql` files) |
 | Stream | 1 | {schema} | DOCS_PARSE_OUTPUT_STREAM (APPEND_ONLY) |
 | Task | 1 | {schema} | REFRESH_RAW_CONTENT_TASK (99-hour schedule, stream-triggered) |
 | Stage | 1 | {schema} | INTERNAL_CLINICAL_DOCS_STAGE |
@@ -159,15 +159,17 @@
 
 ### Stored Procedures
 
-| Procedure | Purpose | AI Function |
-|-----------|---------|-------------|
-| GENERATE_DYNAMIC_OBJECTS | Creates/refreshes all dynamic objects (7 steps) | — |
-| EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | Classify single (non-split) documents | AI_PARSE_DOCUMENT + AI_COMPLETE |
-| EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES | Extract fields from single documents | AI_EXTRACT |
-| CLASSIFY_AGGREGATED_DOCUMENTS | Classify split documents across pages | AI_AGG |
-| EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES_WITH_AI_AGG | Extract fields from split documents | AI_AGG |
-| PREPROCESS_CLINICAL_DOCS | Split large PDFs, register all file types | — (PyPDF2) |
-| CLINICAL_DOCUMENTS_PARSE_WITH_IMAGES_V2 | Parse documents with OCR/LAYOUT + images | AI_PARSE_DOCUMENT |
+Each pipeline procedure is defined in its own file under `scripts/proc_*.sql` with `$$` delimiters and `{db}/{schema}` placeholder tokens. Replace tokens with actual values before execution. The legacy monolithic `stored_procedures.sql` is retained for reference only.
+
+| Procedure | Source File | Purpose | AI Function |
+|-----------|------------|---------|-------------|
+| GENERATE_DYNAMIC_OBJECTS | `dynamic_pipeline_setup.sql` | Creates/refreshes all dynamic objects (7 steps) | — |
+| EXTRACT_DOCUMENT_CLASSIFICATION_METADATA | `proc_classify_metadata.sql` | Classify single (non-split) documents | AI_PARSE_DOCUMENT + AI_COMPLETE |
+| EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES | `proc_extract_type_specific.sql` | Extract fields from single documents | AI_EXTRACT |
+| CLASSIFY_AGGREGATED_DOCUMENTS | `proc_classify_aggregated.sql` | Classify split documents across pages | AI_AGG |
+| EXTRACT_DOCUMENT_TYPE_SPECIFIC_VALUES_WITH_AI_AGG | `proc_extract_with_ai_agg.sql` | Extract fields from split documents | AI_AGG |
+| PREPROCESS_CLINICAL_DOCS | `proc_preprocess_clinical_docs.sql` | Split large PDFs, register all file types | — (PyPDF2) |
+| CLINICAL_DOCUMENTS_PARSE_WITH_IMAGES_V2 | `proc_parse_with_images.sql` | Parse documents with OCR/LAYOUT + images | AI_PARSE_DOCUMENT |
 
 ## GENERATE_DYNAMIC_OBJECTS() — What It Creates
 
