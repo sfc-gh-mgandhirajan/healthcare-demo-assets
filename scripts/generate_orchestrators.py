@@ -42,6 +42,8 @@ DOMAIN_ORDER = [
     "Pharma > Genomics",
     "Pharma > Lab Operations",
     "Cross-Industry > Research Strategy",
+    "Cross-Industry > Skill Development",
+    "Cross-Industry > Knowledge Extensions",
 ]
 
 PROFILE_OUTPUT = {

@@ -1,6 +1,15 @@
 ---
 name: hcls-pharma-dsafety-clinical-trial-protocol
 description: Generate clinical trial protocols for medical devices or drugs. This skill should be used when users say "Create a clinical trial protocol", "Generate protocol for [device/drug]", "Help me design a clinical study", "Research similar trials for [intervention]", or when developing FDA submission documentation for investigational products.
+platform_affinities:
+  produces: [tables, stages]
+  benefits_from:
+    - skill: cortex-ai-functions
+      when: "using AI_COMPLETE for protocol narrative generation or regulatory text drafting"
+    - skill: developing-with-streamlit
+      when: "user wants an interactive protocol builder or review dashboard"
+    - skill: search-optimization
+      when: "user needs semantic search over prior protocols or regulatory templates"
 ---
 
 # Clinical Trial Protocol Skill

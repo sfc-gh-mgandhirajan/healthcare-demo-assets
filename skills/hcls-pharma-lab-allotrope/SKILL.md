@@ -1,6 +1,17 @@
 ---
 name: hcls-pharma-lab-allotrope
 description: Convert laboratory instrument output files (PDF, CSV, Excel, TXT) to Allotrope Simple Model (ASM) JSON format or flattened 2D CSV. Use this skill when scientists need to standardize instrument data for LIMS systems, data lakes, or downstream analysis. Supports auto-detection of instrument types. Outputs include full ASM JSON, flattened CSV for easy import, and exportable Python code for data engineers. Common triggers include converting instrument files, standardizing lab data, preparing data for upload to LIMS/ELN systems, or generating parser code for production pipelines.
+platform_affinities:
+  produces: [tables, stages]
+  benefits_from:
+    - skill: cortex-ai-functions
+      when: "using AI_PARSE_DOCUMENT to extract data from instrument PDFs"
+    - skill: dynamic-tables
+      when: "incremental refresh needed for ongoing instrument data feeds"
+    - skill: data-quality
+      when: "user needs to validate instrument data conformance to ASM schema"
+    - skill: developing-with-streamlit
+      when: "user wants an instrument data viewer or conversion dashboard"
 ---
 
 # Instrument Data to Allotrope Converter

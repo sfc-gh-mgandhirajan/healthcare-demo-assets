@@ -3,7 +3,7 @@ from fpdf import FPDF
 import os
 
 OUTPUT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUTPUT_PATH = os.path.join(OUTPUT_DIR, "Industry_Solutions_Framework.pdf")
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "documentation", "Industry_Solutions_Framework.pdf")
 
 
 class FrameworkPDF(FPDF):

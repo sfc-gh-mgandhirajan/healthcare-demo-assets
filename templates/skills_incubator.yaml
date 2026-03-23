@@ -1,9 +1,11 @@
 profile:
   name: health-sciences-incubator
   description: >-
-    Health Sciences incubator profile for experimental skill development on Snowflake.
-    Orchestrates skills across medical imaging, clinical data, drug safety, claims/RWE,
-    genomics, and lab data. Includes experimental and in-development skills.
+    Industry Solutions Architect for Health Sciences on Snowflake.
+    Brings together composable industry skills to solve healthcare and life sciences
+    problems end-to-end — from data ingestion and interoperability through analytics,
+    AI, governance, and applications. Covers medical imaging, clinical data management,
+    drug safety, real-world evidence, genomics, and lab operations.
     Triggers: healthcare, clinical, EHR, FHIR, HL7, DICOM, imaging, radiology,
     patient data, HIPAA, PHI, claims, RWE, pharmacovigilance, drug safety,
     clinical trial, FAERS, genomics, variant, single-cell, RNA-seq, bioinformatics,
@@ -11,12 +13,15 @@ profile:
     Kaplan-Meier, scvi-tools, nextflow, nf-core, React, dashboard, clinical app,
     patient portal, healthcare UI, PubMed, biomedical literature, CKE,
     knowledge extension, ClinicalTrials.gov, trial search, literature review.
-  title: Health Sciences Incubator Profile
+  title: Health Sciences Industry Solutions Architect
   intro: >-
-    You are a **Health Sciences Solutions Architect** working in the incubator
-    environment. You have access to all skills -- including experimental and
-    in-development skills -- for rapid prototyping and customer demos. Skills
-    in this environment may be rough or evolving. Always validate outputs.
+    You are an **Industry Solutions Architect for Health Sciences**. You solve
+    healthcare and life sciences problems by composing the right combination of
+    industry skills and Snowflake platform capabilities into end-to-end solutions —
+    spanning data ingestion, interoperability, analytics, AI, governance, and
+    applications. You understand the business context (Provider, Pharma, Payer),
+    select the appropriate domain skills, chain them with platform skills, and
+    deliver working pipelines grounded in clinical standards and HIPAA compliance.
 
 skills:
   hcls-provider-imaging:
@@ -152,6 +157,11 @@ skills:
       - hcls-provider-cdata-clinical-docs
     invoke_when: "Drug-event associations, radiology research, clinical NLP context, research landscape review, clinical document grounding"
 
+  hcls-cross-skill-development:
+    triggers: "add skill, new skill, create skill, register skill, scaffold skill, contribute skill"
+    description: "Guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing"
+    domain: "Cross-Industry > Skill Development"
+
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
     description: "ClinicalTrials.gov research database"
@@ -172,12 +182,15 @@ overlaps:
   - skill: hcls-provider-cdata-clinical-nlp
     serves: "Provider (EHR extraction) and Pharma (safety narrative mining)"
   - skill: hcls-provider-cdata-clinical-docs
+    serves: "Provider (clinical document intelligence) and Pharma (safety narrative extraction from source documents)"
     overlaps_with: hcls-provider-cdata-clinical-nlp
     resolution: >-
       clinical-nlp = text-only NER/entity extraction from clinical notes (no document pipeline).
       clinical-docs = full document pipeline (PDF/DOCX -> AI_PARSE_DOCUMENT + AI_EXTRACT + AI_AGG -> Search/Agent/Viewer).
       Route "discharge summary extraction from PDF" to clinical-docs.
       Route "extract entities from clinical text" to clinical-nlp.
+      If the input is a FILE (PDF, DOCX, image) -> always clinical-docs first, then optionally clinical-nlp for NER enrichment.
+      If the input is already PLAIN TEXT -> clinical-nlp directly.
 
 patterns:
   - name: "Imaging + Clinical Integration"

@@ -1,6 +1,21 @@
 ---
 name: hcls-provider-imaging
 description: "**[REQUIRED]** Use for ALL DICOM medical imaging tasks on Snowflake. This is the entry point for healthcare imaging solutions combining platform skills with clinical imaging workflows. Triggers: DICOM, medical imaging, radiology, imaging pipeline, PACS, imaging viewer, imaging AI, imaging governance, HIPAA imaging, clinical images, pathology images, imaging metadata, imaging ML, imaging model, imaging analytics, healthcare imaging, imaging data lake, imaging FHIR, imaging study, imaging series, data model knowledge, DICOM schema reference, model repository."
+platform_affinities:
+  produces: [tables, views, dynamic_tables, streams, tasks, stages, masking_policies, cortex_search_service, ml_models]
+  benefits_from:
+    - skill: dynamic-tables
+      when: "incremental refresh needed for ongoing DICOM ingestion feeds"
+    - skill: data-governance
+      when: "imaging tables contain PHI (patient name, ID, birth date, referring physician)"
+    - skill: developing-with-streamlit
+      when: "user wants an imaging metadata dashboard or DICOM viewer"
+    - skill: deploy-to-spcs
+      when: "user needs a pixel-level DICOM viewer deployed as a container service"
+    - skill: machine-learning
+      when: "user wants to train or deploy radiology AI models"
+    - skill: search-optimization
+      when: "user needs full-text search over radiology reports or imaging metadata"
 ---
 
 # Healthcare Imaging Solutions on Snowflake

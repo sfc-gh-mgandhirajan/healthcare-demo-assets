@@ -1,6 +1,19 @@
 ---
 name: hcls-provider-claims-data-analysis
 description: Analyze healthcare claims data for real-world evidence (RWE) studies. Use when working with medical/pharmacy claims (837/835), calculating utilization metrics, building patient cohorts, or analyzing treatment patterns. Triggers include claims data, RWE, real-world evidence, 837, 835, medical claims, pharmacy claims, utilization, treatment patterns, HEDIS, healthcare analytics.
+platform_affinities:
+  produces: [tables, views]
+  benefits_from:
+    - skill: semantic-view
+      when: "user needs natural language queries or analytics dashboards over claims data"
+    - skill: data-governance
+      when: "claims tables contain PHI (member IDs, diagnoses, procedures)"
+    - skill: data-quality
+      when: "user needs to validate claims data completeness, duplicates, or conformance"
+    - skill: developing-with-streamlit
+      when: "user wants a claims analytics dashboard or utilization report"
+    - skill: dynamic-tables
+      when: "incremental refresh needed for ongoing claims feeds"
 ---
 
 # Healthcare Claims Data Analysis

@@ -1,6 +1,11 @@
 ---
 name: hcls-provider-imaging-dicom-parser
 description: Parse DICOM medical image metadata and create standardized data models on Snowflake. Use when extracting DICOM tags, building radiology metadata tables, loading imaging study data, or analyzing medical imaging metadata. Triggers include DICOM, radiology, medical imaging, CT scan, MRI, X-ray, PACS, imaging metadata, DICOM tags.
+platform_affinities:
+  produces: [tables, stages]
+  benefits_from:
+    - skill: data-governance
+      when: "parsed DICOM metadata contains PHI (patient name, ID, birth date)"
 ---
 
 # DICOM Metadata Parser

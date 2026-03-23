@@ -60,11 +60,13 @@ The orchestrator automatically composes multiple skills into a solution chain: r
 
 1. User describes a healthcare business problem in natural language
 2. Orchestrator detects the domain from trigger keywords and context
-3. One or more industry skills are selected and composed into a pipeline
-4. Skills invoke Snowflake platform skills for infrastructure (Dynamic Tables, Cortex AI, Streamlit, etc.)
-5. For schema-dependent tasks, Data Model Knowledge auto-fires to ground outputs in live reference models
-6. CKEs are invoked on-demand when literature or trial evidence adds value
-7. HIPAA governance guardrails are applied across all workflows
+3. One or more industry skills are selected and composed into a plan
+4. Platform skills are added based on each skill's declared **platform affinities** (e.g., `data-governance` when PHI is present, `dynamic-tables` for ongoing feeds)
+5. **The plan is presented to the user for approval before execution** (mandatory Plan-then-Execute gate)
+6. Skills invoke Snowflake platform skills for infrastructure (Dynamic Tables, Cortex AI, Streamlit, etc.)
+7. For schema-dependent tasks, Data Model Knowledge auto-fires to ground outputs in live reference models
+8. CKEs are invoked on-demand when literature or trial evidence adds value
+9. HIPAA governance guardrails are applied across all workflows
 
 ## Getting Started
 
@@ -79,99 +81,43 @@ The orchestrator automatically composes multiple skills into a solution chain: r
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/sfc-gh-jrag/coco-healthcare-skills.git
-cd coco-healthcare-skills
+git clone https://github.com/Snowflake-Solutions/health-sciences-coco-skills-incubator.git
+cd health-sciences-coco-skills-incubator
 ```
 
-### Step 2: Register Skills
+### Step 2: Add Skills from Local Clone
 
-Open your Cortex Code skills configuration file:
+Register all skills with Cortex Code:
 
-```
-~/.snowflake/cortex/skills.json
-```
-
-Add the healthcare skills as a `local` entry. Replace `<ABSOLUTE_PATH_TO_REPO>` with the full path to your cloned repo (e.g., `/Users/yourname/coco-healthcare-skills`):
-
-```json
-{
-  "local": [
-    {
-      "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
-      "skills": [
-        { "name": "hcls-provider-imaging", "relative_path": "hcls-provider-imaging" },
-        { "name": "hcls-provider-imaging-dicom-parser", "relative_path": "hcls-provider-imaging-dicom-parser" },
-        { "name": "hcls-provider-cdata-fhir", "relative_path": "hcls-provider-cdata-fhir" },
-        { "name": "hcls-provider-cdata-clinical-nlp", "relative_path": "hcls-provider-cdata-clinical-nlp" },
-        { "name": "hcls-provider-cdata-omop", "relative_path": "hcls-provider-cdata-omop" },
-        { "name": "hcls-provider-cdata-clinical-docs", "relative_path": "hcls-provider-cdata-clinical-docs" },
-        { "name": "hcls-provider-claims-data-analysis", "relative_path": "hcls-provider-claims-data-analysis" },
-        { "name": "hcls-pharma-dsafety-pharmacovigilance", "relative_path": "hcls-pharma-dsafety-pharmacovigilance" },
-        { "name": "hcls-pharma-dsafety-clinical-trial-protocol", "relative_path": "hcls-pharma-dsafety-clinical-trial-protocol" },
-        { "name": "hcls-pharma-genomics-nextflow", "relative_path": "hcls-pharma-genomics-nextflow" },
-        { "name": "hcls-pharma-genomics-variant-annotation", "relative_path": "hcls-pharma-genomics-variant-annotation" },
-        { "name": "hcls-pharma-genomics-single-cell-qc", "relative_path": "hcls-pharma-genomics-single-cell-qc" },
-        { "name": "hcls-pharma-genomics-scvi-tools", "relative_path": "hcls-pharma-genomics-scvi-tools" },
-        { "name": "hcls-pharma-genomics-survival-analysis", "relative_path": "hcls-pharma-genomics-survival-analysis" },
-        { "name": "hcls-pharma-lab-allotrope", "relative_path": "hcls-pharma-lab-allotrope" },
-        { "name": "hcls-cross-research-problem-selection", "relative_path": "hcls-cross-research-problem-selection" },
-        { "name": "hcls-cross-cke-pubmed", "relative_path": "hcls-cross-cke-pubmed" },
-        { "name": "hcls-cross-cke-clinical-trials", "relative_path": "hcls-cross-cke-clinical-trials" }
-      ],
-      "added_at": "2026-03-19T00:00:00.000Z"
-    }
-  ]
-}
+```bash
+cortex skill add ./skills
 ```
 
-> **Note**: If your `skills.json` already has entries (e.g., `remote`, `marketplace`, `stage`), merge the `local` array into the existing file — don't overwrite it. See `skills.json.template` for a clean starting point.
+This registers all `hcls-*` skills as LOCAL. Cortex Code discovers skills from the `skills/` directory.
 
-### Step 3: Create the Agent Profile
+### Step 3: Launch with the Profile
 
-Create the incubator profile JSON at:
+Start Cortex Code with the orchestrator profile:
 
-```
-~/.snowflake/cortex/profiles/health-sciences-incubator.json
-```
-
-```json
-{
-  "name": "health-sciences-incubator",
-  "description": "Health Sciences incubator profile for experimental skill development on Snowflake. Orchestrates skills across medical imaging, clinical data, drug safety, claims/RWE, genomics, and lab data.",
-  "ownerTeam": "HCLS",
-  "version": "1",
-  "skillRepos": [
-    {
-      "source": "github:sfc-gh-jrag/coco-healthcare-skills",
-      "ref": "main",
-      "skills_path": "skills"
-    }
-  ],
-  "mcpServers": {},
-  "commandRepos": [],
-  "scripts": [],
-  "hooks": null,
-  "plugins": [],
-  "envVars": {},
-  "settingsOverrides": {},
-  "systemPromptPath": "<ABSOLUTE_PATH_TO_REPO>/agents/health-sciences-incubator.md",
-  "localModified": true
-}
+```bash
+cortex --profile health-sciences-incubator
 ```
 
-Replace `<ABSOLUTE_PATH_TO_REPO>` with the full path to your cloned repo.
+The `--profile` flag loads the orchestrator agent (`agents/health-sciences-incubator.md`) as the system prompt, which handles intent detection, domain routing, and skill composition.
 
 ### Step 4: Validate
 
-```bash
-# Verify skills loaded
+Inside a Cortex Code session:
+
+```
 /skill                    # Should list hcls-* skills
-
-# Verify orchestrator agent
 /agents                   # Should show health-sciences-incubator
+```
 
-# Check profile details
-cortex profile show health-sciences-incubator
+From the CLI:
+
+```bash
+cortex skill list                              # Verify skills are registered
 ```
 
 ### Step 5: Optional Dependencies
@@ -182,7 +128,7 @@ cortex profile show health-sciences-incubator
 
 ### Step 6: Start Using
 
-Ask healthcare questions in natural language. The orchestrator automatically routes to the right skills:
+Ask healthcare questions in natural language. The orchestrator follows a **Plan-then-Execute** protocol: it builds a solution plan showing which skills and platform capabilities will be used, presents it for your approval, and only then executes. For simple single-skill queries the gate is lightweight; for multi-step pipelines you'll see the full numbered plan.
 
 ```
 "I have DICOM files from our radiology department on S3.
@@ -207,10 +153,15 @@ Ask healthcare questions in natural language. The orchestrator automatically rou
 
 ### Step 7: Keep Updated
 
+Pull the latest changes and re-add skills:
+
 ```bash
-cortex skill update                                  # Refresh skills from GitHub
-cortex profile sync health-sciences-incubator        # Sync full profile
+git pull
+cortex skill remove ./skills
+cortex skill add ./skills
 ```
+
+> **Future**: Once the profile is published to the Snowflake registry (Phase 3), SEs will be able to consume directly via `cortex profile add health-sciences-solutions -c <connection>` without cloning.
 
 ## Skills Inventory
 
@@ -228,6 +179,7 @@ cortex profile sync health-sciences-incubator        # Sync full profile
 | [hcls-provider-cdata-fhir](skills/hcls-provider-cdata-fhir/) | Transform FHIR R4 resources (Patient, Observation, Condition, etc.) into analytics-ready Snowflake tables |
 | [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Extract structured entities from clinical text (NER, ICD coding, medication extraction) via Cortex AI / spaCy |
 | [hcls-provider-cdata-omop](skills/hcls-provider-cdata-omop/) | Transform EHR/claims data to OMOP CDM v5.4 with vocabulary mapping (SNOMED, LOINC, RxNorm) |
+| [hcls-provider-cdata-clinical-docs](skills/hcls-provider-cdata-clinical-docs/) | Router skill for clinical document intelligence: PDF extraction, classification, search, agent, viewer (defense-in-depth guardrails) |
 
 ### Provider > Revenue Cycle
 
@@ -263,6 +215,7 @@ cortex profile sync health-sciences-incubator        # Sync full profile
 | Skill | Description |
 |-------|-------------|
 | [hcls-cross-research-problem-selection](skills/hcls-cross-research-problem-selection/) | Systematic research problem selection using Fischbach & Walsh decision trees |
+| [hcls-cross-skill-development](skills/hcls-cross-skill-development/) | Guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing |
 | [hcls-cross-cke-pubmed](skills/hcls-cross-cke-pubmed/) | RAG-based semantic search over PubMed biomedical literature (Cortex Knowledge Extension) |
 | [hcls-cross-cke-clinical-trials](skills/hcls-cross-cke-clinical-trials/) | RAG-based semantic search over ClinicalTrials.gov registry (Cortex Knowledge Extension) |
 
@@ -382,6 +335,8 @@ Health Sciences
 └── Cross-Industry
     ├── Research Strategy
     │   └── hcls-cross-research-problem-selection
+    ├── Skill Development
+    │   └── hcls-cross-skill-development
     └── Knowledge Extensions
         ├── hcls-cross-cke-pubmed
         └── hcls-cross-cke-clinical-trials
@@ -559,7 +514,7 @@ Sub-skills query the search service for table definitions, column types, DICOM t
 ## Repository Structure
 
 ```
-coco-healthcare-skills/
+health-sciences-coco-skills-incubator/
 ├── agents/                              # Orchestrator agent files
 │   ├── health-sciences-incubator.md     #   Incubator orchestrator (all skills)
 │   └── health-sciences-solutions.md     #   Production orchestrator (approved only)
@@ -578,6 +533,11 @@ coco-healthcare-skills/
 ├── references/                          # Data model spreadsheets
 │   ├── dicom_data_model_reference.xlsx  #   DICOM 18-table model (source of truth)
 │   └── dicom_model_search_corpus.csv    #   Pre-exported CKE corpus
+├── documentation/                          # PDF documentation
+│   ├── Orchestrator_Logic_Guide.pdf       #   Orchestrator logic for code owners
+│   ├── Healthcare_Intelligence_Blueprint.pdf
+│   ├── Industry_Solutions_Framework_-_...pdf
+│   └── archive/                           #   Older/superseded PDFs
 ├── scripts/                             # Setup, generation, and QA scripts
 │   ├── generate_orchestrators.py        #   Generate agent profiles from templates
 │   ├── setup_dicom_model_knowledge_repo.sql  # DICOM CKE search service setup
@@ -586,8 +546,6 @@ coco-healthcare-skills/
 │   ├── export_search_corpus_csv.py      #   Export CKE corpus to CSV
 │   ├── generate_pdf_guide.py            #   PDF guide generator
 │   └── qa_validate_orchestrator.py      #   QA validation for orchestrator
-├── Industry_Solutions_Framework.pdf     # ISF reference document
-├── Healthcare_Solutions_on_Snowflake.pdf # Healthcare solutions overview
 ├── skills.json.template                 # Clean starting point for skills config
 └── README.md
 ```
@@ -598,7 +556,7 @@ Two orchestrator profiles in `agents/` control which skills are available and ho
 
 | Profile | File | Purpose |
 |---------|------|---------|
-| **Incubator** | `health-sciences-incubator.md` | All 18 skills enabled — rapid prototyping, demos, and development |
+| **Incubator** | `health-sciences-incubator.md` | All skills enabled — rapid prototyping, demos, and development |
 | **Production** | `health-sciences-solutions.md` | Production-grade skills only — skills graduate here after validation |
 
 Profiles include routing rules (by sub-industry and task type), cross-domain composition patterns, CKE integration guidance, and HIPAA guardrails.
@@ -624,7 +582,7 @@ Use `/agents` in Cortex Code to list and switch between registered profiles. Onl
 This repo is the **incubator** in a two-repo model:
 
 ```
-Snowflake-Solutions/health-sciences-incubator    ← THIS REPO (Phase 0 & 1)
+Snowflake-Solutions/health-sciences-coco-skills-incubator    ← THIS REPO (Phase 0 & 1)
         │
         │  Skills mature here, then graduate ↓
         │
@@ -634,10 +592,10 @@ Snowflake-Solutions/cortex-code-skills           ← SFS production repo (Phase 
 | Phase | Repo | Who | What |
 |-------|------|-----|------|
 | **Phase 0: Setup** | This repo (incubator) | Tiger Team | Create repo, guidelines, profile, orchestrator |
-| **Phase 1: Incubate** | This repo (incubator) | Anyone (SEs, SAs, field) | Branch, create, test, iterate on skills |
+| **Phase 1: Incubate** | This repo (incubator) | Anyone (SEs, SAs, field) | Branch from main, develop skills, raise PR to merge |
 | **Phase 2: Harden** | SFS cortex-code-skills | Tiger Team only | Audit, test, promote: draft → review → staging → production |
-| **Phase 3: Publish** | Snowflake registry | Tiger Team | Publish production profile for field teams |
-| **Phase 4: Consume** | Field environments | Field teams | `cortex profile add health-sciences-solutions` |
+| **Phase 3: Publish** | Snowflake registry | Tiger Team | `cortex profile publish` production profile for field teams |
+| **Phase 4: Consume** | Field environments | Field teams | `cortex profile add health-sciences-solutions -c <connection>` |
 
 ### Adding a New Skill
 
@@ -655,58 +613,67 @@ A contributor creates their skill directory under `skills/` and then refreshes t
 
 For router skills with sub-skills, see `hcls-provider-cdata-clinical-docs/` or `hcls-provider-imaging/` as templates.
 
-### Incubator Milestone Tagging
+### Branch and Pull Request Workflow
 
-The incubator does **not** use semantic versioning. Instead, lightweight git tags called **milestones** mark known-good states for specific use cases or demos.
+All changes to this repo follow a **branch-driven** workflow. Contributors branch from `main`, develop and test on their branch, then raise a pull request to merge back into `main`.
 
 ```
-m{sequence}-{scope}-{optional-context}
+main (stable, curated)
+  │
+  ├── feature/hcls-payer-claims-adjudication   ← contributor branch
+  │       └── PR #12 → review → merge to main
+  │
+  ├── fix/imaging-preflight-check              ← bug fix branch
+  │       └── PR #15 → review → merge to main
+  │
+  └── feature/hcls-pharma-lab-mass-spec        ← new skill branch
+          └── PR #18 → review → merge to main
 ```
 
-| Tag | Meaning |
-|-----|---------|
-| `m1-imaging` | First stable milestone: imaging skills working end-to-end |
-| `m2-imaging-genomics` | Added genomics skills on top of m1 |
-| `m3-rwe-demo` | Stable point for a specific RWE customer demo |
-| `m4-full-skills` | All skills reorganized and QA-validated |
-| `m5-pre-sfs-batch1` | Snapshot before first batch submitted to SFS |
+**Branch naming conventions:**
 
-**When to create a milestone:**
-- Domain skills pass QA validation for a demo
-- Before submitting a batch to the SFS production repo
-- Customer-specific engagement needing a frozen state
-- After a major reorganization or refactor
+| Prefix | Use |
+|--------|-----|
+| `feature/hcls-{name}` | New skill or major enhancement |
+| `fix/{description}` | Bug fix to existing skill |
+| `docs/{description}` | Documentation-only changes |
+| `refactor/{description}` | Restructuring without behavior change |
 
-**How field teams use milestones:**
-```bash
-cortex profile add health-sciences-incubator --ref m4-full-skills   # stable demo
-cortex profile add health-sciences-incubator                         # bleeding edge (latest main)
-```
+**Workflow:**
+
+1. Branch from `main`: `git checkout -b feature/hcls-payer-claims-adjudication`
+2. Develop your skill following the [Adding a New Skill](#adding-a-new-skill) steps
+3. Test locally: `cortex skill add ./health-sciences-coco-skills-incubator/skills`
+4. Push your branch: `git push -u origin feature/hcls-payer-claims-adjudication`
+5. Open a pull request targeting `main`
+6. Address review feedback
+7. Tiger Team merges after approval
 
 **Key properties:**
-- Zero overhead: `git tag m4-full-skills && git push --tags`
-- Not semver — no compatibility promises, just "this worked when tagged"
-- Deletable: `git tag -d m3-bad && git push --delete origin m3-bad`
-- Incubator only — production uses proper semver (`v1.0.0`) on the SFS repo with immutable releases
+- `main` is always the latest curated state — field teams always point to `main`
+- No milestone tags or version numbers — PRs gate what gets into `main`
+- Contributors never push directly to `main`
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Industry Solutions Framework](Industry_Solutions_Framework.pdf) | Architecture, lifecycle, taxonomy, skills inventory, patterns, and getting started |
-| [Healthcare Solutions on Snowflake](Healthcare_Solutions_on_Snowflake.pdf) | Healthcare solutions overview and value proposition |
+| [Orchestrator Logic Guide](documentation/Orchestrator_Logic_Guide.pdf) | Detailed orchestrator logic for code owners: routing, plan gate, platform affinities, generation pipeline, QA validation |
+| [Healthcare Intelligence Blueprint](documentation/Healthcare_Intelligence_Blueprint.pdf) | Healthcare intelligence architecture and solution patterns |
+| [ISF Lifecycle](documentation/Industry_Solutions_Framework_-_Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Industry Solutions Framework: architecture, lifecycle, taxonomy, skills inventory, patterns |
 | [agents/health-sciences-incubator.md](agents/health-sciences-incubator.md) | Orchestrator agent with routing rules, taxonomy tree, CKE integration, cross-domain patterns, and HIPAA guardrails |
 
 ## Contributing
 
 This is the **incubator** — contributions are welcome from SEs, SAs, and field teams.
 
-1. Branch from `main`
+1. Branch from `main` (e.g., `git checkout -b feature/hcls-payer-claims-adjudication`)
 2. Create your skill under `skills/` following the `hcls-{sub}-{func}-{skill}` naming convention
 3. Add `SKILL.md` with proper frontmatter (`name`, `description`, `tools`)
 4. Include `scripts/`, `references/`, and `assets/` as needed
-5. Test via: `cortex profile add health-sciences-incubator` or `cortex skill add <path>`
-6. Push your branch and signal to Tiger Team when ready for Phase 2 promotion
+5. Test via: `cortex skill add ./health-sciences-coco-skills-incubator/skills` from your local clone
+6. Push your branch and open a pull request targeting `main`
+7. Tiger Team reviews and merges — signal when ready for Phase 2 promotion to SFS
 
 ## Acknowledgments
 

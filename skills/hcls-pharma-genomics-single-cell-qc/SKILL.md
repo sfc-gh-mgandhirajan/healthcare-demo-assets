@@ -1,6 +1,11 @@
 ---
 name: hcls-pharma-genomics-single-cell-qc
 description: Performs quality control on single-cell RNA-seq data (.h5ad or .h5 files) using scverse best practices with MAD-based filtering and comprehensive visualizations. Use when users request QC analysis, filtering low-quality cells, assessing data quality, or following scverse/scanpy best practices for single-cell analysis.
+platform_affinities:
+  produces: [stages]
+  benefits_from:
+    - skill: developing-with-streamlit
+      when: "user wants an interactive QC report or filtering parameter dashboard"
 ---
 
 # Single-Cell RNA-seq Quality Control

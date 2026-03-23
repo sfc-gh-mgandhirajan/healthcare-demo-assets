@@ -1,6 +1,13 @@
 ---
 name: hcls-pharma-genomics-survival-analysis
 description: Perform survival analysis for clinical outcomes including Kaplan-Meier curves, Cox proportional hazards regression, and time-to-event modeling. Use when analyzing patient survival, time to disease progression, treatment duration, or any censored time-to-event data. Triggers include survival analysis, Kaplan-Meier, KM curve, Cox regression, hazard ratio, time-to-event, censoring, progression-free survival, overall survival, PFS, OS.
+platform_affinities:
+  produces: [tables, stages]
+  benefits_from:
+    - skill: developing-with-streamlit
+      when: "user wants interactive Kaplan-Meier plots or survival dashboard"
+    - skill: machine-learning
+      when: "user wants to build predictive survival models or deploy Cox models"
 ---
 
 # Survival Analysis

@@ -1,6 +1,13 @@
 ---
 name: hcls-pharma-genomics-nextflow
 description: Run nf-core bioinformatics pipelines (rnaseq, sarek, atacseq) on sequencing data. Use when analyzing RNA-seq, WGS/WES, or ATAC-seq data—either local FASTQs or public datasets from GEO/SRA. Triggers on nf-core, Nextflow, FASTQ analysis, variant calling, gene expression, differential expression, GEO reanalysis, GSE/GSM/SRR accessions, or samplesheet creation.
+platform_affinities:
+  produces: [tables, stages]
+  benefits_from:
+    - skill: deploy-to-spcs
+      when: "user needs to run Nextflow pipelines as a container service on Snowpark Container Services"
+    - skill: machine-learning
+      when: "user wants to build ML models on pipeline output (expression matrices, variant calls)"
 ---
 
 # nf-core Pipeline Deployment

@@ -1,6 +1,17 @@
 ---
 name: hcls-provider-cdata-fhir
 description: Transform FHIR (Fast Healthcare Interoperability Resources) data into relational tables for analytics. Use when parsing FHIR bundles, extracting resources (Patient, Observation, Condition, MedicationRequest, etc.), flattening nested JSON, or loading healthcare data into Snowflake. Triggers include FHIR, HL7, healthcare interoperability, Patient resource, Observation, Condition, Bundle, ndjson, healthcare JSON.
+platform_affinities:
+  produces: [tables, views]
+  benefits_from:
+    - skill: dynamic-tables
+      when: "incremental refresh needed for ongoing FHIR feeds or streaming bundles"
+    - skill: data-governance
+      when: "FHIR tables contain PHI (Patient, Encounter, Condition resources)"
+    - skill: semantic-view
+      when: "user needs analytics or natural language queries over FHIR data"
+    - skill: developing-with-streamlit
+      when: "user wants a patient data dashboard or FHIR resource explorer"
 ---
 
 # FHIR Data Transformation

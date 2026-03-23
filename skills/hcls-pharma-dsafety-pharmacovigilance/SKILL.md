@@ -1,6 +1,17 @@
 ---
 name: hcls-pharma-dsafety-pharmacovigilance
 description: Analyze FDA FAERS adverse event data for drug safety signal detection. Use when investigating adverse drug reactions, detecting safety signals, analyzing drug-event associations, or building pharmacovigilance dashboards. Triggers include FAERS, adverse events, drug safety, pharmacovigilance, ADR, signal detection, MedDRA, drug reactions, safety surveillance.
+platform_affinities:
+  produces: [tables, views]
+  benefits_from:
+    - skill: semantic-view
+      when: "user needs natural language queries over FAERS signal detection results"
+    - skill: developing-with-streamlit
+      when: "user wants a pharmacovigilance dashboard or signal detection report"
+    - skill: data-governance
+      when: "FAERS analysis involves patient-level adverse event data"
+    - skill: data-quality
+      when: "user needs to validate FAERS data deduplication and completeness"
 ---
 
 # Pharmacovigilance & FAERS Analysis

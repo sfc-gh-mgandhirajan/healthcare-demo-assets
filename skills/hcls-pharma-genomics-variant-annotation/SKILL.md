@@ -1,6 +1,13 @@
 ---
 name: hcls-pharma-genomics-variant-annotation
 description: Annotate genomic variants with clinical and population databases. Use when annotating VCF files with ClinVar pathogenicity, gnomAD allele frequencies, gene information, or functional predictions. Triggers include VCF annotation, ClinVar, gnomAD, variant interpretation, pathogenic variants, allele frequency, ACMG classification, variant filtering.
+platform_affinities:
+  produces: [tables]
+  benefits_from:
+    - skill: data-governance
+      when: "annotated variants linked to patient identifiers or clinical data"
+    - skill: developing-with-streamlit
+      when: "user wants a variant browser or annotation review dashboard"
 ---
 
 # Variant Annotation

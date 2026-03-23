@@ -1,6 +1,9 @@
 ---
 name: hcls-cross-cke-clinical-trials
 description: "Cortex Knowledge Extension: Clinical Trials Research Database. RAG-based semantic search across ClinicalTrials.gov data via Snowflake Marketplace shared Cortex Search Service. Triggers: ClinicalTrials.gov, trial search, trial design, similar trials, trial feasibility, eligibility criteria, competitor trials, clinical trial registry, trial protocol comparison."
+platform_affinities:
+  produces: [cortex_search_service]
+  benefits_from: []
 ---
 
 # CKE: Clinical Trials Research Database

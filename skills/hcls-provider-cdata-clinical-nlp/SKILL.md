@@ -1,6 +1,15 @@
 ---
 name: hcls-provider-cdata-clinical-nlp
 description: Extract structured information from clinical text using NLP. Use when processing clinical notes, discharge summaries, or pathology reports to extract diagnoses, medications, procedures, and other clinical entities. Triggers include clinical NLP, NER, named entity recognition, clinical notes, discharge summary, text extraction, medical NLP, unstructured data, ICD coding, medication extraction.
+platform_affinities:
+  produces: [tables]
+  benefits_from:
+    - skill: cortex-ai-functions
+      when: "using Cortex AI COMPLETE for entity extraction or classification"
+    - skill: data-governance
+      when: "extracted entities contain PHI (patient names, MRNs, dates)"
+    - skill: developing-with-streamlit
+      when: "user wants a clinical NLP results viewer or annotation dashboard"
 ---
 
 # Clinical NLP

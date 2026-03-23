@@ -1,6 +1,9 @@
 ---
 name: hcls-cross-cke-pubmed
 description: "Cortex Knowledge Extension: PubMed Biomedical Research Corpus. RAG-based semantic search across PubMed biomedical literature via Snowflake Marketplace shared Cortex Search Service. Triggers: PubMed, biomedical literature, drug mechanism, clinical evidence, research papers, medical literature, literature review, biomedical research, drug-event association, radiology research."
+platform_affinities:
+  produces: [cortex_search_service]
+  benefits_from: []
 ---
 
 # CKE: PubMed Biomedical Research Corpus

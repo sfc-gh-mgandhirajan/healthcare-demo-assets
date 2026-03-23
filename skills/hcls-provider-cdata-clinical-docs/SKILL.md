@@ -2,6 +2,19 @@
 name: hcls-provider-cdata-clinical-docs
 description: "Router for clinical document intelligence on Snowflake with defense-in-depth guardrails. Detects intent and routes to sub-skills using phased orchestration with mandatory re-entry between phases. Triggers: clinical document, document extraction, PDF extraction, discharge summary, pathology report, radiology report, clinical docs, AI_PARSE_DOCUMENT, AI_COMPLETE, AI_EXTRACT, AI_AGG, document classification, document pipeline, clinical search, clinical agent."
 tools: ["*"]
+platform_affinities:
+  produces: [tables, stages, cortex_search_service]
+  benefits_from:
+    - skill: cortex-ai-functions
+      when: "using AI_PARSE_DOCUMENT, AI_COMPLETE, AI_EXTRACT, AI_AGG for document processing"
+    - skill: data-governance
+      when: "clinical documents contain PHI (patient names, MRNs, diagnoses)"
+    - skill: search-optimization
+      when: "user needs semantic search over extracted clinical document content"
+    - skill: developing-with-streamlit
+      when: "user wants a document viewer, annotation UI, or extraction dashboard"
+    - skill: cortex-agent
+      when: "user wants a conversational agent over clinical documents"
 ---
 
 # Clinical Documents Activation

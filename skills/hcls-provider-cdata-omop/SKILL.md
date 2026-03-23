@@ -1,6 +1,17 @@
 ---
 name: hcls-provider-cdata-omop
 description: Transform clinical data to the OMOP Common Data Model for observational research. Use when converting EHR data, claims data, or other clinical sources to OMOP CDM v5.4 tables (PERSON, VISIT_OCCURRENCE, CONDITION_OCCURRENCE, DRUG_EXPOSURE, etc.). Triggers include OMOP, CDM, Common Data Model, OHDSI, observational research, cohort definition, claims transformation, vocabulary mapping.
+platform_affinities:
+  produces: [tables, views]
+  benefits_from:
+    - skill: dynamic-tables
+      when: "incremental refresh needed for ongoing EHR/claims feeds into OMOP tables"
+    - skill: data-governance
+      when: "OMOP tables contain PHI (PERSON, VISIT_OCCURRENCE, DRUG_EXPOSURE)"
+    - skill: semantic-view
+      when: "user needs analytics or cohort queries over OMOP CDM"
+    - skill: data-quality
+      when: "user needs to validate OMOP data completeness and conformance"
 ---
 
 # OMOP CDM Data Modeling

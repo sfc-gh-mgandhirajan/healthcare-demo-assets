@@ -2,10 +2,13 @@
 import os
 import re
 import sys
+import yaml
 
-BASE = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/skills/health-sciences"
-ORCH_INC = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/agents/health-sciences-incubator.md"
-ORCH_PROD = "/Users/mgandhirajan/Documents/CoCo/HCLS/coco-healthcare-skills/agents/health-sciences-solutions.md"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE = os.path.join(REPO, "skills")
+ORCH_INC = os.path.join(REPO, "agents/health-sciences-incubator.md")
+ORCH_PROD = os.path.join(REPO, "agents/health-sciences-solutions.md")
+REGISTRY = os.path.join(REPO, "templates/skills_incubator.yaml")
 
 ORCH = ORCH_INC
 
@@ -33,9 +36,15 @@ orch_refs = set(re.findall(r'\$hcls-[a-z0-9-]+', orch_content))
 imaging_sub_skills = {"dicom-parser", "dicom-ingestion", "dicom-analytics",
                       "imaging-viewer", "imaging-governance", "imaging-ml", "data-model-knowledge"}
 
-# Top-level skills (exclude imaging sub-skills)
+# Top-level skills (exclude imaging sub-skills AND clinical-docs sub-skills)
+clinical_docs_sub_skills = {"clinical-docs-agent", "clinical-docs-search", "clinical-docs-viewer",
+                            "clinical-document-extraction", "confirm-doc-types", "confirm-environment",
+                            "confirm-pipeline-config", "phase-classify", "phase-extract",
+                            "phase-parse-and-refresh", "data-model-knowledge"}
 top_level_skills = {n: v for n, v in skill_names.items()
-                    if v["folder"] not in imaging_sub_skills}
+                    if v["folder"] not in imaging_sub_skills
+                    and v["folder"] not in clinical_docs_sub_skills
+                    and n not in clinical_docs_sub_skills}
 
 print("=" * 60)
 print("QA VALIDATION REPORT")
@@ -72,7 +81,7 @@ for name, info in sorted(top_level_skills.items()):
 
 # CHECK 4: Imaging sub-skills exist in filesystem
 print("\n--- CHECK 4: Imaging sub-skills in filesystem ---")
-imaging_dir = os.path.join(BASE, "provider/clinical-research/hcls-provider-imaging")
+imaging_dir = os.path.join(BASE, "hcls-provider-imaging")
 for sub in sorted(imaging_sub_skills):
     subdir = os.path.join(imaging_dir, sub)
     if os.path.isdir(subdir):
@@ -124,7 +133,7 @@ for ref in sorted(orch_refs):
 
 # CHECK 7: Standalone hcls-provider-imaging-dicom-parser
 print("\n--- CHECK 7: Standalone skills ---")
-standalone = os.path.join(BASE, "provider/clinical-research/hcls-provider-imaging-dicom-parser")
+standalone = os.path.join(BASE, "hcls-provider-imaging-dicom-parser")
 if os.path.isdir(standalone):
     if "hcls-provider-imaging-dicom-parser" in skill_names:
         if "$hcls-provider-imaging-dicom-parser" in orch_content:
@@ -193,6 +202,96 @@ if os.path.exists(ORCH_PROD):
             print(f"  RESULT: {drift_count} sections have drift -- regenerate from template!")
 else:
     print(f"  SKIP: {ORCH_PROD} not found (production orchestrator not generated)")
+
+# CHECK 9: Registry <-> skill directories bidirectional
+print("\n--- CHECK 9: Registry vs directories (bidirectional) ---")
+with open(REGISTRY) as f:
+    reg = yaml.safe_load(f)
+reg_skills = set(reg.get('skills', {}).keys())
+skill_dir_names = {d for d in os.listdir(BASE) if d.startswith("hcls-") and os.path.isdir(os.path.join(BASE, d))}
+
+reg_not_dir = reg_skills - skill_dir_names
+dir_not_reg = skill_dir_names - reg_skills
+for r in sorted(reg_not_dir):
+    print(f"  FAIL: Registry has '{r}' but no directory exists")
+    fails += 1
+for d in sorted(dir_not_reg):
+    print(f"  FAIL: Directory '{d}/' exists but not in registry")
+    fails += 1
+if not reg_not_dir and not dir_not_reg:
+    print(f"  PASS: All {len(reg_skills)} registry entries match directories")
+
+# CHECK 10: Platform affinities validation
+print("\n--- CHECK 10: Platform affinities frontmatter ---")
+pre_c10_fails = fails
+VALID_PLATFORM_SKILLS = {
+    "dynamic-tables", "data-governance", "data-quality", "semantic-view",
+    "developing-with-streamlit", "deploy-to-spcs", "machine-learning",
+    "cortex-ai-functions", "cortex-agent", "search-optimization",
+    "skill-development",
+}
+for d in sorted(skill_dir_names):
+    skill_md = os.path.join(BASE, d, "SKILL.md")
+    if not os.path.exists(skill_md):
+        continue
+    with open(skill_md) as f:
+        content = f.read()
+    fm_match = re.match(r'^---\n(.*?)\n---', content, re.DOTALL)
+    if not fm_match:
+        continue
+    try:
+        fm = yaml.safe_load(fm_match.group(1))
+    except Exception:
+        print(f"  FAIL: {d}/SKILL.md frontmatter YAML parse error")
+        fails += 1
+        continue
+    pa = fm.get('platform_affinities')
+    if pa is None:
+        print(f"  FAIL: {d}/SKILL.md missing platform_affinities")
+        fails += 1
+        continue
+    if 'produces' not in pa:
+        print(f"  FAIL: {d}/SKILL.md platform_affinities missing 'produces'")
+        fails += 1
+    if 'benefits_from' not in pa:
+        print(f"  FAIL: {d}/SKILL.md platform_affinities missing 'benefits_from'")
+        fails += 1
+    for bf in pa.get('benefits_from', []):
+        skill_ref = bf.get('skill', '')
+        if skill_ref and skill_ref not in VALID_PLATFORM_SKILLS:
+            print(f"  FAIL: {d} references unknown platform skill '{skill_ref}'")
+            fails += 1
+        if not bf.get('when'):
+            print(f"  FAIL: {d} affinity for '{skill_ref}' missing 'when' condition")
+            fails += 1
+if fails == pre_c10_fails:
+    print(f"  PASS: All {len(skill_dir_names)} SKILL.md files have valid platform_affinities")
+
+# CHECK 11: CKE used_by references
+print("\n--- CHECK 11: CKE used_by references ---")
+cke_skills = {k: v for k, v in reg.get('skills', {}).items() if v.get('cke')}
+for cke_name, cke_data in cke_skills.items():
+    for used_by_ref in cke_data.get('used_by', []):
+        base_ref = used_by_ref.split(' (')[0].strip()
+        if base_ref not in skill_dir_names and base_ref not in reg_skills:
+            print(f"  FAIL: CKE '{cke_name}' used_by references unknown skill '{used_by_ref}'")
+            fails += 1
+        else:
+            print(f"  PASS: CKE '{cke_name}' used_by '{used_by_ref}'")
+
+# CHECK 12: Overlap entries
+print("\n--- CHECK 12: Overlap references ---")
+overlaps = reg.get('overlaps', [])
+for o in overlaps:
+    skill_ref = o.get('skill', '')
+    if skill_ref not in skill_dir_names:
+        print(f"  FAIL: Overlap references unknown skill '{skill_ref}'")
+        fails += 1
+    elif not o.get('serves'):
+        print(f"  FAIL: Overlap for '{skill_ref}' missing 'serves' field")
+        fails += 1
+    else:
+        print(f"  PASS: Overlap '{skill_ref}' serves '{o['serves']}'")
 
 # SUMMARY
 print(f"\n{'=' * 60}")
