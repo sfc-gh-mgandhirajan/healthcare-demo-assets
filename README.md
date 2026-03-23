@@ -533,6 +533,11 @@ health-sciences-coco-skills-incubator/
 ├── references/                          # Data model spreadsheets
 │   ├── dicom_data_model_reference.xlsx  #   DICOM 18-table model (source of truth)
 │   └── dicom_model_search_corpus.csv    #   Pre-exported CKE corpus
+├── documentation/                          # PDF documentation
+│   ├── Orchestrator_Logic_Guide.pdf       #   Orchestrator logic for code owners
+│   ├── Healthcare_Intelligence_Blueprint.pdf
+│   ├── Industry_Solutions_Framework_-_...pdf
+│   └── archive/                           #   Older/superseded PDFs
 ├── scripts/                             # Setup, generation, and QA scripts
 │   ├── generate_orchestrators.py        #   Generate agent profiles from templates
 │   ├── setup_dicom_model_knowledge_repo.sql  # DICOM CKE search service setup
@@ -541,8 +546,6 @@ health-sciences-coco-skills-incubator/
 │   ├── export_search_corpus_csv.py      #   Export CKE corpus to CSV
 │   ├── generate_pdf_guide.py            #   PDF guide generator
 │   └── qa_validate_orchestrator.py      #   QA validation for orchestrator
-├── Industry_Solutions_Framework.pdf     # ISF reference document
-├── Healthcare_Solutions_on_Snowflake.pdf # Healthcare solutions overview
 ├── skills.json.template                 # Clean starting point for skills config
 └── README.md
 ```
@@ -655,8 +658,9 @@ main (stable, curated)
 
 | Document | Description |
 |----------|-------------|
-| [Industry Solutions Framework](Industry_Solutions_Framework.pdf) | Architecture, lifecycle, taxonomy, skills inventory, patterns, and getting started |
-| [Healthcare Solutions on Snowflake](Healthcare_Solutions_on_Snowflake.pdf) | Healthcare solutions overview and value proposition |
+| [Orchestrator Logic Guide](documentation/Orchestrator_Logic_Guide.pdf) | Detailed orchestrator logic for code owners: routing, plan gate, platform affinities, generation pipeline, QA validation |
+| [Healthcare Intelligence Blueprint](documentation/Healthcare_Intelligence_Blueprint.pdf) | Healthcare intelligence architecture and solution patterns |
+| [ISF Lifecycle](documentation/Industry_Solutions_Framework_-_Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Industry Solutions Framework: architecture, lifecycle, taxonomy, skills inventory, patterns |
 | [agents/health-sciences-incubator.md](agents/health-sciences-incubator.md) | Orchestrator agent with routing rules, taxonomy tree, CKE integration, cross-domain patterns, and HIPAA guardrails |
 
 ## Contributing
