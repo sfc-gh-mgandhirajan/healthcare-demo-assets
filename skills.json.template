@@ -19,6 +19,7 @@
         { "name": "hcls-pharma-genomics-survival-analysis", "relative_path": "hcls-pharma-genomics-survival-analysis" },
         { "name": "hcls-pharma-lab-allotrope", "relative_path": "hcls-pharma-lab-allotrope" },
         { "name": "hcls-cross-research-problem-selection", "relative_path": "hcls-cross-research-problem-selection" },
+        { "name": "hcls-cross-skill-development", "relative_path": "hcls-cross-skill-development" },
         { "name": "hcls-cross-cke-pubmed", "relative_path": "hcls-cross-cke-pubmed" },
         { "name": "hcls-cross-cke-clinical-trials", "relative_path": "hcls-cross-cke-clinical-trials" }
       ],
