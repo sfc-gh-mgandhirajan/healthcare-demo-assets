@@ -177,7 +177,7 @@ cortex skill add ./skills
 | Skill | Description |
 |-------|-------------|
 | [hcls-provider-cdata-fhir](skills/hcls-provider-cdata-fhir/) | Transform FHIR R4 resources (Patient, Observation, Condition, etc.) into analytics-ready Snowflake tables |
-| [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Extract structured entities from clinical text (NER, ICD coding, medication extraction) via Cortex AI / spaCy |
+| [hcls-provider-cdata-clinical-nlp](skills/hcls-provider-cdata-clinical-nlp/) | Router skill for GenAI-powered clinical NLP: 15 sub-skills covering extraction (6 concept categories), normalization (6 code systems), governance, pipeline implementation, and data model knowledge |
 | [hcls-provider-cdata-omop](skills/hcls-provider-cdata-omop/) | Transform EHR/claims data to OMOP CDM v5.4 with vocabulary mapping (SNOMED, LOINC, RxNorm) |
 | [hcls-provider-cdata-clinical-docs](skills/hcls-provider-cdata-clinical-docs/) | Router skill for clinical document intelligence: PDF extraction, classification, search, agent, viewer (defense-in-depth guardrails) |
 
@@ -313,7 +313,7 @@ Health Sciences
 │   │   └── hcls-provider-imaging-dicom-parser (standalone)
 │   ├── Clinical Data Management
 │   │   ├── hcls-provider-cdata-fhir
-│   │   ├── hcls-provider-cdata-clinical-nlp
+│   │   ├── hcls-provider-cdata-clinical-nlp (router + 15 sub-skills)
 │   │   ├── hcls-provider-cdata-omop
 │   │   └── hcls-provider-cdata-clinical-docs (router + 5 sub-skills)
 │   └── Revenue Cycle
@@ -354,7 +354,7 @@ hcls-{sub}-{func}-{skill}/
 
 ### Sub-Skills (for router skills)
 
-Router skills (e.g., `hcls-provider-imaging`) contain sub-skills nested inside:
+Router skills (e.g., `hcls-provider-imaging`, `hcls-provider-cdata-clinical-nlp`) contain sub-skills nested inside:
 
 ```
 hcls-provider-imaging/
@@ -366,6 +366,24 @@ hcls-provider-imaging/
 ├── imaging-governance/SKILL.md
 ├── imaging-ml/SKILL.md
 └── data-model-knowledge/SKILL.md
+
+hcls-provider-cdata-clinical-nlp/
+├── SKILL.md                                    # Router with 17-intent detection + terminology preference gate
+├── extraction-conditions-diagnostics/SKILL.md  # Conditions, diagnoses, symptoms, risk factors
+├── extraction-therapeutics/SKILL.md            # Medications, procedures, allergies
+├── extraction-observations/SKILL.md            # Labs, vitals, exam findings, scores
+├── extraction-patient-context/SKILL.md         # Social history, family history
+├── extraction-oncology/SKILL.md                # Cancer staging, TNM, biomarkers
+├── extraction-safety-care-planning/SKILL.md    # Adverse events, care plans, referrals
+├── normalization-conditions-diagnostics/SKILL.md  # ICD-10-CM / SNOMED CT mapping
+├── normalization-therapeutics/SKILL.md            # RxNorm / CPT mapping
+├── normalization-observations/SKILL.md            # LOINC mapping
+├── normalization-patient-context/SKILL.md         # Z-code / SDOH mapping
+├── normalization-oncology/SKILL.md                # ICD-O-3 mapping
+├── normalization-safety-care-planning/SKILL.md    # MedDRA mapping
+├── governance/SKILL.md                            # PHI masking, de-identification, audit
+├── pipeline-implementation/SKILL.md               # Production pipeline (DTs + normalization SP)
+└── data-model-knowledge/SKILL.md                  # CKE: schema reference via Cortex Search
 ```
 
 ## Cross-Domain Composition Patterns
@@ -503,13 +521,73 @@ dicom_data_model_reference.xlsx → CSV → DICOM_MODEL_REFERENCE table
 
 Sub-skills query the search service for table definitions, column types, DICOM tag mappings, and PHI indicators. DDL can be generated dynamically using `CORTEX.COMPLETE()` grounded by search results.
 
+---
+
+## Featured Solution: Clinical NLP
+
+**Skill**: [`hcls-provider-cdata-clinical-nlp`](skills/hcls-provider-cdata-clinical-nlp/)
+
+A GenAI-powered clinical NLP pipeline that extracts structured entities from unstructured clinical notes and normalizes them to standard terminologies — all running on Snowflake via Cortex AI COMPLETE, Dynamic Tables, and stored procedures.
+
+### What It Does
+
+```
+Clinical Notes (discharge summaries, progress notes, H&Ps)
+    → Extraction Dynamic Tables (Cortex COMPLETE per concept category)
+        → Conditions, Therapeutics, Observations,
+           Patient Context, Oncology, Safety/Care Planning
+    → Normalization Stored Procedure (exact match + deterministic + Cortex fuzzy)
+        → ICD-10-CM, SNOMED CT, RxNorm, LOINC, MedDRA, ICD-O-3
+    → Governance (PHI masking, de-identification, audit)
+```
+
+### Sub-Skills
+
+| Sub-Skill | Purpose |
+|-----------|--------|
+| `extraction-conditions-diagnostics` | Conditions, diagnoses, symptoms, risk factors |
+| `extraction-therapeutics` | Medications, procedures, allergies |
+| `extraction-observations` | Labs, vitals, exam findings, scores |
+| `extraction-patient-context` | Social history, family history |
+| `extraction-oncology` | Cancer staging, TNM, biomarkers |
+| `extraction-safety-care-planning` | Adverse events, care plans, referrals |
+| `normalization-conditions-diagnostics` | ICD-10-CM / SNOMED CT mapping |
+| `normalization-therapeutics` | RxNorm / CPT mapping |
+| `normalization-observations` | LOINC mapping |
+| `normalization-patient-context` | Z-code / SDOH mapping |
+| `normalization-oncology` | ICD-O-3 mapping |
+| `normalization-safety-care-planning` | MedDRA mapping |
+| `governance` | PHI masking, de-identification, audit trails, role setup |
+| `pipeline-implementation` | Production pipeline (6 extraction DTs + normalization SP) |
+| `data-model-knowledge` | CKE: schema reference via Cortex Search |
+
+### Key Design Decisions
+
+- **Extraction is code-system-agnostic** — captures text spans only; codes are NULL until normalization
+- **Terminology Preference Gate** — for any normalization intent, the router asks the user which code system(s) to use before proceeding
+- **Three-tier normalization** — exact match → deterministic mapping → Cortex COMPLETE fuzzy match (with confidence scores)
+- **Single best code per entity** — one entity = one row = one code (no duplicate rows for different code systems)
+
+### CKE Architecture
+
+Clinical NLP uses a single Schema CKE layer:
+
+```
+clinical_nlp_model_search_corpus.csv → CLINICAL_NLP_MODEL_REFERENCE table
+                                            → CLINICAL_NLP_MODEL_SEARCH_SVC (Cortex Search)
+```
+
+Sub-skills query the search service for table definitions, column types, and FHIR mappings. DDL and extraction prompts can be grounded by search results.
+
 ## Snowflake Objects
 
 | Object | Fully Qualified Name |
 |--------|---------------------|
-| Data Model Table | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_REFERENCE` |
-| Cortex Search Service | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC` |
-| Stage | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.dicom_model_stage` |
+| Data Model Table (DICOM) | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_REFERENCE` |
+| Cortex Search Service (DICOM) | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC` |
+| Stage (DICOM) | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.dicom_model_stage` |
+| Data Model Table (Clinical NLP) | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.CLINICAL_NLP_MODEL_REFERENCE` |
+| Cortex Search Service (Clinical NLP) | `UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.CLINICAL_NLP_MODEL_SEARCH_SVC` |
 
 ## Repository Structure
 
@@ -520,6 +598,7 @@ health-sciences-coco-skills-incubator/
 │   └── health-sciences-solutions.md     #   Production orchestrator (approved only)
 ├── skills/                              # Flat skill directories
 │   ├── hcls-provider-imaging/           #   Router + sub-skills inside
+│   ├── hcls-provider-cdata-clinical-nlp/  #   Router + 15 sub-skills inside
 │   ├── hcls-provider-cdata-fhir/
 │   ├── hcls-pharma-dsafety-pharmacovigilance/
 │   ├── hcls-cross-cke-pubmed/
@@ -533,10 +612,12 @@ health-sciences-coco-skills-incubator/
 ├── references/                          # Data model spreadsheets
 │   ├── dicom_data_model_reference.xlsx  #   DICOM 18-table model (source of truth)
 │   └── dicom_model_search_corpus.csv    #   Pre-exported CKE corpus
+├── HCLS_INDUSTRY_SKILL_BEST_PRACTICES.md   # Skill development best practices guide
 ├── documentation/                          # PDF documentation
 │   ├── Orchestrator_Logic_Guide.pdf       #   Orchestrator logic for code owners
 │   ├── Healthcare_Intelligence_Blueprint.pdf
-│   ├── Industry_Solutions_Framework_-_...pdf
+│   ├── HCLS_Skill_Development_Playbook.pdf  #   Skill development playbook
+│   ├── ISF-Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf
 │   └── archive/                           #   Older/superseded PDFs
 ├── scripts/                             # Setup, generation, and QA scripts
 │   ├── generate_orchestrators.py        #   Generate agent profiles from templates
@@ -545,6 +626,7 @@ health-sciences-coco-skills-incubator/
 │   ├── generate_dicom_model_spreadsheet.py   # DICOM model spreadsheet generator
 │   ├── export_search_corpus_csv.py      #   Export CKE corpus to CSV
 │   ├── generate_pdf_guide.py            #   PDF guide generator
+│   ├── generate_skill_playbook_pdf.py   #   Skill development playbook PDF generator
 │   └── qa_validate_orchestrator.py      #   QA validation for orchestrator
 ├── skills.json.template                 # Clean starting point for skills config
 └── README.md
@@ -660,7 +742,9 @@ main (stable, curated)
 |----------|-------------|
 | [Orchestrator Logic Guide](documentation/Orchestrator_Logic_Guide.pdf) | Detailed orchestrator logic for code owners: routing, plan gate, platform affinities, generation pipeline, QA validation |
 | [Healthcare Intelligence Blueprint](documentation/Healthcare_Intelligence_Blueprint.pdf) | Healthcare intelligence architecture and solution patterns |
-| [ISF Lifecycle](documentation/Industry_Solutions_Framework_-_Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Industry Solutions Framework: architecture, lifecycle, taxonomy, skills inventory, patterns |
+| [ISF Lifecycle](documentation/ISF-Cortex_Code_Industry_Skills_Development_Life_Cycle.pdf) | Industry Solutions Framework: architecture, lifecycle, taxonomy, skills inventory, patterns |
+| [HCLS Skill Development Playbook](documentation/HCLS_Skill_Development_Playbook.pdf) | Skill development best practices, quality standards, and contributor workflow |
+| [HCLS Industry Skill Best Practices](HCLS_INDUSTRY_SKILL_BEST_PRACTICES.md) | Comprehensive best practices guide for building high-quality industry skills |
 | [agents/health-sciences-incubator.md](agents/health-sciences-incubator.md) | Orchestrator agent with routing rules, taxonomy tree, CKE integration, cross-domain patterns, and HIPAA guardrails |
 
 ## Contributing
