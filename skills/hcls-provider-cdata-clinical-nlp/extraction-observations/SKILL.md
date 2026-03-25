@@ -157,3 +157,7 @@ WHERE d.document_id = :document_id;
 | Physical Exam | Exam findings by body system |
 | Imaging | Radiology findings and measurements |
 | ROS (positive findings) | Reported symptoms as observations |
+
+## Output
+
+Rows inserted into **OBSERVATION** table with promoted NLP fields. Covers labs, vitals, exam findings, imaging measurements, and clinical scores.

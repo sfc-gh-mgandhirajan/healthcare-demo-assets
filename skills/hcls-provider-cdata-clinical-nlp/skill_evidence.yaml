@@ -1,0 +1,29 @@
+skill_name: "hcls-provider-cdata-clinical-nlp"
+skill_type: "customer-facing"
+promotion_stage: "draft"
+version: "1.0.0"
+authors:
+  - "sfc-gh-mgandhirajan"
+
+validation:
+  testers:
+    count: 1
+    names:
+      - "sfc-gh-mgandhirajan"
+
+customer_impact:
+  customers:
+    count: 0
+    names: []
+
+evidence_links:
+  - "E2E test: 5 phases passed (dedup, extraction, normalization, multi-category, scale)"
+  - "Cross-validation against SKILL_BEST_PRACTICES.md: 0 critical, 9 warnings (all addressed)"
+
+notes: |
+  Industry-specific clinical NLP skill for healthcare providers.
+  GenAI-powered extraction of structured clinical entities from unstructured notes.
+  17 intents, 15 sub-skills (6 extraction, 6 normalization, governance, pipeline, data-model-knowledge).
+  E2E tested with 50/50 documents, 456 conditions extracted, 0 failures.
+  Terminology seed: 154,626 codes across 8 code systems.
+  32 validation fixes applied across all code systems (ICD-10-CM, SNOMED CT, RxNorm, LOINC, MedDRA, ICD-O-3, CPT/ICD-10-PCS).

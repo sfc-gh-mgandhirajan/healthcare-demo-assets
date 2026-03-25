@@ -631,8 +631,12 @@ When implementing governance, CoCo should also load:
 
 ## Stopping Points
 
-- **After L1 (tagging)**: Confirm tag values with user before proceeding to masking
-- **After L2 (masking)**: Test masking with a SELECT before applying row-access policies
-- **After L3 (row access)**: Confirm RAP pattern choice (department vs. patient attribution vs. both)
-- **After L5 (AI guardrails)**: Confirm which columns to expose to the AI layer
-- **After L6 (ML views)**: Confirm feature view schema with the ML team
+- **⚠️ MANDATORY STOPPING POINT** after L1 (tagging): Confirm tag values with user before proceeding to masking
+- **⚠️ MANDATORY STOPPING POINT** after L2 (masking): Test masking with a SELECT before applying row-access policies
+- **⚠️ MANDATORY STOPPING POINT** after L3 (row access): Confirm RAP pattern choice (department vs. patient attribution vs. both)
+- **⚠️ MANDATORY STOPPING POINT** after L5 (AI guardrails): Confirm which columns to expose to the AI layer
+- **⚠️ MANDATORY STOPPING POINT** after L6 (ML views): Confirm feature view schema with the ML team
+
+## Output
+
+7-layer governance framework: PHI tags, masking policies, row-access policies, database roles, AI secure views, ML feature views, audit queries.

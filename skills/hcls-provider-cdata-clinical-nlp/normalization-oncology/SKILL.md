@@ -258,3 +258,7 @@ FROM TUMOR_EPISODE WHERE histology_display IS NOT NULL;
 ```
 
 Target: >= 85% for primary site, >= 80% for histology (ICD-O-3 morphology can be complex).
+
+## Output
+
+UPDATEd primary_site_code/system and histology_code/system on TUMOR_EPISODE. Returns dict with site and histology counts.

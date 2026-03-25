@@ -320,16 +320,25 @@ The TERMINOLOGY layer tables (`CODE_SYSTEM` and `CONCEPT_DIMENSION`) are pre-see
 
 > **BRING YOUR OWN CODESET DISCLAIMER**: ICD-10-CM and ICD-10-PCS are loaded in full from official government sources. All other code systems contain curated representative subsets sufficient for demonstration, development, and testing. **For production use, organizations should load their own complete, licensed terminology sets** (especially SNOMED CT, LOINC, RxNorm, and MedDRA which require licenses for full distribution). The curated subsets cover the most clinically common concepts but are not exhaustive.
 
-### Reloading Terminology
+### Setup Instructions
 
-Idempotent stored procedures are available for the two complete code sets:
+All seed data files and setup scripts are in `data-model-knowledge/seed-data/`:
 
-```sql
-CALL UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.LOAD_ICD10CM();
-CALL UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.LOAD_ICD10PCS();
-```
+| File | Contents |
+|------|----------|
+| `code_system.csv` | 8 code system definitions |
+| `concept_dimension_curated.csv` | 792 curated concepts (6 systems: SNOMED CT, LOINC, RxNorm, MedDRA, ICD-O-3, HCPCS) |
+| `setup_seed_data.sql` | Complete setup script (tables, staging, COPY INTO, ICD-10 loaders) |
 
-These SPs check for existing data before loading and use External Access Integration to download directly from CDC/CMS.
+**Quick start:**
+1. Run `setup_seed_data.sql` in Snowflake (creates tables, stage, network rules, SPs)
+2. Upload CSVs via PUT:
+   ```sql
+   PUT file:///path/to/seed-data/code_system.csv @seed_data_stage AUTO_COMPRESS=FALSE;
+   PUT file:///path/to/seed-data/concept_dimension_curated.csv @seed_data_stage AUTO_COMPRESS=FALSE;
+   ```
+3. Run the COPY INTO statements in the setup script
+4. Run `CALL LOAD_ICD10CM();` and `CALL LOAD_ICD10PCS();` for complete ICD-10 (requires ACCOUNTADMIN for external access integrations)
 
 ## Extending to Other Data Models
 
@@ -341,3 +350,7 @@ This pattern is reusable — see also:
 | **Clinical NLP** | **CLINICAL_NLP_MODEL_REFERENCE** | **CLINICAL_NLP_MODEL_SEARCH_SVC** |
 | FHIR R4 | fhir_r4_resource_model (future) | FHIR_MODEL_SEARCH_SVC |
 | OMOP CDM v5.4 | omop_cdm_v54_model (future) | OMOP_MODEL_SEARCH_SVC |
+
+## Output
+
+17-table DDL, CLINICAL_NLP_MODEL_REFERENCE (245 columns), Cortex Search Service, terminology seed (154,626 concepts across 8 code systems).

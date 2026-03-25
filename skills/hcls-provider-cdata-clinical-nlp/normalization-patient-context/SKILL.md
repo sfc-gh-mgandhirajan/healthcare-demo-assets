@@ -235,3 +235,7 @@ FROM FAMILY_MEMBER_HISTORY WHERE condition_display IS NOT NULL;
 ```
 
 Target: >= 95% for SDOH (deterministic domain mapping), >= 75% for family history conditions.
+
+## Output
+
+UPDATEd code on SOCIAL_HISTORY_OBSERVATION (Z-codes by sdoh_domain) and condition_code on FAMILY_MEMBER_HISTORY. Returns dict with counts.

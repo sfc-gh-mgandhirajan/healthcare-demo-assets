@@ -135,3 +135,7 @@ After extraction, parse JSON and insert into clinical tables with promoted NLP f
 | Follow-up | Return visit instructions, repeat test orders |
 | Complications | Procedural complications, adverse events |
 | Safety / Incident | Fall events, near-misses, safety concerns |
+
+## Output
+
+Rows inserted into **ADVERSE_EVENT** and **CARE_PLAN_ITEM** tables with promoted NLP fields.

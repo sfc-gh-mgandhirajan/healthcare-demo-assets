@@ -252,3 +252,7 @@ ORDER BY category;
 ```
 
 Target: >= 90% coding rate for vitals (deterministic mapping), >= 80% for labs, >= 70% for exam findings.
+
+## Output
+
+UPDATEd code/code_system on OBSERVATION table. Returns dict with vital_deterministic and observation_exact counts.

@@ -139,3 +139,7 @@ After extraction, parse JSON and insert into the clinical table with promoted NL
 | Radiology Report | Tumor measurements, metastatic sites, response assessment |
 | Treatment Summary | Response to therapy, restaging results |
 | Synoptic Report | Structured pathology data (staging, margins, LVI) |
+
+## Output
+
+Rows inserted into **TUMOR_EPISODE** table with staging, grading, histology, biomarker, and performance status fields.

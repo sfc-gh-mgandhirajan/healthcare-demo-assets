@@ -713,3 +713,7 @@ FROM TUMOR_EPISODE WHERE source = 'GENAI_NLP_NOTE';
 | Cortex Search refresh | **SMALL** | Background index maintenance |
 
 > **Cost tip**: Use separate warehouses for extraction (bursty, expensive) vs MERGE/monitoring (steady, cheap). Auto-suspend extraction warehouse aggressively.
+
+## Output
+
+Production pipeline: 6 extraction DTs, 10 MERGE tasks, 1 normalization SP, Cortex Search Services, optional Streamlit app. Task DAG orchestrated.

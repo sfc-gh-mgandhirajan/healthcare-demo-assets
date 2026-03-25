@@ -151,3 +151,7 @@ After extraction, parse JSON and insert into the target clinical tables with pro
 | Plan | Planned medications, procedures, referrals |
 | Discharge Medications | Discharge med list (status differentiation) |
 | Operative Note | Procedure details with body site |
+
+## Output
+
+Rows inserted into **MEDICATION_REQUEST**, **PROCEDURE**, and **ALLERGY_INTOLERANCE** tables with promoted NLP fields. One row per extracted entity per document.

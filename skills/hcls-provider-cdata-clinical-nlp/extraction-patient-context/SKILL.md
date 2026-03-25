@@ -178,3 +178,7 @@ After extraction, parse JSON and insert into clinical tables with promoted NLP f
 | Discharge Instructions | Transportation, follow-up barriers, medication access | MEDIUM |
 | ROS | May contain social/family context | LOW |
 | Nursing Notes | Safety assessments, fall risk, social work consults | MEDIUM |
+
+## Output
+
+Rows inserted into **SOCIAL_HISTORY_OBSERVATION** and **FAMILY_MEMBER_HISTORY** tables with promoted NLP fields.

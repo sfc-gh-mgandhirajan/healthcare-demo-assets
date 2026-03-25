@@ -351,3 +351,7 @@ FROM (
 ```
 
 Target: >= 85% coding rate for medications (RxNorm coverage is high), >= 75% for procedures.
+
+## Output
+
+UPDATEd code columns on MEDICATION_REQUEST, PROCEDURE, and ALLERGY_INTOLERANCE. Returns dict with counts per entity type.

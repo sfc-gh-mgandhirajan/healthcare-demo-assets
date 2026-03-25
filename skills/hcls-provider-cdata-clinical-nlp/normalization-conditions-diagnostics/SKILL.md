@@ -186,3 +186,7 @@ SET severity_code = CASE UPPER(TRIM(severity_display))
 END
 WHERE severity_code IS NULL AND severity_display IS NOT NULL;
 ```
+
+## Output
+
+UPDATEd code/code_system on CONDITION table. Returns dict with exact_match and fuzzy_match counts.

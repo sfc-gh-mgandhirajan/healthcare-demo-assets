@@ -205,3 +205,7 @@ WHERE event_display IS NOT NULL;
 ```
 
 Target: >= 80% coding rate for well-formed adverse event descriptions.
+
+## Output
+
+UPDATEd event_code/event_system on ADVERSE_EVENT. Returns dict with adverse_event_exact count.

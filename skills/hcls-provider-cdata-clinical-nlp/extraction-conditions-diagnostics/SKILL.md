@@ -174,3 +174,7 @@ FROM TABLE(FLATTEN(PARSE_JSON(:extracted_json):conditions)) c;
 | Impression | Confirmed/probable diagnoses |
 | ROS | Symptoms (positive and negative) |
 | Problem List | Active problem list items |
+
+## Output
+
+Rows inserted into **CONDITION** table with promoted NLP fields (is_negated, temporality, certainty, evidence_text, extraction_confidence). One row per extracted condition per document.

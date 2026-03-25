@@ -2,7 +2,7 @@
 name: hcls-provider-cdata-clinical-nlp
 description: "**[REQUIRED]** Use for ALL clinical NLP tasks on Snowflake. This is the entry point for GenAI-powered clinical NLP solutions extracting structured information from unstructured clinical notes. Triggers: clinical NLP, NER, named entity recognition, clinical notes, discharge summary, text extraction, medical NLP, unstructured data, ICD coding, medication extraction, entity extraction, negation detection, clinical context, FHIR mapping, condition extraction, lab extraction, vital signs, procedure extraction, allergy extraction, adverse event, social history, family history, care plan, oncology staging, clinical data model, NLP schema."
 platform_affinities:
-  produces: [tables, dynamic_tables, views, cortex_search_service, stored_procedures, tasks, streams, masking_policies]
+  produces: [tables, dynamic_tables, views, cortex_search_service, stored_procedures, tasks, streams, stages, masking_policies, row_access_policies, tags, database_roles]
   benefits_from:
     - skill: dynamic-tables
       when: "building extraction pipeline — 6 DTs transform NOTE_DOCUMENT into typed clinical rows via Cortex COMPLETE"
@@ -303,6 +303,10 @@ Invoke `$cke-pubmed` when biomedical literature context improves NLP accuracy:
 
 ## Stopping Points
 
-- After intent detection if ambiguous
-- Before creating any database objects
-- Before running extraction on large datasets (confirm scope first)
+- **⚠️ MANDATORY STOPPING POINT**: After intent detection if ambiguous — present matched intent and confirm before loading sub-skill
+- **⚠️ MANDATORY STOPPING POINT**: Before creating any database objects — present DDL plan for user approval
+- **⚠️ MANDATORY STOPPING POINT**: Before running extraction on large datasets (>100 documents) — confirm scope and estimated cost
+
+## Output
+
+Each sub-skill produces typed rows in FHIR-aligned clinical tables (CONDITION, OBSERVATION, PROCEDURE, MEDICATION_REQUEST, ALLERGY_INTOLERANCE, ADVERSE_EVENT, SOCIAL_HISTORY_OBSERVATION, FAMILY_MEMBER_HISTORY, CARE_PLAN_ITEM, TUMOR_EPISODE) with promoted NLP fields and optional terminology codes.
