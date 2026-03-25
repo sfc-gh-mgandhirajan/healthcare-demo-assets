@@ -63,9 +63,55 @@ skills:
     domain: "Provider > Clinical Data Management"
 
   hcls-provider-cdata-clinical-nlp:
-    triggers: "Clinical NLP, NER, clinical notes, discharge summary, ICD coding"
-    description: "Structured extraction from clinical text"
+    triggers: "clinical NLP, NER, named entity recognition, clinical notes, discharge summary, text extraction, medical NLP, unstructured data, ICD coding, medication extraction, entity extraction, negation detection, clinical context, FHIR mapping, condition extraction, lab extraction, vital signs, procedure extraction, allergy extraction, adverse event extraction, social history, family history, care plan, oncology staging, clinical data model, NLP schema, normalize conditions, normalize medications, normalize observations, normalize entities, terminology mapping, code system mapping, SNOMED CT mapping, ICD-10 coding, RxNorm, LOINC, MedDRA, clinical NLP pipeline, extraction pipeline, normalization pipeline, PHI governance clinical NLP"
+    description: "Router: GenAI-powered clinical NLP — 15 sub-skills for extraction (6 concept categories), normalization (6 code systems), governance, pipeline, and data model knowledge. 17-intent router with terminology preference gate."
     domain: "Provider > Clinical Data Management"
+    sub_skills:
+      - name: data-model-knowledge
+        triggers: "clinical data model, NLP schema, table structure, column reference"
+        description: "245-row FHIR-aligned data model reference + Cortex Search"
+      - name: extraction-conditions-diagnostics
+        triggers: "extract conditions, diagnoses, ICD-10, disease extraction"
+        description: "Conditions & diagnostics extraction via Cortex AI"
+      - name: extraction-therapeutics
+        triggers: "extract medications, procedures, allergies, drug extraction"
+        description: "Medications, procedures, allergies extraction via Cortex AI"
+      - name: extraction-observations
+        triggers: "extract labs, vitals, observations, vital signs, lab results"
+        description: "Labs, vitals, exam findings extraction (regex + Cortex AI)"
+      - name: extraction-patient-context
+        triggers: "extract social history, family history, SDOH, demographics"
+        description: "Social history, family history, SDOH extraction via Cortex AI"
+      - name: extraction-oncology
+        triggers: "extract oncology, tumor, staging, TNM, cancer extraction"
+        description: "Tumor episodes, staging, histology extraction via Cortex AI"
+      - name: extraction-safety-care-planning
+        triggers: "extract adverse events, care plans, allergies, safety"
+        description: "Adverse events & care plan items extraction via Cortex AI"
+      - name: normalization-conditions-diagnostics
+        triggers: "normalize conditions, ICD-10-CM coding, SNOMED CT conditions"
+        description: "ICD-10-CM + SNOMED CT normalization for conditions"
+      - name: normalization-therapeutics
+        triggers: "normalize medications, RxNorm, CPT, procedure coding"
+        description: "RxNorm + CPT + ICD-10-PCS + SNOMED CT for therapeutics"
+      - name: normalization-observations
+        triggers: "normalize labs, LOINC coding, vital sign codes"
+        description: "LOINC + SNOMED CT normalization for observations"
+      - name: normalization-patient-context
+        triggers: "normalize social history, Z-codes, SDOH coding, Gravity"
+        description: "ICD-10-CM Z-codes + SNOMED CT + Gravity for patient context"
+      - name: normalization-oncology
+        triggers: "normalize oncology, ICD-O-3, tumor coding, morphology"
+        description: "ICD-O-3 + SNOMED CT normalization for oncology"
+      - name: normalization-safety-care-planning
+        triggers: "normalize adverse events, MedDRA coding, PT level"
+        description: "MedDRA + SNOMED CT normalization for adverse events"
+      - name: governance
+        triggers: "PHI governance, clinical NLP masking, row access, audit"
+        description: "7-layer governance: tags, masking, row-access, roles, AI guardrails, ML views, audit"
+      - name: pipeline-implementation
+        triggers: "clinical NLP pipeline, dynamic tables extraction, normalization SP"
+        description: "DT extraction + Snowpark SP normalization pipeline"
 
   hcls-provider-cdata-omop:
     triggers: "OMOP, CDM, OHDSI, observational research, vocabulary mapping"
