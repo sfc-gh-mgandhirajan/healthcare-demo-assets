@@ -73,27 +73,116 @@ The orchestrator automatically composes multiple skills into a solution chain: r
 ### Prerequisites
 
 - [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code) CLI or IDE, authenticated to your Snowflake account
+- [GitHub CLI (`gh`)](https://cli.github.com/) — used to fetch files from this private repo (see [Installing GitHub CLI](#installing-github-cli-optional) if you don't have it)
 - A Snowflake account with [Cortex AI functions](https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions) enabled
 - For clinical document skills: `AI_PARSE_DOCUMENT`, `AI_EXTRACT`, `AI_AGG` access
 - For search/agent skills: Cortex Search and Cortex Agent access
 - For genomics skills: local Python environment with relevant packages
 
-### Step 1: Clone the Repository
+<details>
+<summary><strong>Installing GitHub CLI (optional)</strong></summary>
+
+The setup steps below use `gh` (GitHub CLI) to fetch files from this private repo. If you don't have it installed:
+
+**macOS:**
 
 ```bash
-git clone https://github.com/Snowflake-Solutions/health-sciences-coco-skills-incubator.git
-cd health-sciences-coco-skills-incubator
+brew install gh
 ```
 
-### Step 2: Add Skills from Local Clone
-
-Register all skills with Cortex Code:
+**Linux:**
 
 ```bash
-cortex skill add ./skills
+(type -p wget >/dev/null || (sudo apt update && sudo apt-get install wget -y)) \
+  && sudo mkdir -p -m 755 /etc/apt/keyrings \
+  && out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+  && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && sudo apt update \
+  && sudo apt install gh -y
 ```
 
-This registers all `hcls-*` skills as LOCAL. Cortex Code discovers skills from the `skills/` directory.
+**Windows:**
+
+```bash
+winget install --id GitHub.cli
+```
+
+Then authenticate with your GitHub account:
+
+```bash
+gh auth login
+```
+
+Follow the prompts to authenticate via browser. Once complete, `gh` can access this private repo.
+
+</details>
+
+### How the Pieces Fit Together
+
+Before diving in, it helps to understand the two configuration layers that connect the repo to Cortex Code:
+
+| Layer | File | What It Does |
+|-------|------|--------------|
+| **Profile config** | `~/.snowflake/cortex/profiles/health-sciences-incubator.json` | Points Cortex Code to the orchestrator system prompt and declares the GitHub skill repo. Skills are **scoped to this profile only** — they don't pollute the global `skills.json`. |
+| **Orchestrator agent** | `~/.snowflake/cortex/agents/health-sciences-incubator.md` | The system prompt with routing rules, skill taxonomy, and HIPAA guardrails. Fetched from `agents/health-sciences-incubator.md` in this repo. Loaded when the profile is active. |
+
+> **Key design choice:** Skills are declared inside the profile via `skillRepos` with a GitHub source, not registered globally via `cortex skill add`. This keeps the HCLS skills isolated to the incubator profile and avoids conflicts with other profiles.
+
+The steps below wire these up end-to-end. **No local clone is required.**
+
+### Step 1: Fetch the Orchestrator Agent
+
+Download the orchestrator system prompt from GitHub. This is the only file you need locally:
+
+> **Note:** The `~/.snowflake/cortex/agents/` directory is created automatically during Cortex Code installation. The `mkdir -p` below is a safe no-op if it already exists.
+
+```bash
+mkdir -p ~/.snowflake/cortex/agents
+
+# Using GitHub CLI (gh)
+gh api "repos/Snowflake-Solutions/health-sciences-coco-skills-incubator/contents/agents/health-sciences-incubator.md?ref=main" \
+  --jq '.content' -H "Accept: application/vnd.github.v3+json" | base64 -d \
+  > ~/.snowflake/cortex/agents/health-sciences-incubator.md
+```
+
+
+
+### Step 2: Create the Profile
+
+The profile tells Cortex Code to use the orchestrator agent as its system prompt **and** declares the GitHub skill repo. Skills are scoped to this profile — they won't appear in other profiles or the global `cortex skill list`.
+
+> **Note:** The `~/.snowflake/cortex/profiles/` directory is created automatically during Cortex Code installation. The `mkdir -p` below is a safe no-op if it already exists.
+
+```bash
+mkdir -p ~/.snowflake/cortex/profiles
+
+cat > ~/.snowflake/cortex/profiles/health-sciences-incubator.json << 'EOF'
+{
+  "name": "health-sciences-incubator",
+  "description": "Industry Solutions Architect for Health Sciences on Snowflake",
+  "systemPromptPath": "<HOME>/.snowflake/cortex/agents/health-sciences-incubator.md",
+  "skillRepos": [
+    {
+      "source": "github:Snowflake-Solutions/health-sciences-coco-skills-incubator/skills",
+      "ref": "main"
+    }
+  ],
+  "mcpServers": {},
+  "commandRepos": [],
+  "hooks": null,
+  "envVars": {},
+  "settingsOverrides": {}
+}
+EOF
+```
+
+Replace `<HOME>` with your home directory path (e.g., `/Users/you`).
+
+> **How `skillRepos` works:** The `source` field uses `github:<org>/<repo>/<path>` format to point directly at the `skills/` directory in the GitHub repo. The `ref` field specifies the branch. Cortex Code clones the skills into a local cache automatically — no manual `cortex skill add` needed.
+
+> **Note:** Some skills (like `clinical-docs`) reference `AGENTS.md` for session-level guardrails and `hooks.json` for hard blocks on DDL/DML. These are optional but recommended for production use — see the [Defense-in-Depth](#defense-in-depth-clinical-docs) section.
 
 ### Step 3: Launch with the Profile
 
@@ -103,21 +192,22 @@ Start Cortex Code with the orchestrator profile:
 cortex --profile health-sciences-incubator
 ```
 
-The `--profile` flag loads the orchestrator agent (`agents/health-sciences-incubator.md`) as the system prompt, which handles intent detection, domain routing, and skill composition.
+The `--profile` flag loads the orchestrator agent as the system prompt and fetches the 19 `hcls-*` skills from GitHub into a local cache. On first launch this involves a sparse Git clone; subsequent launches use the cached copy.
 
 ### Step 4: Validate
 
-Inside a Cortex Code session:
+Inside the Cortex Code session, verify everything is wired correctly:
 
 ```
-/skill                    # Should list hcls-* skills
-/agents                   # Should show health-sciences-incubator
+/skill                    # Should list 19 hcls-* skills
+/agents                   # Should show health-sciences-incubator as active
 ```
 
-From the CLI:
+From a separate terminal:
 
 ```bash
-cortex skill list                              # Verify skills are registered
+cortex profile show health-sciences-incubator  # Should show Skills (1 repos) with GitHub source
+cortex profile list                            # Verify profile exists
 ```
 
 ### Step 5: Optional Dependencies
@@ -151,17 +241,61 @@ Ask healthcare questions in natural language. The orchestrator follows a **Plan-
  to OMOP, run survival analysis, validate against published literature."
 ```
 
-### Step 7: Keep Updated
+### Step 7: Staying Up to Date
 
-Pull the latest changes and re-add skills:
+This repo is actively developed — new skills, orchestrator improvements, and bug fixes land via PRs to `main`. Since skills are fetched directly from GitHub via the profile, staying current is straightforward.
+
+#### Refreshing Skills
+
+Cortex Code caches the GitHub skill repo locally. To pull the latest skills:
 
 ```bash
-git pull
-cortex skill remove ./skills
-cortex skill add ./skills
+# Delete the cached clone so Cortex Code re-fetches on next launch
+rm -rf ~/.snowflake/cortex/remote_cache/github_Snowflake-Solutions_health-sciences-coco-skills-incubator_*
 ```
 
-> **Future**: Once the profile is published to the Snowflake registry (Phase 3), SEs will be able to consume directly via `cortex profile add health-sciences-solutions -c <connection>` without cloning.
+The next time you run `cortex --profile health-sciences-incubator`, it will re-clone the latest skills from the configured branch.
+
+#### Refreshing the Orchestrator Agent
+
+The orchestrator markdown is stored locally and does **not** auto-update. Re-fetch it when the orchestrator is updated:
+
+```bash
+gh api "repos/Snowflake-Solutions/health-sciences-coco-skills-incubator/contents/agents/health-sciences-incubator.md?ref=main" \
+  --jq '.content' -H "Accept: application/vnd.github.v3+json" | base64 -d \
+  > ~/.snowflake/cortex/agents/health-sciences-incubator.md
+```
+
+#### Quick One-Liner Refresh (Skills + Orchestrator)
+
+```bash
+rm -rf ~/.snowflake/cortex/remote_cache/github_Snowflake-Solutions_health-sciences-coco-skills-incubator_* && \
+gh api "repos/Snowflake-Solutions/health-sciences-coco-skills-incubator/contents/agents/health-sciences-incubator.md?ref=main" \
+  --jq '.content' -H "Accept: application/vnd.github.v3+json" | base64 -d \
+  > ~/.snowflake/cortex/agents/health-sciences-incubator.md
+```
+
+Then re-launch: `cortex --profile health-sciences-incubator`
+
+#### What to Check When Things Change
+
+| Change Type | What to Do |
+|-------------|------------|
+| New skill added or removed | Clear the skill cache (`rm -rf ~/.snowflake/cortex/remote_cache/github_Snowflake-Solutions_*`) and re-launch |
+| Orchestrator updated (`agents/*.md`) | Re-fetch the orchestrator markdown (Step 1) |
+| Profile structure changed | Re-create the profile JSON (Step 2) if instructed in release notes |
+
+> **Future**: Once the profile is published to the Snowflake registry (Phase 3), SEs will be able to consume directly via `cortex profile add health-sciences-solutions -c <connection>` and updates will be handled automatically.
+
+### Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| `cortex --profile health-sciences-incubator` says "profile not found" | Profile JSON doesn't exist | Follow Step 2 to create `~/.snowflake/cortex/profiles/health-sciences-incubator.json` |
+| `/skill` shows no `hcls-*` skills | `skillRepos` not configured or GitHub unreachable | Run `cortex profile show health-sciences-incubator` — should show `Skills (1 repos)` with the GitHub source. If missing, re-create the profile JSON (Step 2). |
+| Skills registered but orchestrator doesn't route to them | Profile not active or agent markdown not found | Check `systemPromptPath` in profile JSON points to `~/.snowflake/cortex/agents/health-sciences-incubator.md` and the file exists |
+| Skills appear stale after a repo update | Cortex Code is using the cached clone | Clear the cache: `rm -rf ~/.snowflake/cortex/remote_cache/github_Snowflake-Solutions_health-sciences-coco-skills-incubator_*` and re-launch |
+| `cortex skill list` shows `hcls-*` skills globally | Skills were previously registered via `cortex skill add` | Remove them: `cortex skill remove "github:Snowflake-Solutions/health-sciences-coco-skills-incubator#main"` — the profile's `skillRepos` handles skill loading now |
 
 ## Skills Inventory
 
@@ -651,9 +785,9 @@ Each profile is a Markdown file with YAML frontmatter (`name`, `description`, `t
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `skills.json` | `~/.snowflake/cortex/skills.json` | Registers skill paths so Cortex Code can discover them |
-| Profile JSON | `~/.snowflake/cortex/profiles/<profile-name>.json` | Defines the profile metadata, skill repos, and system prompt path |
-| Agent Markdown | `agents/<profile-name>.md` (in this repo) | The actual system prompt with routing rules and skill taxonomy |
+| Profile JSON | `~/.snowflake/cortex/profiles/<profile-name>.json` | Defines the profile metadata, skill repos (GitHub source), and system prompt path. Skills declared here are **scoped to this profile only**. |
+| Agent Markdown | `~/.snowflake/cortex/agents/<profile-name>.md` | The orchestrator system prompt with routing rules and skill taxonomy, fetched from `agents/` in this repo |
+| `skills.json` | `~/.snowflake/cortex/skills.json` | Global skill registry — **not used** for profile-scoped skills. Only relevant if you add skills via `cortex skill add` for other purposes. |
 
 ### Switching Between Profiles
 
