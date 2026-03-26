@@ -1,0 +1,9 @@
+code_system_id,name,uri
+HCPCS,HCPCS,https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets
+ICD10CM,ICD-10-CM,http://hl7.org/fhir/sid/icd-10-cm
+ICD10PCS,ICD-10-PCS,http://www.cms.gov/Medicare/Coding/ICD10
+ICDO3,ICD-O-3,http://terminology.hl7.org/CodeSystem/icd-o-3
+LOINC,LOINC,http://loinc.org
+MEDDRA,MedDRA,https://www.meddra.org
+RXNORM,RxNorm,http://www.nlm.nih.gov/research/umls/rxnorm
+SNOMEDCT,SNOMED CT,http://snomed.info/sct
