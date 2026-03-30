@@ -91,15 +91,13 @@ Before Step 1.5, ask the user whether a fine-tuned ICD coding model is available
 
 Runs only when `$FINETUNED_MODEL_NAME` is set. The prompt format **must match the training data** used to fine-tune the model (see `hcls-cross-aiml-industrymodels` Step 2). The model was trained on `evidence_text + instruction suffix` → bare ICD-10-CM code.
 
-Inference and update run in a single statement via CTE — the model is called once per row, and results are applied directly with regex validation:
+Inference and update run in a single statement via subquery UPDATE — the model is called once per row, and results are applied directly with regex validation:
 
 ```sql
-WITH unmatched AS (
-    SELECT condition_id, display, evidence_text
-    FROM CONDITION
-    WHERE code IS NULL AND display IS NOT NULL
-),
-predictions AS (
+UPDATE CONDITION c
+SET c.code = p.predicted_code,
+    c.code_system = 'ICD-10-CM'
+FROM (
     SELECT
         u.condition_id,
         TRIM(SNOWFLAKE.CORTEX.COMPLETE(
@@ -107,12 +105,9 @@ predictions AS (
             COALESCE(u.evidence_text, u.display)
                 || ' Given this clinical text, assign the ICD10-CM diagnosis code in this format ONLY: X##.#. Do not provide explanation '
         )) AS predicted_code
-    FROM unmatched u
-)
-UPDATE CONDITION c
-SET c.code = p.predicted_code,
-    c.code_system = 'ICD-10-CM'
-FROM predictions p
+    FROM CONDITION u
+    WHERE u.code IS NULL AND u.display IS NOT NULL
+) p
 WHERE c.condition_id = p.condition_id
   AND p.predicted_code IS NOT NULL
   AND p.predicted_code RLIKE '^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$';
