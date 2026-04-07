@@ -1,0 +1,135 @@
+USE SCHEMA UNSTRUCTURED_HEALTHDATA.CLINICAL_NLP;
+
+-- ============================================================
+-- 1. OBJECT TAGS FOR PHI CLASSIFICATION
+-- ============================================================
+CREATE TAG IF NOT EXISTS PHI_CATEGORY
+    ALLOWED_VALUES 'PATIENT_NAME', 'DATE_OF_BIRTH', 'LOCATION', 'CLINICAL_TEXT', 'IDENTIFIER';
+
+-- ============================================================
+-- 2. ROLES
+-- ============================================================
+CREATE ROLE IF NOT EXISTS CLINICAL_NLP_READER;
+CREATE ROLE IF NOT EXISTS CLINICAL_NLP_ANALYST;
+CREATE ROLE IF NOT EXISTS CLINICAL_NLP_ADMIN;
+
+GRANT ROLE CLINICAL_NLP_READER TO ROLE CLINICAL_NLP_ANALYST;
+GRANT ROLE CLINICAL_NLP_ANALYST TO ROLE CLINICAL_NLP_ADMIN;
+GRANT ROLE CLINICAL_NLP_ADMIN TO ROLE ACCOUNTADMIN;
+
+GRANT USAGE ON DATABASE UNSTRUCTURED_HEALTHDATA TO ROLE CLINICAL_NLP_READER;
+GRANT USAGE ON SCHEMA UNSTRUCTURED_HEALTHDATA.CLINICAL_NLP TO ROLE CLINICAL_NLP_READER;
+GRANT SELECT ON ALL TABLES IN SCHEMA UNSTRUCTURED_HEALTHDATA.CLINICAL_NLP TO ROLE CLINICAL_NLP_READER;
+GRANT SELECT ON ALL VIEWS IN SCHEMA UNSTRUCTURED_HEALTHDATA.CLINICAL_NLP TO ROLE CLINICAL_NLP_READER;
+
+GRANT ALL PRIVILEGES ON SCHEMA UNSTRUCTURED_HEALTHDATA.CLINICAL_NLP TO ROLE CLINICAL_NLP_ADMIN;
+
+-- ============================================================
+-- 3. MASKING POLICY — TAG-BASED
+-- ============================================================
+CREATE OR REPLACE MASKING POLICY MASK_PHI_TEXT AS (val VARCHAR)
+RETURNS VARCHAR ->
+    CASE
+        WHEN IS_ROLE_IN_SESSION('CLINICAL_NLP_ANALYST') THEN val
+        WHEN IS_ROLE_IN_SESSION('CLINICAL_NLP_ADMIN') THEN val
+        ELSE '***PHI_MASKED***'
+    END;
+
+-- ============================================================
+-- 4. APPLY TAGS TO PHI COLUMNS
+-- ============================================================
+-- NOTE_DOCUMENT
+ALTER TABLE NOTE_DOCUMENT MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+ALTER TABLE NOTE_DOCUMENT MODIFY COLUMN raw_text SET TAG PHI_CATEGORY = 'CLINICAL_TEXT';
+
+-- CONDITION
+ALTER TABLE CONDITION MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+ALTER TABLE CONDITION MODIFY COLUMN evidence_text SET TAG PHI_CATEGORY = 'CLINICAL_TEXT';
+
+-- MEDICATION_REQUEST
+ALTER TABLE MEDICATION_REQUEST MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+ALTER TABLE MEDICATION_REQUEST MODIFY COLUMN evidence_text SET TAG PHI_CATEGORY = 'CLINICAL_TEXT';
+
+-- OBSERVATION
+ALTER TABLE OBSERVATION MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+ALTER TABLE OBSERVATION MODIFY COLUMN evidence_text SET TAG PHI_CATEGORY = 'CLINICAL_TEXT';
+
+-- ALLERGY_INTOLERANCE
+ALTER TABLE ALLERGY_INTOLERANCE MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- ADVERSE_EVENT
+ALTER TABLE ADVERSE_EVENT MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- SOCIAL_HISTORY_OBSERVATION
+ALTER TABLE SOCIAL_HISTORY_OBSERVATION MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- FAMILY_MEMBER_HISTORY
+ALTER TABLE FAMILY_MEMBER_HISTORY MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- CARE_PLAN_ITEM
+ALTER TABLE CARE_PLAN_ITEM MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- TUMOR_EPISODE
+ALTER TABLE TUMOR_EPISODE MODIFY COLUMN patient_id SET TAG PHI_CATEGORY = 'IDENTIFIER';
+
+-- ============================================================
+-- 5. APPLY MASKING POLICY TO TAG
+-- ============================================================
+ALTER TAG PHI_CATEGORY SET MASKING POLICY MASK_PHI_TEXT;
+
+-- ============================================================
+-- 6. SECURE VIEW FOR CORTEX AI (excludes PHI columns)
+-- ============================================================
+CREATE OR REPLACE SECURE VIEW CONDITION_DEIDENTIFIED AS
+SELECT
+    condition_id,
+    display,
+    code,
+    code_system,
+    category,
+    clinical_status,
+    severity_display,
+    body_site_display,
+    laterality,
+    is_negated,
+    temporality,
+    certainty,
+    extraction_confidence,
+    source
+FROM CONDITION;
+
+CREATE OR REPLACE SECURE VIEW MEDICATION_DEIDENTIFIED AS
+SELECT
+    medication_request_id,
+    medication_display,
+    medication_code,
+    medication_system,
+    status,
+    dosage_text,
+    dose,
+    dose_unit,
+    route_display,
+    frequency_text,
+    is_negated,
+    temporality,
+    extraction_confidence,
+    source
+FROM MEDICATION_REQUEST;
+
+CREATE OR REPLACE SECURE VIEW OBSERVATION_DEIDENTIFIED AS
+SELECT
+    observation_id,
+    display,
+    code,
+    code_system,
+    category,
+    value_quantity,
+    value_unit,
+    value_string,
+    interpretation,
+    is_negated,
+    temporality,
+    certainty,
+    extraction_confidence,
+    source
+FROM OBSERVATION;

@@ -1,0 +1,13 @@
+default:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: SFSENORTHAMERICA-POLARIS1
+      user: MGANDHIRAJAN
+      authenticator: externalbrowser
+      role: ACCOUNTADMIN
+      warehouse: BI_WH
+      database: HCLS_DB
+      schema: CLAIMS
+      threads: 4

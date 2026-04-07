@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: raw_claims
+    database: HCLS_DB
+    schema: CLAIMS
+    tables:
+      - name: RAW_CLAIMS_HEADER
+        description: Raw claims header data
+      - name: RAW_CLAIMS_LINES
+        description: Raw claims line items data

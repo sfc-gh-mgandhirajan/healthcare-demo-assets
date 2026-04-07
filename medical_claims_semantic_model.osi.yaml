@@ -1,0 +1,2077 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/open-semantic-interchange/OSI/main/core-spec/osi-schema.json
+
+# Medical Claims Domain Semantic Model
+# OSI-compliant semantic model for healthcare claims analytics
+# Covers: Medical Claim Headers, Claim Lines, Code Sets (ICD, CPT, Revenue, Place of Service), Member Demographics
+
+version: "1.0"
+
+semantic_model:
+  - name: medical_claims_analytics
+    description: Healthcare Medical Claims semantic model for claims processing, utilization analysis, cost management, and population health analytics
+    ai_context:
+      instructions: "Use this semantic model for medical claims analytics in healthcare. It provides comprehensive claim header and line-level data with dimensional lookups for diagnosis codes (ICD-10), procedure codes (CPT/HCPCS), revenue codes, place of service, and member demographics. Supports analysis of claim costs, utilization patterns, provider performance, member health outcomes, and payment trends."
+
+    datasets:
+      # ====================
+      # FACT TABLE: Medical Claim Header
+      # ====================
+      - name: medical_claim_header
+        source: claims_db.medical.claim_header
+        primary_key: [claim_id]
+        unique_keys:
+          - [claim_id]
+        description: Fact table containing medical claim header information including submission details, dates, totals, and claim-level attributes
+        ai_context:
+          synonyms:
+            - "claims"
+            - "medical claims"
+            - "healthcare claims"
+            - "insurance claims"
+            - "claim submissions"
+
+        fields:
+          - name: claim_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: claim_id
+                - dialect: SNOWFLAKE
+                  expression: claim_id
+            description: Unique identifier for the medical claim
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "claim number"
+                - "claim identifier"
+                - "ICN"
+                - "internal control number"
+
+          - name: member_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: member_id
+            description: Foreign key to member demographics
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "patient"
+                - "subscriber"
+                - "enrollee"
+                - "insured"
+
+          - name: provider_npi
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: provider_npi
+            description: National Provider Identifier for the billing provider
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "provider"
+                - "billing provider"
+                - "NPI"
+                - "provider ID"
+
+          - name: rendering_provider_npi
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: rendering_provider_npi
+            description: NPI of the rendering/servicing provider
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "servicing provider"
+                - "treating physician"
+
+          - name: facility_npi
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: facility_npi
+            description: NPI of the facility where services were rendered
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "facility"
+                - "service location"
+                - "hospital"
+
+          - name: claim_type_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: claim_type_code
+            description: Type of claim (Professional/Institutional/Dental)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "claim type"
+                - "form type"
+                - "CMS-1500"
+                - "UB-04"
+
+          - name: claim_status_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: claim_status_code
+            description: Current status of the claim (Paid/Denied/Pending/Adjusted)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "claim status"
+                - "payment status"
+                - "adjudication status"
+
+          - name: service_date_from
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: service_date_from
+            description: Start date of service for the claim
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "date of service"
+                - "DOS"
+                - "service start date"
+                - "from date"
+
+          - name: service_date_to
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: service_date_to
+            description: End date of service for the claim
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "service end date"
+                - "to date"
+                - "through date"
+
+          - name: admission_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: admission_date
+            description: Admission date for institutional claims
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "admit date"
+                - "inpatient admission"
+
+          - name: discharge_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: discharge_date
+            description: Discharge date for institutional claims
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "discharge"
+                - "inpatient discharge"
+
+          - name: received_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: received_date
+            description: Date claim was received by payer
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "claim receipt date"
+                - "submission date"
+
+          - name: paid_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: paid_date
+            description: Date claim was adjudicated and paid
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "payment date"
+                - "adjudication date"
+                - "finalized date"
+
+          - name: place_of_service_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: place_of_service_code
+            description: Foreign key to place of service dimension
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "POS"
+                - "service location type"
+                - "facility type"
+
+          - name: bill_type_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: bill_type_code
+            description: UB-04 bill type code for institutional claims
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "bill type"
+                - "type of bill"
+                - "TOB"
+
+          - name: drg_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: drg_code
+            description: Diagnosis Related Group code for inpatient claims
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "DRG"
+                - "MS-DRG"
+                - "APR-DRG"
+                - "diagnosis related group"
+
+          - name: principal_diagnosis_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: principal_diagnosis_code
+            description: Primary/Principal ICD-10 diagnosis code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "primary diagnosis"
+                - "principal dx"
+                - "admitting diagnosis"
+
+          - name: admitting_diagnosis_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: admitting_diagnosis_code
+            description: Admitting diagnosis code for institutional claims
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "admitting dx"
+                - "admit diagnosis"
+
+          - name: billed_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: billed_amount
+            description: Total amount billed on the claim
+            ai_context:
+              synonyms:
+                - "charges"
+                - "submitted charges"
+                - "gross charges"
+                - "total charges"
+
+          - name: allowed_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: allowed_amount
+            description: Total allowed amount after contractual adjustments
+            ai_context:
+              synonyms:
+                - "allowable"
+                - "contracted amount"
+                - "negotiated rate"
+
+          - name: paid_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: paid_amount
+            description: Total amount paid by the payer
+            ai_context:
+              synonyms:
+                - "payment"
+                - "reimbursement"
+                - "plan paid"
+                - "net payment"
+
+          - name: member_liability_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: member_liability_amount
+            description: Member's total out-of-pocket responsibility
+            ai_context:
+              synonyms:
+                - "patient responsibility"
+                - "member cost share"
+                - "OOP"
+
+          - name: copay_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: copay_amount
+            description: Copayment amount owed by member
+            ai_context:
+              synonyms:
+                - "copay"
+                - "co-payment"
+
+          - name: coinsurance_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: coinsurance_amount
+            description: Coinsurance amount owed by member
+            ai_context:
+              synonyms:
+                - "coinsurance"
+                - "member coinsurance"
+
+          - name: deductible_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: deductible_amount
+            description: Deductible amount applied to claim
+            ai_context:
+              synonyms:
+                - "deductible"
+                - "member deductible"
+
+          - name: cob_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: cob_amount
+            description: Coordination of Benefits amount from other payers
+            ai_context:
+              synonyms:
+                - "COB"
+                - "other payer amount"
+                - "coordination of benefits"
+
+          - name: length_of_stay
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: DATEDIFF(day, admission_date, discharge_date)
+                - dialect: SNOWFLAKE
+                  expression: DATEDIFF('day', admission_date, discharge_date)
+            description: Number of days for inpatient stay
+            ai_context:
+              synonyms:
+                - "LOS"
+                - "days"
+                - "inpatient days"
+
+      # ====================
+      # FACT TABLE: Medical Claim Line
+      # ====================
+      - name: medical_claim_line
+        source: claims_db.medical.claim_line
+        primary_key: [claim_id, line_number]
+        unique_keys:
+          - [claim_id, line_number]
+        description: Fact table containing claim line-level detail including service codes, quantities, and line amounts
+        ai_context:
+          synonyms:
+            - "claim lines"
+            - "service lines"
+            - "line items"
+            - "claim details"
+
+        fields:
+          - name: claim_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: claim_id
+            description: Foreign key to claim header
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "claim number"
+
+          - name: line_number
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_number
+            description: Sequential line number within the claim
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "service line number"
+                - "line sequence"
+
+          - name: procedure_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: procedure_code
+            description: CPT or HCPCS procedure code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "CPT code"
+                - "HCPCS code"
+                - "service code"
+                - "procedure"
+
+          - name: procedure_modifier_1
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: procedure_modifier_1
+            description: First procedure code modifier
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "modifier"
+                - "CPT modifier"
+
+          - name: procedure_modifier_2
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: procedure_modifier_2
+            description: Second procedure code modifier
+            dimension:
+              is_time: false
+
+          - name: revenue_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: revenue_code
+            description: UB-04 revenue code for institutional claims
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "rev code"
+                - "UB revenue code"
+
+          - name: diagnosis_code_1
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: diagnosis_code_1
+            description: Primary diagnosis code for the line
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "line diagnosis"
+                - "dx pointer 1"
+
+          - name: diagnosis_code_2
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: diagnosis_code_2
+            description: Secondary diagnosis code for the line
+            dimension:
+              is_time: false
+
+          - name: diagnosis_code_3
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: diagnosis_code_3
+            description: Third diagnosis code for the line
+            dimension:
+              is_time: false
+
+          - name: diagnosis_code_4
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: diagnosis_code_4
+            description: Fourth diagnosis code for the line
+            dimension:
+              is_time: false
+
+          - name: service_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: service_date
+            description: Date of service for the line item
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "line date of service"
+                - "DOS"
+
+          - name: place_of_service_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: place_of_service_code
+            description: Place of service for the line
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "POS"
+                - "line POS"
+
+          - name: units
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: units
+            description: Number of service units
+            ai_context:
+              synonyms:
+                - "quantity"
+                - "service units"
+                - "unit count"
+
+          - name: line_billed_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_billed_amount
+            description: Billed amount for the line
+            ai_context:
+              synonyms:
+                - "line charges"
+                - "submitted amount"
+
+          - name: line_allowed_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_allowed_amount
+            description: Allowed amount for the line
+            ai_context:
+              synonyms:
+                - "line allowable"
+                - "contracted amount"
+
+          - name: line_paid_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_paid_amount
+            description: Paid amount for the line
+            ai_context:
+              synonyms:
+                - "line payment"
+                - "line reimbursement"
+
+          - name: line_copay_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_copay_amount
+            description: Copay amount for the line
+            ai_context:
+              synonyms:
+                - "line copay"
+
+          - name: line_coinsurance_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_coinsurance_amount
+            description: Coinsurance amount for the line
+            ai_context:
+              synonyms:
+                - "line coinsurance"
+
+          - name: line_deductible_amount
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_deductible_amount
+            description: Deductible amount for the line
+            ai_context:
+              synonyms:
+                - "line deductible"
+
+          - name: denial_reason_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: denial_reason_code
+            description: Reason code if line was denied
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "denial code"
+                - "reject reason"
+                - "CARC"
+                - "RARC"
+
+          - name: ndc_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ndc_code
+            description: National Drug Code for drug-related services
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "NDC"
+                - "drug code"
+                - "national drug code"
+
+      # ====================
+      # DIMENSION TABLE: Member Demographics
+      # ====================
+      - name: member_demographics
+        source: claims_db.reference.member_dim
+        primary_key: [member_id]
+        unique_keys:
+          - [member_id]
+          - [subscriber_id, dependent_sequence]
+        description: Dimension table containing member demographic information, enrollment, and plan details
+        ai_context:
+          synonyms:
+            - "members"
+            - "patients"
+            - "enrollees"
+            - "subscribers"
+            - "beneficiaries"
+
+        fields:
+          - name: member_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: member_id
+            description: Unique identifier for the member
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "patient ID"
+                - "enrollee ID"
+
+          - name: subscriber_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: subscriber_id
+            description: Policy holder/subscriber identifier
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "policy holder"
+                - "contract holder"
+
+          - name: dependent_sequence
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: dependent_sequence
+            description: Sequence number for dependents under subscriber
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "dependent number"
+                - "family sequence"
+
+          - name: first_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: first_name
+            description: Member first name
+            dimension:
+              is_time: false
+
+          - name: last_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: last_name
+            description: Member last name
+            dimension:
+              is_time: false
+
+          - name: member_full_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: first_name || ' ' || last_name
+            description: Member full name (computed)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "patient name"
+                - "member name"
+
+          - name: date_of_birth
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: date_of_birth
+            description: Member date of birth
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "DOB"
+                - "birth date"
+
+          - name: age
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: FLOOR(DATEDIFF(year, date_of_birth, CURRENT_DATE))
+                - dialect: SNOWFLAKE
+                  expression: DATEDIFF('year', date_of_birth, CURRENT_DATE())
+            description: Member current age in years
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "member age"
+                - "patient age"
+
+          - name: age_band
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: |
+                    CASE 
+                      WHEN DATEDIFF(year, date_of_birth, CURRENT_DATE) < 18 THEN '0-17'
+                      WHEN DATEDIFF(year, date_of_birth, CURRENT_DATE) < 35 THEN '18-34'
+                      WHEN DATEDIFF(year, date_of_birth, CURRENT_DATE) < 50 THEN '35-49'
+                      WHEN DATEDIFF(year, date_of_birth, CURRENT_DATE) < 65 THEN '50-64'
+                      ELSE '65+'
+                    END
+                - dialect: SNOWFLAKE
+                  expression: |
+                    CASE 
+                      WHEN DATEDIFF('year', date_of_birth, CURRENT_DATE()) < 18 THEN '0-17'
+                      WHEN DATEDIFF('year', date_of_birth, CURRENT_DATE()) < 35 THEN '18-34'
+                      WHEN DATEDIFF('year', date_of_birth, CURRENT_DATE()) < 50 THEN '35-49'
+                      WHEN DATEDIFF('year', date_of_birth, CURRENT_DATE()) < 65 THEN '50-64'
+                      ELSE '65+'
+                    END
+            description: Member age group/band
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "age group"
+                - "age range"
+                - "age category"
+
+          - name: gender_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: gender_code
+            description: Member gender (M/F/U)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "sex"
+                - "gender"
+
+          - name: gender_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: |
+                    CASE gender_code 
+                      WHEN 'M' THEN 'Male' 
+                      WHEN 'F' THEN 'Female' 
+                      ELSE 'Unknown' 
+                    END
+            description: Gender description
+            dimension:
+              is_time: false
+
+          - name: address_line_1
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: address_line_1
+            description: Member street address
+            dimension:
+              is_time: false
+
+          - name: city
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: city
+            description: Member city
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "member city"
+                - "residence city"
+
+          - name: state_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: state_code
+            description: Member state code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "state"
+                - "member state"
+
+          - name: zip_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: zip_code
+            description: Member ZIP code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "postal code"
+                - "ZIP"
+
+          - name: zip_3
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: SUBSTRING(zip_code, 1, 3)
+                - dialect: SNOWFLAKE
+                  expression: SUBSTR(zip_code, 1, 3)
+            description: First 3 digits of ZIP code for regional analysis
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "ZIP3"
+                - "regional ZIP"
+
+          - name: county_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: county_code
+            description: FIPS county code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "county"
+                - "FIPS code"
+
+          - name: relationship_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: relationship_code
+            description: Relationship to subscriber (Self/Spouse/Child/Other)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "relationship"
+                - "dependent type"
+
+          - name: plan_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: plan_id
+            description: Health plan identifier
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "plan"
+                - "benefit plan"
+
+          - name: product_type
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: product_type
+            description: Product type (HMO/PPO/EPO/POS/HDHP)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "plan type"
+                - "product"
+
+          - name: line_of_business
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: line_of_business
+            description: Line of business (Commercial/Medicare/Medicaid)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "LOB"
+                - "business segment"
+                - "market segment"
+
+          - name: employer_group_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: employer_group_id
+            description: Employer group identifier
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "group"
+                - "employer"
+                - "account"
+
+          - name: effective_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: effective_date
+            description: Coverage effective date
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "enrollment date"
+                - "coverage start"
+
+          - name: termination_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: termination_date
+            description: Coverage termination date
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "term date"
+                - "coverage end"
+                - "disenrollment date"
+
+          - name: is_active
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: CASE WHEN termination_date IS NULL OR termination_date > CURRENT_DATE THEN 1 ELSE 0 END
+                - dialect: SNOWFLAKE
+                  expression: CASE WHEN termination_date IS NULL OR termination_date > CURRENT_DATE() THEN 1 ELSE 0 END
+            description: Flag indicating if member is currently enrolled
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "active"
+                - "currently enrolled"
+
+      # ====================
+      # DIMENSION TABLE: ICD-10 Diagnosis Codes
+      # ====================
+      - name: icd10_diagnosis
+        source: claims_db.reference.icd10_diagnosis_dim
+        primary_key: [diagnosis_code]
+        unique_keys:
+          - [diagnosis_code]
+        description: ICD-10-CM diagnosis code reference dimension with code descriptions and hierarchical groupings
+        ai_context:
+          synonyms:
+            - "diagnosis codes"
+            - "ICD codes"
+            - "ICD-10"
+            - "dx codes"
+            - "condition codes"
+
+        fields:
+          - name: diagnosis_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: diagnosis_code
+            description: ICD-10-CM diagnosis code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "ICD code"
+                - "dx code"
+                - "diagnosis"
+
+          - name: diagnosis_code_formatted
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: |
+                    CASE 
+                      WHEN LENGTH(diagnosis_code) > 3 
+                      THEN SUBSTRING(diagnosis_code, 1, 3) || '.' || SUBSTRING(diagnosis_code, 4)
+                      ELSE diagnosis_code 
+                    END
+                - dialect: SNOWFLAKE
+                  expression: |
+                    CASE 
+                      WHEN LENGTH(diagnosis_code) > 3 
+                      THEN SUBSTR(diagnosis_code, 1, 3) || '.' || SUBSTR(diagnosis_code, 4)
+                      ELSE diagnosis_code 
+                    END
+            description: ICD-10 code with decimal formatting
+            dimension:
+              is_time: false
+
+          - name: short_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: short_description
+            description: Short description of the diagnosis
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "diagnosis name"
+                - "condition"
+
+          - name: long_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: long_description
+            description: Full description of the diagnosis
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "full description"
+                - "diagnosis description"
+
+          - name: chapter_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: chapter_code
+            description: ICD-10 chapter code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "chapter"
+                - "ICD chapter"
+
+          - name: chapter_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: chapter_description
+            description: ICD-10 chapter description
+            dimension:
+              is_time: false
+
+          - name: category_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: category_code
+            description: 3-character ICD-10 category code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "category"
+                - "3-digit code"
+
+          - name: category_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: category_description
+            description: Category description
+            dimension:
+              is_time: false
+
+          - name: is_billable
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_billable
+            description: Flag indicating if code is valid for billing
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "billable"
+                - "valid code"
+
+          - name: hcc_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: hcc_code
+            description: Hierarchical Condition Category mapping
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "HCC"
+                - "risk adjustment category"
+
+          - name: hcc_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: hcc_description
+            description: HCC category description
+            dimension:
+              is_time: false
+
+          - name: clinical_classification_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: clinical_classification_code
+            description: Clinical Classifications Software (CCS) category
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "CCS"
+                - "clinical category"
+
+      # ====================
+      # DIMENSION TABLE: CPT/HCPCS Procedure Codes
+      # ====================
+      - name: cpt_hcpcs_procedure
+        source: claims_db.reference.cpt_hcpcs_dim
+        primary_key: [procedure_code]
+        unique_keys:
+          - [procedure_code]
+        description: CPT and HCPCS procedure code reference dimension with descriptions and categorizations
+        ai_context:
+          synonyms:
+            - "procedure codes"
+            - "CPT codes"
+            - "HCPCS codes"
+            - "service codes"
+
+        fields:
+          - name: procedure_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: procedure_code
+            description: CPT or HCPCS procedure code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "CPT"
+                - "HCPCS"
+                - "service code"
+
+          - name: code_type
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: code_type
+            description: Type of code (CPT/HCPCS Level I/HCPCS Level II)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "code category"
+                - "procedure type"
+
+          - name: short_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: short_description
+            description: Short description of the procedure
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "procedure name"
+                - "service description"
+
+          - name: long_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: long_description
+            description: Full description of the procedure
+            dimension:
+              is_time: false
+
+          - name: cpt_category_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: cpt_category_code
+            description: CPT category code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "category"
+
+          - name: cpt_category_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: cpt_category_description
+            description: CPT category description (E/M, Surgery, Radiology, etc.)
+            dimension:
+              is_time: false
+
+          - name: cpt_section
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: cpt_section
+            description: CPT section/range grouping
+            dimension:
+              is_time: false
+
+          - name: service_category
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: service_category
+            description: Service category (Inpatient/Outpatient/Professional/DME/Lab)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "service type"
+                - "category"
+
+          - name: is_evaluation_management
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_evaluation_management
+            description: Flag for E/M codes
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "E/M"
+                - "E&M"
+
+          - name: is_surgical
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_surgical
+            description: Flag for surgical procedures
+            dimension:
+              is_time: false
+
+          - name: relative_value_unit
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: relative_value_unit
+            description: Total RVU for the procedure
+            ai_context:
+              synonyms:
+                - "RVU"
+                - "work units"
+
+          - name: work_rvu
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: work_rvu
+            description: Physician work RVU component
+            ai_context:
+              synonyms:
+                - "work RVU"
+
+          - name: practice_expense_rvu
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: practice_expense_rvu
+            description: Practice expense RVU component
+            ai_context:
+              synonyms:
+                - "PE RVU"
+
+          - name: malpractice_rvu
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: malpractice_rvu
+            description: Malpractice RVU component
+            ai_context:
+              synonyms:
+                - "MP RVU"
+
+          - name: betos_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: betos_code
+            description: Berenson-Eggers Type of Service code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "BETOS"
+
+          - name: betos_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: betos_description
+            description: BETOS description
+            dimension:
+              is_time: false
+
+      # ====================
+      # DIMENSION TABLE: Revenue Codes
+      # ====================
+      - name: revenue_code
+        source: claims_db.reference.revenue_code_dim
+        primary_key: [revenue_code]
+        unique_keys:
+          - [revenue_code]
+        description: UB-04 revenue code dimension for institutional claims classification
+        ai_context:
+          synonyms:
+            - "revenue codes"
+            - "rev codes"
+            - "UB revenue codes"
+            - "facility charges"
+
+        fields:
+          - name: revenue_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: revenue_code
+            description: 4-digit revenue code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "rev code"
+                - "UB code"
+
+          - name: revenue_code_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: revenue_code_description
+            description: Revenue code description
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "revenue description"
+                - "service description"
+
+          - name: revenue_category_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: revenue_category_code
+            description: Revenue category (first 3 digits)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "category"
+                - "rev category"
+
+          - name: revenue_category_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: revenue_category_description
+            description: Revenue category description
+            dimension:
+              is_time: false
+
+          - name: service_type
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: service_type
+            description: Type of service (Room & Board, Ancillary, etc.)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "service category"
+
+          - name: is_accommodation
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_accommodation
+            description: Flag for room and board codes
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "room charge"
+                - "bed charge"
+
+          - name: is_ancillary
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_ancillary
+            description: Flag for ancillary service codes
+            dimension:
+              is_time: false
+
+      # ====================
+      # DIMENSION TABLE: Place of Service
+      # ====================
+      - name: place_of_service
+        source: claims_db.reference.place_of_service_dim
+        primary_key: [place_of_service_code]
+        unique_keys:
+          - [place_of_service_code]
+        description: CMS Place of Service code dimension indicating where services were rendered
+        ai_context:
+          synonyms:
+            - "place of service"
+            - "POS codes"
+            - "service location"
+            - "facility type"
+
+        fields:
+          - name: place_of_service_code
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: place_of_service_code
+            description: 2-digit CMS Place of Service code
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "POS"
+                - "location code"
+
+          - name: place_of_service_description
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: place_of_service_description
+            description: Place of Service description
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "location"
+                - "setting"
+
+          - name: facility_type
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: facility_type
+            description: Facility type category (Facility/Non-Facility)
+            dimension:
+              is_time: false
+
+          - name: setting_category
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: setting_category
+            description: Care setting category (Inpatient/Outpatient/Office/Home/Other)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "care setting"
+                - "service setting"
+
+          - name: is_inpatient
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_inpatient
+            description: Flag for inpatient settings
+            dimension:
+              is_time: false
+
+          - name: is_outpatient
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_outpatient
+            description: Flag for outpatient settings
+            dimension:
+              is_time: false
+
+          - name: is_telehealth
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_telehealth
+            description: Flag for telehealth-eligible settings
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "telemedicine"
+                - "virtual visit"
+
+      # ====================
+      # DIMENSION TABLE: Date Dimension
+      # ====================
+      - name: date_dim
+        source: claims_db.reference.date_dim
+        primary_key: [date_key]
+        unique_keys:
+          - [date_key]
+          - [calendar_date]
+        description: Date dimension for time-based analysis with calendar, fiscal, and healthcare-specific attributes
+        ai_context:
+          synonyms:
+            - "dates"
+            - "calendar"
+            - "time periods"
+
+        fields:
+          - name: date_key
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: date_key
+            description: Surrogate key for date (YYYYMMDD format)
+            dimension:
+              is_time: false
+
+          - name: calendar_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_date
+            description: Actual date value
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "date"
+                - "full date"
+
+          - name: calendar_year
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_year
+            description: Calendar year (YYYY)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "year"
+
+          - name: calendar_quarter
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_quarter
+            description: Calendar quarter (1-4)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "quarter"
+                - "Q1/Q2/Q3/Q4"
+
+          - name: calendar_year_quarter
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_year_quarter
+            description: Year and quarter (YYYY-Q#)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "quarter period"
+
+          - name: calendar_month
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_month
+            description: Calendar month number (1-12)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "month number"
+
+          - name: calendar_month_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_month_name
+            description: Month name
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "month"
+
+          - name: calendar_year_month
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_year_month
+            description: Year and month (YYYY-MM)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "month period"
+
+          - name: calendar_week
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: calendar_week
+            description: ISO week number (1-53)
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "week number"
+                - "week"
+
+          - name: day_of_week
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: day_of_week
+            description: Day of week (1=Sunday, 7=Saturday)
+            dimension:
+              is_time: true
+
+          - name: day_of_week_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: day_of_week_name
+            description: Day of week name
+            dimension:
+              is_time: true
+            ai_context:
+              synonyms:
+                - "weekday"
+
+          - name: is_weekend
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_weekend
+            description: Weekend indicator flag
+            dimension:
+              is_time: false
+
+          - name: is_holiday
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: is_holiday
+            description: Holiday indicator flag
+            dimension:
+              is_time: false
+
+          - name: incurred_month_lag
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: DATEDIFF(month, calendar_date, CURRENT_DATE)
+                - dialect: SNOWFLAKE
+                  expression: DATEDIFF('month', calendar_date, CURRENT_DATE())
+            description: Months from date to current date (for IBNR calculations)
+            dimension:
+              is_time: false
+            ai_context:
+              synonyms:
+                - "lag months"
+                - "IBNR lag"
+
+    # ====================
+    # RELATIONSHIPS
+    # ====================
+    relationships:
+      - name: claim_header_to_member
+        from: medical_claim_header
+        to: member_demographics
+        from_columns: [member_id]
+        to_columns: [member_id]
+        ai_context:
+          synonyms:
+            - "claim member"
+            - "patient claim"
+            - "who filed claim"
+
+      - name: claim_header_to_principal_diagnosis
+        from: medical_claim_header
+        to: icd10_diagnosis
+        from_columns: [principal_diagnosis_code]
+        to_columns: [diagnosis_code]
+        ai_context:
+          synonyms:
+            - "claim diagnosis"
+            - "primary condition"
+
+      - name: claim_header_to_place_of_service
+        from: medical_claim_header
+        to: place_of_service
+        from_columns: [place_of_service_code]
+        to_columns: [place_of_service_code]
+        ai_context:
+          synonyms:
+            - "claim location"
+            - "service setting"
+
+      - name: claim_header_to_service_date
+        from: medical_claim_header
+        to: date_dim
+        from_columns: [service_date_from]
+        to_columns: [calendar_date]
+        ai_context:
+          synonyms:
+            - "service date"
+            - "when service occurred"
+
+      - name: claim_header_to_paid_date
+        from: medical_claim_header
+        to: date_dim
+        from_columns: [paid_date]
+        to_columns: [calendar_date]
+        ai_context:
+          synonyms:
+            - "payment date"
+            - "adjudication date"
+
+      - name: claim_line_to_header
+        from: medical_claim_line
+        to: medical_claim_header
+        from_columns: [claim_id]
+        to_columns: [claim_id]
+        ai_context:
+          synonyms:
+            - "line to claim"
+            - "detail to header"
+
+      - name: claim_line_to_procedure
+        from: medical_claim_line
+        to: cpt_hcpcs_procedure
+        from_columns: [procedure_code]
+        to_columns: [procedure_code]
+        ai_context:
+          synonyms:
+            - "line procedure"
+            - "service performed"
+
+      - name: claim_line_to_revenue
+        from: medical_claim_line
+        to: revenue_code
+        from_columns: [revenue_code]
+        to_columns: [revenue_code]
+        ai_context:
+          synonyms:
+            - "line revenue"
+            - "facility charge type"
+
+      - name: claim_line_to_diagnosis_1
+        from: medical_claim_line
+        to: icd10_diagnosis
+        from_columns: [diagnosis_code_1]
+        to_columns: [diagnosis_code]
+        ai_context:
+          synonyms:
+            - "line diagnosis"
+            - "service diagnosis"
+
+      - name: claim_line_to_place_of_service
+        from: medical_claim_line
+        to: place_of_service
+        from_columns: [place_of_service_code]
+        to_columns: [place_of_service_code]
+        ai_context:
+          synonyms:
+            - "line location"
+            - "service setting"
+
+    # ====================
+    # METRICS
+    # ====================
+    metrics:
+      - name: total_billed_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.billed_amount)
+        description: Total charges submitted across all claims
+        ai_context:
+          synonyms:
+            - "total charges"
+            - "gross charges"
+            - "submitted amount"
+
+      - name: total_allowed_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.allowed_amount)
+        description: Total allowed amount after contractual adjustments
+        ai_context:
+          synonyms:
+            - "total allowable"
+            - "contracted amount"
+
+      - name: total_paid_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.paid_amount)
+        description: Total amount paid to providers
+        ai_context:
+          synonyms:
+            - "total payments"
+            - "reimbursement"
+            - "plan paid"
+
+      - name: total_member_liability
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.member_liability_amount)
+        description: Total member out-of-pocket costs
+        ai_context:
+          synonyms:
+            - "member cost share"
+            - "OOP"
+            - "patient responsibility"
+
+      - name: claim_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(DISTINCT medical_claim_header.claim_id)
+        description: Number of unique claims
+        ai_context:
+          synonyms:
+            - "number of claims"
+            - "claim volume"
+
+      - name: line_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(*)
+        description: Number of claim lines
+        ai_context:
+          synonyms:
+            - "service count"
+            - "line volume"
+
+      - name: unique_member_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(DISTINCT medical_claim_header.member_id)
+        description: Number of unique members with claims
+        ai_context:
+          synonyms:
+            - "patient count"
+            - "member count"
+            - "unique patients"
+
+      - name: average_claim_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.paid_amount) / NULLIF(COUNT(DISTINCT medical_claim_header.claim_id), 0)
+        description: Average paid amount per claim
+        ai_context:
+          synonyms:
+            - "avg claim cost"
+            - "mean claim amount"
+
+      - name: pmpm_cost
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.paid_amount) / NULLIF(COUNT(DISTINCT medical_claim_header.member_id), 0)
+        description: Per member per month cost (requires monthly aggregation)
+        ai_context:
+          synonyms:
+            - "PMPM"
+            - "per member cost"
+            - "member month cost"
+
+      - name: average_length_of_stay
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: AVG(DATEDIFF(day, medical_claim_header.admission_date, medical_claim_header.discharge_date))
+            - dialect: SNOWFLAKE
+              expression: AVG(DATEDIFF('day', medical_claim_header.admission_date, medical_claim_header.discharge_date))
+        description: Average length of stay for inpatient claims
+        ai_context:
+          synonyms:
+            - "ALOS"
+            - "avg LOS"
+            - "average days"
+
+      - name: utilization_per_1000
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: (COUNT(DISTINCT medical_claim_header.claim_id) * 1000.0) / NULLIF(COUNT(DISTINCT medical_claim_header.member_id), 0)
+        description: Claims per 1000 members (utilization rate)
+        ai_context:
+          synonyms:
+            - "utilization rate"
+            - "claims per 1000"
+
+      - name: denial_rate
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: |
+                COUNT(CASE WHEN medical_claim_header.claim_status_code = 'DENIED' THEN 1 END) * 100.0 / 
+                NULLIF(COUNT(DISTINCT medical_claim_header.claim_id), 0)
+        description: Percentage of claims denied
+        ai_context:
+          synonyms:
+            - "denial percentage"
+            - "reject rate"
+
+      - name: payment_ratio
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_header.paid_amount) / NULLIF(SUM(medical_claim_header.billed_amount), 0)
+        description: Ratio of paid to billed amount (payment yield)
+        ai_context:
+          synonyms:
+            - "payment yield"
+            - "paid to billed ratio"
+            - "reimbursement ratio"
+
+      - name: contractual_adjustment_rate
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: (SUM(medical_claim_header.billed_amount) - SUM(medical_claim_header.allowed_amount)) / NULLIF(SUM(medical_claim_header.billed_amount), 0)
+        description: Percentage of charges written off due to contractual adjustments
+        ai_context:
+          synonyms:
+            - "discount rate"
+            - "contractual write-off"
+
+      - name: total_units
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_line.units)
+        description: Total service units across all claim lines
+        ai_context:
+          synonyms:
+            - "service units"
+            - "unit count"
+
+      - name: cost_per_unit
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(medical_claim_line.line_paid_amount) / NULLIF(SUM(medical_claim_line.units), 0)
+        description: Average cost per service unit
+        ai_context:
+          synonyms:
+            - "unit cost"
+            - "cost per service"
+
+    # ====================
+    # CUSTOM EXTENSIONS
+    # ====================
+    custom_extensions:
+      - vendor_name: SNOWFLAKE
+        data: |
+          {
+            "cortex_analyst_enabled": true,
+            "semantic_view_name": "MEDICAL_CLAIMS_SEMANTIC_VIEW",
+            "warehouse": "ANALYTICS_WH",
+            "default_filters": {
+              "claim_status": ["PAID", "ADJUSTED"],
+              "line_of_business": ["COMMERCIAL", "MEDICARE", "MEDICAID"]
+            }
+          }
+      - vendor_name: COMMON
+        data: |
+          {
+            "domain": "healthcare",
+            "subdomain": "medical_claims",
+            "data_classification": "PHI",
+            "hipaa_compliant": true,
+            "refresh_frequency": "daily",
+            "data_owner": "claims_analytics_team"
+          }

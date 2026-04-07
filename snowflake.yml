@@ -1,0 +1,12 @@
+definition_version: 2
+entities:
+  medicare_dq_dashboard:
+    type: streamlit
+    identifier:
+      name: MEDICARE_DQ_DASHBOARD
+      database: MEDICARE_CLAIMS_POC
+      schema: GOLD
+    query_warehouse: CLAIMS_ANALYTICS_WH
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py

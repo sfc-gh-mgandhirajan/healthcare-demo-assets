@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: medical_claims
+    description: Final medical claims table with enriched data
+    columns:
+      - name: claim_id
+        description: Unique claim identifier
+        tests:
+          - unique
+          - not_null
+      - name: member_id
+        tests:
+          - not_null
+      - name: claim_status
+        tests:
+          - accepted_values:
+              values: ['PAID', 'PENDING', 'DENIED', 'ADJUSTED']
+
+  - name: medical_claims_lines
+    description: Final medical claims line items with enriched data
+    columns:
+      - name: line_id
+        description: Unique line item identifier
+        tests:
+          - unique
+          - not_null
+      - name: claim_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('medical_claims')
+              field: claim_id

@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.p8
+*.pub
+.DS_Store
+logs/
+node_modules/
+output/
+.streamlit/secrets.toml
