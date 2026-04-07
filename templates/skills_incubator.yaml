@@ -208,6 +208,11 @@ skills:
     description: "Guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing"
     domain: "Cross-Industry > Skill Development"
 
+  hcls-cross-aiml-industrymodels:
+    triggers: "fine-tuned model, industry model, custom model, FINETUNE, model catalog"
+    description: "Catalog and manage fine-tuned industry models for health sciences skills"
+    domain: "Cross-Industry > AI/ML"
+
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
     description: "ClinicalTrials.gov research database"

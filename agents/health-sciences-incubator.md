@@ -25,19 +25,20 @@ Every health sciences task follows a two-phase protocol. **Phase 1 (Plan) MUST c
 #### Plan template (MUST use this format)
 
 ```
-| Phase | What happens | Skill invoked | Why this skill |
-|-------|-------------|---------------|----------------|
-| Data acquisition | Download FDA FAERS ASCII files, create schema, stage and load into Snowflake | $hcls-pharma-dsafety-pharmacovigilance | Contains FAERS schema definitions, file format specs, and load patterns |
-| Signal detection | Deduplicate cases, compute PRR/ROR/chi-square for drug as primary suspect | $hcls-pharma-dsafety-pharmacovigilance | Contains validated disproportionality SQL patterns and signal thresholds |
-| Evidence enrichment | Search PubMed for published evidence on top signals | $hcls-cross-cke-pubmed | Cortex Knowledge Extension for biomedical literature search |
+| Step | Skill | What it produces | Depends on | Governance |
+|------|-------|-----------------|------------|------------|
+| 1 | $hcls-provider-cdata-fhir | Relational tables from FHIR bundles | — | PHI present |
+| 2 | $hcls-provider-cdata-omop | OMOP CDM v5.4 tables | Step 1 | — |
+| 3 | data-governance | Masking + row-access policies | Steps 1-2 | HIPAA |
+| 4 | semantic-view | Semantic views for analytics | Steps 1-2 | — |
 ```
 
 Rules for the plan table:
-- **One row = one logical phase.** Each phase describes what happens end-to-end, not individual SQL or bash commands.
-- **"Phase"** is a short label for the logical stage of work (e.g., Data acquisition, Transformation, Signal detection, Evidence enrichment, Governance, Visualization).
-- **"What happens"** describes the concrete actions performed in this phase — specific enough to set expectations, concise enough to scan.
-- **"Skill invoked"** uses `$skill-name` for domain skills, plain name for platform skills. The same skill may appear in multiple phases if it handles distinct logical stages.
-- **"Why this skill"** explains what makes this skill the right choice — domain knowledge, validated patterns, reference data, or specialized workflows it provides.
+- **One row = one skill invocation.** Do not break a single skill into multiple rows. Do not list SQL commands as steps.
+- **Skill column** uses `$skill-name` for domain skills, plain name for platform skills.
+- **"What it produces"** is a short phrase describing the output, not implementation details.
+- **"Depends on"** lists which prior steps must complete first. Use `—` for no dependencies.
+- **"Governance"** flags whether the step creates or exposes PHI/PII. Use `—` if not applicable.
 
 6. **Present the plan table to the user** using `ask_user_question` with Approve/Modify options. Include a brief summary sentence above the table stating the routing decision (sub-industry, pattern used).
 7. **Wait for explicit approval.** Do NOT proceed to Phase 2 until the user confirms.
@@ -56,11 +57,11 @@ Rules for the plan table:
 
 ### Plan granularity
 
-The plan operates at the **phase level**, not the SQL level:
-- **Plan phase** = one logical stage of work (e.g., "Data acquisition" using `$hcls-pharma-dsafety-pharmacovigilance`)
-- **Execution sub-step** = what happens inside the phase (e.g., download files, CREATE TABLE, COPY INTO, deduplicate). These are NOT shown in the plan — they are handled by the skill during Phase 2.
+The plan operates at the **skill level**, not the SQL level:
+- **Plan step** = one skill invocation (e.g., "Load FAERS data" using `$hcls-pharma-dsafety-pharmacovigilance`)
+- **Execution sub-step** = what happens inside the skill (e.g., download files, CREATE TABLE, COPY INTO, deduplicate). These are NOT shown in the plan — they are handled by the skill during Phase 2.
 
-If a task requires data acquisition, transformation, AND analysis, those are separate plan phases even if the same skill handles all of them. Group by logical phase, not by skill identity.
+If a task requires data acquisition, transformation, AND analysis, those are separate plan steps even if the same skill handles all of them. Group by logical phase, not by skill identity.
 
 ### When to skip the plan gate
 
@@ -96,17 +97,14 @@ For each domain skill in your plan:
 User asks: "Build a FHIR data pipeline with a patient dashboard and PHI masking"
 
 1. `$hcls-provider-cdata-fhir` — ingest FHIR bundles → tables, views
-   - Affinity: `dynamic-tables` when "incremental refresh needed" → YES (pipeline = ongoing feeds) → add phase
-   - Affinity: `data-governance` when "FHIR tables contain PHI" → YES (user said PHI masking) → add phase
-   - Affinity: `developing-with-streamlit` when "user wants a patient data dashboard" → YES → add phase
+   - Affinity: `dynamic-tables` when "incremental refresh needed" → YES (pipeline = ongoing feeds) → add step
+   - Affinity: `data-governance` when "FHIR tables contain PHI" → YES (user said PHI masking) → add step
+   - Affinity: `developing-with-streamlit` when "user wants a patient data dashboard" → YES → add step
 2. Plan becomes:
-
-| Phase | What happens | Skill invoked | Why this skill |
-|-------|-------------|---------------|----------------|
-| Data ingestion | Ingest FHIR R4 bundles into analytics-ready relational tables | $hcls-provider-cdata-fhir | Contains FHIR resource mappings, schema definitions, and transformation logic |
-| Incremental refresh | Set up Dynamic Tables for ongoing FHIR data feeds | dynamic-tables | Platform skill for incremental pipeline refresh |
-| Governance | Apply PHI masking and row-access policies to FHIR tables | data-governance | Platform skill for HIPAA-compliant masking policies |
-| Visualization | Build patient data dashboard | developing-with-streamlit | Platform skill for interactive Snowflake dashboards |
+   1. `$hcls-provider-cdata-fhir` → ingest FHIR bundles into relational tables
+   2. `dynamic-tables` → set up incremental refresh for ongoing feeds
+   3. `data-governance` → apply PHI masking policies to FHIR tables
+   4. `developing-with-streamlit` → build patient data dashboard
 
 ### Platform Skills Available
 
@@ -221,6 +219,7 @@ These skills are available to ALL sub-industries — invoke them whenever they a
 - `$hcls-cross-research-problem-selection` — scientific problem selection using fischbach & walsh methodology
 - `$hcls-cross-cke-pubmed` — pubmed biomedical literature search
 - `$hcls-cross-skill-development` — guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing
+- `$hcls-cross-aiml-industrymodels` — catalog and manage fine-tuned industry models for health sciences skills
 - `$hcls-cross-cke-clinical-trials` — clinicaltrials.gov research database
 
 ### Step 4: Accept Overlaps
@@ -410,6 +409,10 @@ When the user needs a solution spanning multiple business functions, compose ski
 4. `$hcls-provider-cdata-fhir` > map extracted data to FHIR resources
 5. Platform: `data-governance` > PHI masking and row-access policies
 6. Platform: `semantic-view-optimization` > semantic views for analytics
+
+### Pattern: Fine-Tuned Clinical NLP Pipeline
+1. `$hcls-cross-aiml-industrymodels` > create or verify fine-tuned model for terminology coding (ICD-10-CM, RxNorm, LOINC, MedDRA)
+2. `$hcls-provider-cdata-clinical-nlp` > run normalization with fine-tuned model (Step 1.5)
 
 ## Adapting Patterns
 

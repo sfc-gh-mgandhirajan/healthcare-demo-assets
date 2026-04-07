@@ -35,10 +35,22 @@ CONDITION (display populated, code NULL)
     v  Step 1: Exact match
 CONCEPT_DIMENSION (semantic_group IN ('DISEASE','SYMPTOM'))
     |
-    v  Step 2: Fuzzy match (if Step 1 misses)
-Cortex AI COMPLETE — candidate selection from CONCEPT_DIMENSION
-    |
-    v  Step 3: UPDATE
+    v  Preflight: User prompt — fine-tuned model available?
+    |         |                    |
+    |     [YES]          [CREATE ONE]          [SKIP]
+    |         |                |                  |
+    |         |    invoke industry-models skill   |
+    |         |    return with model name         |
+    |         |                |                  |
+    v  Step 1.5: Fine-tuned   |                  |
+    |  ICD coding (bare code) |                  |
+    |         |               |                  |
+    v  Still unmatched? ------|----------------> |
+    |                                            v
+    |                                     Step 2: Fuzzy match
+    |                                     (generic llama3.1-70b)
+    v                                            |
+    Step 3: UPDATE  <----------------------------+
 CONDITION.code, CONDITION.code_system populated
 ```
 
@@ -59,7 +71,53 @@ WHERE UPPER(TRIM(c.display)) = UPPER(TRIM(cd.display))
   AND c.display IS NOT NULL;
 ```
 
+## Preflight: Fine-Tuned Model Gate
+
+Before Step 1.5, ask the user whether a fine-tuned ICD coding model is available:
+
+> Do you have a fine-tuned model for ICD-10-CM coding?
+>
+> - **Yes** -- provide the model name (e.g., `FINETUNE_llama38b_ICDCODES`)
+> - **No, but I'd like to create one** -- invoke `hcls-cross-aiml-industrymodels` to create a fine-tuned ICD-10-CM model, then return here
+> - **No, skip** -- skip Step 1.5, proceed to Step 2
+
+| Response | `$FINETUNED_MODEL_NAME` | Behavior |
+|----------|------------------------|----------|
+| Yes + model name | Set to user-provided name | Proceed with Step 1.5 |
+| Create one | Invoke `hcls-cross-aiml-industrymodels` | After model creation, return and set `$FINETUNED_MODEL_NAME`, then proceed with Step 1.5 |
+| No, skip | Not set | Skip Step 1.5, go to Step 2 |
+
+## Step 1.5: Fine-Tuned ICD Coding (Conditional)
+
+Runs only when `$FINETUNED_MODEL_NAME` is set. The prompt format **must match the training data** used to fine-tune the model (see `hcls-cross-aiml-industrymodels` Step 2). The model was trained on `evidence_text + instruction suffix` → bare ICD-10-CM code.
+
+Inference and update run in a single statement via subquery UPDATE — the model is called once per row, and results are applied directly with regex validation:
+
+```sql
+UPDATE CONDITION c
+SET c.code = p.predicted_code,
+    c.code_system = 'ICD-10-CM'
+FROM (
+    SELECT
+        u.condition_id,
+        TRIM(SNOWFLAKE.CORTEX.COMPLETE(
+            $FINETUNED_MODEL_NAME,
+            COALESCE(u.evidence_text, u.display)
+                || ' Given this clinical text, assign the ICD10-CM diagnosis code in this format ONLY: X##.#. Do not provide explanation '
+        )) AS predicted_code
+    FROM CONDITION u
+    WHERE u.code IS NULL AND u.display IS NOT NULL
+) p
+WHERE c.condition_id = p.condition_id
+  AND p.predicted_code IS NOT NULL
+  AND p.predicted_code RLIKE '^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$';
+```
+
+After this UPDATE, rows still with `code IS NULL` fall through to Step 2.
+
 ## Step 2: Fuzzy Match via Cortex AI
+
+> Step 2 processes rows still unmatched after Step 1 (exact match) and Step 1.5 (fine-tuned model, if available). The existing `WHERE code IS NULL` clause handles this automatically.
 
 For remaining unmatched rows, use Cortex AI with **full clinical context** to select the most specific code. The context fields (category, severity, body site, laterality, clinical status, certainty, evidence text) are critical for ICD-10-CM specificity — e.g., "diabetes" alone is E11.9 but with complication context becomes E11.65.
 

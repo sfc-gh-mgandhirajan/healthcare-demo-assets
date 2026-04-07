@@ -178,14 +178,14 @@ Start Cortex Code with the orchestrator profile:
 cortex --profile health-sciences-incubator
 ```
 
-The `--profile` flag loads the orchestrator agent as the system prompt and fetches the 19 `hcls-*` skills from GitHub into a local cache. On first launch this involves a sparse Git clone; subsequent launches use the cached copy.
+The `--profile` flag loads the orchestrator agent as the system prompt and fetches the 20 `hcls-*` skills from GitHub into a local cache. On first launch this involves a sparse Git clone; subsequent launches use the cached copy.
 
 ### Step 3: Validate
 
 Inside the Cortex Code session, verify everything is wired correctly:
 
 ```
-/skill                    # Should list 19 hcls-* skills
+/skill                    # Should list 20 hcls-* skills
 /agents                   # Should show health-sciences-incubator as active
 ```
 
@@ -306,6 +306,7 @@ cortex --profile health-sciences-incubator
 | [hcls-cross-skill-development](skills/hcls-cross-skill-development/) | Guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing |
 | [hcls-cross-cke-pubmed](skills/hcls-cross-cke-pubmed/) | RAG-based semantic search over PubMed biomedical literature (Cortex Knowledge Extension) |
 | [hcls-cross-cke-clinical-trials](skills/hcls-cross-cke-clinical-trials/) | RAG-based semantic search over ClinicalTrials.gov registry (Cortex Knowledge Extension) |
+| [hcls-cross-aiml-industrymodels](skills/hcls-cross-aiml-industrymodels/) | Catalog and manage fine-tuned industry models (ICD coding, clinical NER, RxNorm, MedDRA, LOINC) for use across health sciences skills |
 
 ## Framework Architecture
 
@@ -425,6 +426,8 @@ Health Sciences
     │   └── hcls-cross-research-problem-selection
     ├── Skill Development
     │   └── hcls-cross-skill-development
+    ├── AI/ML
+    │   └── hcls-cross-aiml-industrymodels
     └── Knowledge Extensions
         ├── hcls-cross-cke-pubmed
         └── hcls-cross-cke-clinical-trials
@@ -490,6 +493,7 @@ The orchestrator composes multiple skills for complex solutions:
 | Lab Data Modernization | Allotrope conversion → Dynamic Tables pipeline → Analytics dashboard |
 | Clinical Data App (React) | Domain skills → React/Next.js app → SPCS deployment → PHI masking |
 | Document Intelligence | Clinical docs extraction → Search → Agent → Governance |
+| Fine-Tuned Clinical NLP Pipeline | Industry models (create/verify fine-tuned model) → Clinical NLP normalization (Step 1.5) |
 
 ---
 
@@ -624,7 +628,7 @@ Clinical Notes (discharge summaries, progress notes, H&Ps)
     → Extraction Dynamic Tables (Cortex COMPLETE per concept category)
         → Conditions, Therapeutics, Observations,
            Patient Context, Oncology, Safety/Care Planning
-    → Normalization Stored Procedure (exact match + deterministic + Cortex fuzzy)
+    → Normalization Stored Procedure (exact match + fine-tuned model + Cortex fuzzy)
         → ICD-10-CM, SNOMED CT, RxNorm, LOINC, MedDRA, ICD-O-3
     → Governance (PHI masking, de-identification, audit)
 ```
@@ -653,7 +657,7 @@ Clinical Notes (discharge summaries, progress notes, H&Ps)
 
 - **Extraction is code-system-agnostic** — captures text spans only; codes are NULL until normalization
 - **Terminology Preference Gate** — for any normalization intent, the router asks the user which code system(s) to use before proceeding
-- **Three-tier normalization** — exact match → deterministic mapping → Cortex COMPLETE fuzzy match (with confidence scores)
+- **Normalization tiers** — exact match → optional fine-tuned model (via `hcls-cross-aiml-industrymodels`) → Cortex COMPLETE fuzzy match (with confidence scores)
 - **Single best code per entity** — one entity = one row = one code (no duplicate rows for different code systems)
 
 ### CKE Architecture
