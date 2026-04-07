@@ -1,0 +1,6 @@
+[submodule "interactive-tables-demo"]
+	path = interactive-tables-demo
+	url = https://github.com/sfc-gh-mgandhirajan/interactive-tables-er-demo.git
+[submodule "clinical-nlp-pipeline"]
+	path = clinical-nlp-pipeline
+	url = https://github.com/sfc-gh-mgandhirajan/clinical-nlp-pipeline.git
