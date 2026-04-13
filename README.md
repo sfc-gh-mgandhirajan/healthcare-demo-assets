@@ -258,7 +258,6 @@ cortex --profile health-sciences-incubator
 | Skill | Description |
 |-------|-------------|
 | [hcls-provider-imaging](skills/hcls-provider-imaging/) | Router skill covering full DICOM imaging lifecycle (parse, ingest, analytics, viewer, governance, ML, data model knowledge) |
-| [hcls-provider-imaging-dicom-parser](skills/hcls-provider-imaging-dicom-parser/) | Standalone DICOM metadata parser with comprehensive data model |
 
 ### Provider > Clinical Data Management
 
@@ -399,7 +398,6 @@ Health Sciences
 ├── Provider
 │   ├── Clinical Research
 │   │   ├── hcls-provider-imaging (router + 7 sub-skills)
-│   │   └── hcls-provider-imaging-dicom-parser (standalone)
 │   ├── Clinical Data Management
 │   │   ├── hcls-provider-cdata-fhir
 │   │   ├── hcls-provider-cdata-clinical-nlp (router + 15 sub-skills)
@@ -714,11 +712,8 @@ health-sciences-coco-skills-incubator/
 ├── scripts/                             # Setup, generation, and QA scripts
 │   ├── generate_orchestrators.py        #   Generate agent profiles from templates
 │   ├── setup_dicom_model_knowledge_repo.sql  # DICOM CKE search service setup
-│   ├── generate_industry_framework_pdf.py    # ISF PDF generator
 │   ├── generate_dicom_model_spreadsheet.py   # DICOM model spreadsheet generator
 │   ├── export_search_corpus_csv.py      #   Export CKE corpus to CSV
-│   ├── generate_pdf_guide.py            #   PDF guide generator
-│   ├── generate_skill_playbook_pdf.py   #   Skill development playbook PDF generator
 │   └── qa_validate_orchestrator.py      #   QA validation for orchestrator
 ├── skills.json.template                 # Clean starting point for skills config
 └── README.md

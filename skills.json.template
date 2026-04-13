@@ -4,7 +4,6 @@
       "path": "<ABSOLUTE_PATH_TO_REPO>/skills",
       "skills": [
         { "name": "hcls-provider-imaging", "relative_path": "hcls-provider-imaging" },
-        { "name": "hcls-provider-imaging-dicom-parser", "relative_path": "hcls-provider-imaging-dicom-parser" },
         { "name": "hcls-provider-cdata-fhir", "relative_path": "hcls-provider-cdata-fhir" },
         { "name": "hcls-provider-cdata-clinical-nlp", "relative_path": "hcls-provider-cdata-clinical-nlp" },
         { "name": "hcls-provider-cdata-omop", "relative_path": "hcls-provider-cdata-omop" },

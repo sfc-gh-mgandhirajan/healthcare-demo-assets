@@ -131,21 +131,8 @@ for ref in sorted(orch_refs):
             sections.append(i)
     print(f"  {ref}: {count} occurrences (lines: {sections})")
 
-# CHECK 7: Standalone hcls-provider-imaging-dicom-parser
-print("\n--- CHECK 7: Standalone skills ---")
-standalone = os.path.join(BASE, "hcls-provider-imaging-dicom-parser")
-if os.path.isdir(standalone):
-    if "hcls-provider-imaging-dicom-parser" in skill_names:
-        if "$hcls-provider-imaging-dicom-parser" in orch_content:
-            print(f"  NOTE: hcls-provider-imaging-dicom-parser exists & referenced")
-        else:
-            print(f"  WARN: hcls-provider-imaging-dicom-parser exists in filesystem with SKILL.md but NOT referenced in orchestrator")
-    else:
-        print(f"  FAIL: dir exists but no SKILL.md name match")
-        fails += 1
-
-# CHECK 8: Twin orchestrator drift detection
-print("\n--- CHECK 8: Twin orchestrator drift (incubator vs production) ---")
+# CHECK 7: Twin orchestrator drift detection
+print("\n--- CHECK 7: Twin orchestrator drift (incubator vs production) ---")
 if os.path.exists(ORCH_PROD):
     with open(ORCH_PROD) as f:
         prod_content = f.read()
