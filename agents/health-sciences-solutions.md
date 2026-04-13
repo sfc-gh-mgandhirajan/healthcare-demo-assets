@@ -223,7 +223,6 @@ Patterns are guides, not rigid scripts. Adapt them to the user's actual request:
 - **Do NOT invoke CKEs for non-evidence tasks** — CKEs add value for literature grounding, trial benchmarking, and evidence review; they do not help with pipeline construction or SQL generation
 - **Do NOT skip preflight checks** — if a skill has a preflight section, it runs automatically; do not bypass or suppress preflight probes
 - **Do NOT force-follow a pattern** when the user's request only partially matches — adapt the pattern per the guidance above
-- **Do NOT use `imaging-dicom-parser` (standalone) when the user needs a full imaging workflow** — use the `imaging` router instead, which includes the parser plus ingestion, analytics, governance, and ML
 
 ## Guardrails
 

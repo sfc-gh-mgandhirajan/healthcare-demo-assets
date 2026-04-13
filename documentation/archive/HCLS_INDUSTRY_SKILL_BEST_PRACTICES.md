@@ -54,7 +54,6 @@ The portfolio spans five segments with distinct domain patterns. Three segments 
 | Skill | Archetype | Domain |
 |-------|-----------|--------|
 | `hcls-provider-imaging` | Router + 7 sub-skills | DICOM parsing, ingestion, analytics, viewer, governance, ML |
-| `hcls-provider-imaging-dicom-parser` | Standalone | DICOM metadata extraction and 18-table data model |
 | `hcls-provider-cdata-fhir` | Standalone | FHIR R4 bundle → relational tables |
 | `hcls-provider-cdata-clinical-nlp` | Router + 15 sub-skills | Clinical note NLP: extraction, normalization, governance, pipeline |
 | `hcls-provider-cdata-clinical-docs` | Standalone | Clinical document intelligence (classification, extraction, search) |

@@ -51,12 +51,6 @@ skills:
         triggers: "DICOM data model, schema reference, model repository"
         description: "18-table DICOM data model reference docs"
 
-  hcls-provider-imaging-dicom-parser:
-    triggers: "Parse DICOM standalone (without router)"
-    description: "Standalone DICOM parser for quick parsing tasks"
-    domain: "Provider > Clinical Research"
-    standalone: true
-
   hcls-provider-cdata-fhir:
     triggers: "FHIR, HL7, Patient resource, Observation, Bundle, ndjson"
     description: "FHIR R4 resources to relational tables"

@@ -152,7 +152,6 @@ Health Sciences
 |-- Provider
 |   |-- Clinical Research
 |   |   |-- hcls-provider-imaging (router + 7 sub-skills)
-|   |   +-- hcls-provider-imaging-dicom-parser (standalone)
 |   |-- Clinical Data Management
 |   |   |-- hcls-provider-cdata-fhir
 |   |   |-- hcls-provider-cdata-clinical-nlp
@@ -264,7 +263,6 @@ Two CKEs from the Snowflake Marketplace are available as shared Cortex Search Se
 | HIPAA imaging, PHI masking, imaging audit | `$hcls-provider-imaging` > `imaging-governance` | Masking policies, classification, row-access |
 | Imaging model, radiology AI, pathology model | `$hcls-provider-imaging` > `imaging-ml` | ML training, Model Registry, SQL inference |
 | DICOM data model, schema reference, model repository | `$hcls-provider-imaging` > `data-model-knowledge` | 18-table DICOM data model reference docs |
-| Parse DICOM standalone (without router) | `$hcls-provider-imaging-dicom-parser` | Standalone DICOM parser for quick parsing tasks |
 
 ### Provider > Clinical Data Management
 
@@ -410,10 +408,6 @@ When the user needs a solution spanning multiple business functions, compose ski
 5. Platform: `data-governance` > PHI masking and row-access policies
 6. Platform: `semantic-view-optimization` > semantic views for analytics
 
-### Pattern: Fine-Tuned Clinical NLP Pipeline
-1. `$hcls-cross-aiml-industrymodels` > create or verify fine-tuned model for terminology coding (ICD-10-CM, RxNorm, LOINC, MedDRA)
-2. `$hcls-provider-cdata-clinical-nlp` > run normalization with fine-tuned model (Step 1.5)
-
 ## Adapting Patterns
 
 Patterns are guides, not rigid scripts. Adapt them to the user's actual request:
@@ -431,7 +425,6 @@ Patterns are guides, not rigid scripts. Adapt them to the user's actual request:
 - **Do NOT invoke CKEs for non-evidence tasks** — CKEs add value for literature grounding, trial benchmarking, and evidence review; they do not help with pipeline construction or SQL generation
 - **Do NOT skip preflight checks** — if a skill has a preflight section, it runs automatically; do not bypass or suppress preflight probes
 - **Do NOT force-follow a pattern** when the user's request only partially matches — adapt the pattern per the guidance above
-- **Do NOT use `imaging-dicom-parser` (standalone) when the user needs a full imaging workflow** — use the `imaging` router instead, which includes the parser plus ingestion, analytics, governance, and ML
 
 ## Guardrails
 

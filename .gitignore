@@ -41,3 +41,11 @@ Thumbs.db
 *.tmp
 *.log
 *.swp
+
+# Cortex Code local state (credentials, plans, conversation history)
+.snowflake/
+
+# Word lock files
+~$*.docx
+~$*.xlsx
+~$*.pptx
