@@ -9,3 +9,5 @@ logs/
 node_modules/
 output/
 .streamlit/secrets.toml
+**/.streamlit/secrets.toml
+secrets.toml

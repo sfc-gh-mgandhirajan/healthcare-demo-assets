@@ -1,0 +1,12 @@
+definition_version: 2
+entities:
+  cohort_explorer:
+    type: streamlit
+    identifier:
+      name: RWD_COHORT_EXPLORER
+      database: RWD_LAB_DEMO
+      schema: COHORT_EXPLORER
+    query_warehouse: BI_WH
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
