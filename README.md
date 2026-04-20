@@ -186,7 +186,6 @@ Inside the Cortex Code session, verify everything is wired correctly:
 
 ```
 /skill                    # Should list 20 hcls-* skills
-/agents                   # Should show health-sciences-incubator as active
 ```
 
 From a separate terminal:
@@ -231,13 +230,10 @@ Ask healthcare questions in natural language. The orchestrator follows a **Plan-
 
 This repo is actively developed — new skills, orchestrator improvements, and bug fixes land via PRs to `main`. To pull the latest orchestrator and skills:
 
-```bash
-cortex profile sync health-sciences-incubator
-```
-
-This syncs both the orchestrator system prompt and all skills from GitHub to your local cache. Re-launch to pick up the changes:
+> ⚠️ **Note (as of April 20, 2026):** There is no command to sync a GitHub-based `skillRepo` or `systemPromptRepo`. `cortex profile sync` only works with server-side Snowflake profiles, not locally defined git-based ones. Skills and the orchestrator are fetched into a local cache on first launch — there is no re-pull command. To pick up updates, pull the repo manually and re-launch Cortex Code:
 
 ```bash
+git -C ~/path/to/health-sciences-coco-skills-incubator pull origin main
 cortex --profile health-sciences-incubator
 ```
 
@@ -248,7 +244,7 @@ cortex --profile health-sciences-incubator
 | `cortex --profile health-sciences-incubator` says "profile not found" | Profile JSON doesn't exist | Follow Step 1 to create `~/.snowflake/cortex/profiles/health-sciences-incubator.json` |
 | `/skill` shows no `hcls-*` skills | `skillRepos` not configured or GitHub unreachable | Run `cortex profile show health-sciences-incubator` — should show `Skills (1 repos)` with the GitHub source. If missing, re-create the profile JSON (Step 1). |
 | Skills registered but orchestrator doesn't route to them | Profile not active or `systemPromptRepo` misconfigured | Check `systemPromptRepo.source` in profile JSON points to `github:Snowflake-Solutions/health-sciences-coco-skills-incubator/agents/health-sciences-incubator.md`. Clear the cache and re-launch. |
-| Skills or orchestrator appear stale after a repo update | Cortex Code is using the cached clone | Run `cortex profile sync health-sciences-incubator` and re-launch |
+| Skills or orchestrator appear stale after a repo update | Cortex Code is using the cached clone | Pull the repo manually (`git pull origin main`) and re-launch — there is no sync command for git-based profiles |
 | `cortex skill list` shows `hcls-*` skills globally | Skills were previously registered via `cortex skill add` | Remove them: `cortex skill remove "github:Snowflake-Solutions/health-sciences-coco-skills-incubator#main"` — the profile's `skillRepos` handles skill loading now |
 
 ## Skills Inventory
