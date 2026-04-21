@@ -10,19 +10,80 @@ platform_affinities:
 
 This skill provides access to the **PubMed Biomedical Research Corpus** Cortex Knowledge Extension (CKE) from the Snowflake Marketplace. It is a shared Cortex Search Service that enables RAG-based semantic search across PubMed biomedical literature directly in Snowflake -- no data is copied into your account.
 
-## Preflight Check (REQUIRED -- Run Before Any Query)
+## Service Discovery (REQUIRED -- Run Before Any Query)
 
-Before executing any PubMed search, verify the Marketplace listing is installed:
+Before executing any PubMed search, run the following anonymous block to dynamically discover the imported database and Cortex Search Service name. This is role-scoped -- it only finds databases the current role has privileges on.
 
 ```sql
-SELECT COUNT(*) FROM PUBMED_ABSTRACTS_EMBEDDINGS.SHARED.PUBMED_SEARCH_CORPUS LIMIT 1;
+DECLARE
+  res RESULTSET;                       -- Reusable resultset for EXECUTE IMMEDIATE calls
+  db_name VARCHAR DEFAULT NULL;        -- Will hold the imported database name if found
+  service_fqn VARCHAR DEFAULT NULL;    -- Will hold the fully qualified Cortex Search Service name
+BEGIN
+  -- Step 1: List all databases visible to the current role
+  -- SHOW DATABASES is role-scoped, so it only returns databases the user has privileges on
+  res := (EXECUTE IMMEDIATE 'SHOW DATABASES IN ACCOUNT');
+
+  -- Step 2: Try to find the PubMed CKE imported database by matching the origin
+  -- If no matching row exists (not imported or no privileges), the SELECT INTO will fail
+  BEGIN
+    SELECT "name" INTO :db_name
+      FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+      WHERE "kind" = 'IMPORTED DATABASE'
+      AND "origin" LIKE '%PUBMED_CKE_DB%'
+      LIMIT 1;
+  EXCEPTION
+    -- Catch the error when no rows are returned and keep db_name as NULL
+    WHEN OTHER THEN
+      db_name := NULL;
+  END;
+
+  IF (db_name IS NOT NULL) THEN
+    -- Step 3: Database found — list all Cortex Search Services within it
+    res := (EXECUTE IMMEDIATE 'SHOW CORTEX SEARCH SERVICES IN DATABASE ' || db_name);
+
+    -- Step 4: Build the fully qualified name (database.schema.service) from the first result
+    BEGIN
+      SELECT "database_name" || '.' || "schema_name" || '.' || "name" INTO :service_fqn
+        FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+        LIMIT 1;
+    EXCEPTION
+      -- No Cortex Search Service exists in this database
+      WHEN OTHER THEN
+        service_fqn := NULL;
+    END;
+
+    IF (service_fqn IS NOT NULL) THEN
+      -- Step 5a: Cortex Search Service found — return its fully qualified name
+      res := (EXECUTE IMMEDIATE 'SELECT \'' || service_fqn || '\' AS CORTEX_SEARCH_SERVICE');
+      LET c CURSOR FOR SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+      OPEN c;
+      RETURN TABLE(c);
+    ELSE
+      -- Step 5b: Database exists but contains no Cortex Search Service
+      res := (EXECUTE IMMEDIATE 'SELECT \'' || db_name || '\' AS NAME, \'No Cortex Search Service found in this database.\' AS STATUS');
+      LET c2 CURSOR FOR SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+      OPEN c2;
+      RETURN TABLE(c2);
+    END IF;
+  ELSE
+    -- Step 3 (alternate): Database not found — either not imported or user lacks privileges
+    -- SHOW DATABASES is role-scoped, so a missing result means one of these two scenarios
+    LET msg CURSOR FOR
+      SELECT NULL AS NAME, FALSE AS AVAILABLE_TO_YOU,
+             'The PubMed Biomedical Research Corpus Cortex Knowledge Extension is either not imported or your current role (' || CURRENT_ROLE() || ') does not have privileges to see it.' AS ERROR_MESSAGE,
+             'Ask your account administrator (ACCOUNTADMIN) to either: (1) Import this free listing via Snowsight > Data Products > Marketplace > Search "PubMed Biomedical Research Corpus" > Click "Get", or (2) If already imported, grant access with: GRANT IMPORTED PRIVILEGES ON DATABASE <your_pubmed_database> TO ROLE ' || CURRENT_ROLE() || ';' AS GUIDANCE;
+    OPEN msg;
+    RETURN TABLE(msg);
+  END IF;
+END;
 ```
 
 | Result | Status | Action |
 |--------|--------|--------|
-| Returns a count | READY | Proceed with queries using `PUBMED_ABSTRACTS_EMBEDDINGS` as the CKE database |
-| `SQL compilation error: does not exist` | MISSING | Guide user through Setup below, then retry |
-| Other error (permissions, etc.) | ERROR | Show error, suggest `GRANT IMPORTED PRIVILEGES ON DATABASE PUBMED_ABSTRACTS_EMBEDDINGS TO ROLE <role>` |
+| Returns `CORTEX_SEARCH_SERVICE` column with a fully qualified name | READY | Use the returned value as the service name in all query patterns below |
+| Returns `NAME` + `STATUS` columns ("No Cortex Search Service found") | PARTIAL | Database is imported but service is missing -- contact your account administrator |
+| Returns `AVAILABLE_TO_YOU = FALSE` with `ERROR_MESSAGE` and `GUIDANCE` | MISSING | Follow the guidance to install the listing or grant privileges |
 
 ### Fallback (When MISSING)
 
@@ -34,9 +95,9 @@ If the listing is not installed and the user cannot install it now:
 ### Auto-Detection for Domain Skills
 
 When a domain skill (pharmacovigilance, clinical-nlp, etc.) wants to invoke this CKE:
-1. Run the preflight probe above
-2. If READY -- execute the CKE query and enrich the domain result
-3. If MISSING -- skip enrichment, log a note: "PubMed CKE not available -- skipping literature enrichment"
+1. Run the Service Discovery block above
+2. If READY -- use the returned service name to execute CKE queries and enrich the domain result
+3. If MISSING or PARTIAL -- skip enrichment, log a note: "PubMed CKE not available -- skipping literature enrichment"
 4. Never fail the parent skill just because a CKE is unavailable
 
 ## Marketplace Details
@@ -44,26 +105,25 @@ When a domain skill (pharmacovigilance, clinical-nlp, etc.) wants to invoke this
 | Field | Value |
 |-------|-------|
 | **Listing ID** | `GZSTZ67BY9OQW` |
-| **Service Name** | `<CKE_DB>.SHARED.CKE_PUBMED_SERVICE` |
+| **Service Name** | Returned by Service Discovery block as `CORTEX_SEARCH_SERVICE` |
 | **Type** | Shared Cortex Search Service |
 | **Columns** | `chunk`, `document_title`, `source_url` |
-
-> **Note:** `<CKE_DB>` is the database name assigned when you install the listing from Marketplace (e.g., `PUBMED_BIOMEDICAL_RESEARCH_CORPUS`).
 
 ## Setup (One-Time)
 
 1. Navigate to **Snowflake Marketplace** and search for `PubMed Biomedical Research Corpus` (or listing `GZSTZ67BY9OQW`)
 2. Click **Get** to install -- no data is copied; a shared Cortex Search Service appears in your account
-3. Note the database name assigned (e.g., `PUBMED_BIOMEDICAL_RESEARCH_CORPUS`)
-4. Replace `<CKE_DB>` in the query patterns below with this database name
+3. Run the Service Discovery block above to confirm the service is available and get its fully qualified name
 
 ## Query Patterns
+
+> In the patterns below, `<SERVICE_FQN>` is a placeholder for the fully qualified Cortex Search Service name returned by the Service Discovery block above (e.g., `PUBMED_BIOMEDICAL_RESEARCH_CORPUS.OA_COMM.PUBMED_OA_CKE_SEARCH_SERVICE`).
 
 ### Basic Search (SQL)
 
 ```sql
 SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-  '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+  '<SERVICE_FQN>',
   '{"query": "<natural language question>", "columns": ["chunk", "document_title", "source_url"]}'
 );
 ```
@@ -78,7 +138,7 @@ SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
         "type": "cortex_search",
         "name": "pubmed_search",
         "spec": {
-          "service_name": "<CKE_DB>.SHARED.CKE_PUBMED_SERVICE",
+          "service_name": "<SERVICE_FQN>",
           "max_results": 5,
           "title_column": "document_title",
           "id_column": "source_url"
@@ -118,7 +178,7 @@ literature_evidence AS (
     s.reaction_pt,
     s.prr,
     SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-      '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+      '<SERVICE_FQN>',
       '{"query": "' || s.drug_name || ' ' || s.reaction_pt || ' adverse event mechanism", "columns": ["chunk", "document_title", "source_url"]}'
     ) AS pubmed_evidence
   FROM faers_signals s
@@ -133,7 +193,7 @@ Ground Cortex AI extraction prompts with biomedical context:
 ```sql
 WITH pubmed_context AS (
   SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+    '<SERVICE_FQN>',
     '{"query": "drug interaction classification clinical text", "columns": ["chunk"]}'
   ) AS literature_context
 )
@@ -144,7 +204,7 @@ SELECT
     'Using this biomedical reference context: ' || p.literature_context::STRING ||
     ' Extract medications and potential drug interactions from this clinical note: ' || n.note_text
   ) AS enriched_extraction
-FROM clinical_notes n, pubmed_context p
+FROM clinical_notes n CROSS JOIN pubmed_context p
 LIMIT 10;
 ```
 
@@ -157,7 +217,7 @@ SELECT
   r.study_uid,
   r.key_findings,
   SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    '<CKE_DB>.SHARED.CKE_PUBMED_SERVICE',
+    '<SERVICE_FQN>',
     '{"query": "' || r.key_findings::STRING || ' radiology evidence", "columns": ["chunk", "document_title", "source_url"]}'
   ) AS literature_context
 FROM radiology_findings r
