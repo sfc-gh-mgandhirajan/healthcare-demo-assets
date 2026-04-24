@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Oncology Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -105,7 +107,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are an oncology coding expert specializing in tumor site terminology. ',
-            'Given a tumor primary site description AND its clinical context, find the MOST SPECIFIC code. ',
+            'Given a tumor primary site description AND its clinical context, find the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n\n',
             CASE WHEN $NORM_CODE_SYSTEMS LIKE '%ICD-O-3%' OR $NORM_CODE_SYSTEMS = 'ALL'
                 THEN CONCAT(
@@ -122,7 +125,8 @@ SELECT
             '- histology → helps disambiguate overlapping anatomical sites\n',
             '- staging/TNM → T-stage may indicate specific sub-site\n',
             '- evidence_text → pathology/radiology report may specify exact anatomical sub-location\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- TUMOR CONTEXT ---\n',
             'Primary Site: "', s.primary_site_display, '"\n',
             'Histology: ', COALESCE(s.histology_display, 'NOT_SPECIFIED'), '\n',
@@ -161,7 +165,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are an oncology coding expert specializing in tumor morphology terminology. ',
-            'Given a histology description AND its clinical context, find the MOST SPECIFIC code. ',
+            'Given a histology description AND its clinical context, find the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n\n',
             CASE WHEN $NORM_CODE_SYSTEMS LIKE '%ICD-O-3%' OR $NORM_CODE_SYSTEMS = 'ALL'
                 THEN CONCAT(
@@ -182,7 +187,8 @@ SELECT
             'Use context:\n',
             '- primary_site → site-specific morphology variants\n',
             '- evidence_text → pathology report details (differentiation, mitotic rate, etc.)\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- TUMOR CONTEXT ---\n',
             'Histology: "', h.histology_display, '"\n',
             'Primary Site: ', COALESCE(h.primary_site_display, 'NOT_SPECIFIED'), '\n',

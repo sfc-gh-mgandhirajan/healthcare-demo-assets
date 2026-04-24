@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Conditions & Diagnostics Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -143,7 +145,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a clinical terminology expert. ',
-            'Given the extracted condition text AND its clinical context, select the MOST SPECIFIC matching concept from the candidate list. ',
+            'Given the extracted condition text AND its clinical context, select the MOST SPECIFIC matching concept from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches with confidence >= 0.7, you MUST return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n',
             'Use the clinical context to drive specificity:\n',
             '- body_site and laterality → anatomical specificity and laterality characters\n',
@@ -152,7 +155,8 @@ SELECT
             '- clinical_status → active vs resolved affects code choice\n',
             '- evidence_text → the original note citation may contain details not in the display text\n\n',
             'Return ONLY a JSON object: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}. ',
-            'If no candidate matches with confidence >= 0.7, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
+            'If no candidate matches with confidence >= 0.7, return {"code": null, "code_system": null, "confidence": 0.0}. ',
+            'If the CANDIDATES list below is empty, you MUST return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- EXTRACTED CONDITION ---\n',
             'Display: "', u.display, '"\n',
             'Category: ', COALESCE(u.category, 'UNKNOWN'), '\n',

@@ -9,7 +9,7 @@ Instead of writing boilerplate pipelines from scratch, a solutions architect des
 - **Composable skills, not monolithic scripts.** Each skill encodes deep domain expertise (DICOM imaging, FHIR interoperability, FAERS pharmacovigilance, genomics pipelines, claims analytics) as a reusable building block.
 - **Orchestrator-driven composition.** A single orchestrator agent detects intent, routes across healthcare business domains, and chains multiple skills together with Snowflake platform skills to deliver complete solutions.
 - **Knowledge-grounded.** Cortex Knowledge Extensions (CKEs) provide on-demand RAG search over PubMed and ClinicalTrials.gov. A Data Model Knowledge repository grounds schema generation in live reference models via Cortex Search.
-- **Governance by default.** HIPAA guardrails — PHI masking, row-access policies, audit trails, de-identification — are enforced as cross-cutting concerns across every workflow.
+- **Governance patterns included.** HIPAA-ready templates for PHI masking, row-access policies, audit trails, and de-identification are provided as reusable building blocks. Enforcement requires profile-level hook configuration — see `hooks/` for examples.
 - **Scales like lego blocks.** New skills snap into the framework as independent building blocks. Router skills cluster related capabilities under a business function (e.g., imaging router with parse/ingest/analytics/governance sub-skills). Adding a new domain or business function is just adding another skill directory — the orchestrator picks it up automatically.
 
 ### Example
@@ -51,8 +51,8 @@ The orchestrator automatically composes multiple skills into a solution chain: r
        |
 +------------------------------------------------------------------+
 |  DATA MODEL KNOWLEDGE REPOSITORY                                 |
-|  Cortex Search over reference models (DICOM: 18 tables, 222 col)|
-|  Auto pre-step: grounds DDL, COPY INTO, masking in live schema   |
+|  Reference DDL files + optional Cortex Search (DICOM: 19 tables)|
+|  Sub-skills read DDL reference files; optional search grounding  |
 +------------------------------------------------------------------+
 ```
 
@@ -62,11 +62,11 @@ The orchestrator automatically composes multiple skills into a solution chain: r
 2. Orchestrator detects the domain from trigger keywords and context
 3. One or more industry skills are selected and composed into a plan
 4. Platform skills are added based on each skill's declared **platform affinities** (e.g., `data-governance` when PHI is present, `dynamic-tables` for ongoing feeds)
-5. **The plan is presented to the user for approval before execution** (mandatory Plan-then-Execute gate)
+5. **The plan is presented to the user for approval before execution** (Plan-then-Execute gate — a skill-level convention, not a Cortex Code platform feature)
 6. Skills invoke Snowflake platform skills for infrastructure (Dynamic Tables, Cortex AI, Streamlit, etc.)
-7. For schema-dependent tasks, Data Model Knowledge auto-fires to ground outputs in live reference models
+7. For schema-dependent tasks, sub-skills read DDL reference files to ground outputs in authoritative data models
 8. CKEs are invoked on-demand when literature or trial evidence adds value
-9. HIPAA governance guardrails are applied across all workflows
+9. HIPAA governance patterns are available for all workflows (requires hook configuration — see `hooks/hooks.json`)
 
 ## Getting Started
 
@@ -128,7 +128,7 @@ Before diving in, it helps to understand the two configuration layers that conne
 | **Profile config** | `~/.snowflake/cortex/profiles/health-sciences-incubator.json` | Points Cortex Code to the orchestrator system prompt (via GitHub `systemPromptRepo`) and declares the GitHub skill repo. Skills are **scoped to this profile only** — they don't pollute the global `skills.json`. |
 | **Orchestrator agent** | `agents/health-sciences-incubator.md` (in this repo) | The system prompt with routing rules, skill taxonomy, and HIPAA guardrails. Fetched automatically from GitHub via `systemPromptRepo` in the profile config. No local copy needed. |
 
-> **Key design choice:** Skills are declared inside the profile via `skillRepos` with a GitHub source, not registered globally via `cortex skill add`. This keeps the HCLS skills isolated to the incubator profile and avoids conflicts with other profiles.
+> **Note:** `systemPromptRepo` and `skillRepos` are working Cortex Code CLI features. Check [Cortex Code docs](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code) for the latest supported profile fields.
 
 The steps below wire these up end-to-end. **No local clone is required.**
 
@@ -157,7 +157,7 @@ cat > ~/.snowflake/cortex/profiles/health-sciences-incubator.json << 'EOF'
   ],
   "mcpServers": {},
   "commandRepos": [],
-  "hooks": null,
+  "hooks": "hooks/hooks.json",
   "envVars": {},
   "settingsOverrides": {}
 }
@@ -203,7 +203,7 @@ cortex profile list                            # Verify profile exists
 
 ### Step 5: Start Using
 
-Ask healthcare questions in natural language. The orchestrator follows a **Plan-then-Execute** protocol: it builds a solution plan showing which skills and platform capabilities will be used, presents it for your approval, and only then executes. For simple single-skill queries the gate is lightweight; for multi-step pipelines you'll see the full numbered plan.
+Ask healthcare questions in natural language. The orchestrator follows a **Plan-then-Execute** protocol (a skill-level convention, not a platform feature): it builds a solution plan showing which skills and platform capabilities will be used, presents it for your approval, and only then executes. For simple single-skill queries the gate is lightweight; for multi-step pipelines you'll see the full numbered plan.
 
 ```
 "I have DICOM files from our radiology department on S3.
@@ -332,15 +332,15 @@ This means:
 - **Skills are never stale** — they always query the latest metadata
 - **Fallback is built in** — if the search service is down, skills fall back to local files on disk
 
-### Router Pattern (DICOM + Clinical Docs)
+### Router Pattern (DICOM + Clinical Docs + Clinical NLP)
 
-Both router skills follow the same architecture:
+Router skills follow a common architecture. The LLM reads routing tables and sub-skill files via `Read()` — this is an LLM-driven skill pattern, not a built-in Cortex Code platform feature:
 
 1. **Preflight Check** — probe the CKE search service at skill load (READY / MISSING)
 2. **Intent Detection** — classify what the user wants (parse, ingest, search, agent, etc.)
 3. **Conditional Step 0** — if CKE is READY, query it for schema/spec context before routing
-4. **Sub-skill Loading** — pass grounding context to the sub-skill
-5. **Fallback** — if CKE is MISSING, sub-skills use local reference files
+4. **Sub-skill Loading** — pass grounding context to the sub-skill via `Read()`
+5. **Fallback** — if CKE is MISSING, sub-skills use local DDL reference files as the primary source of truth
 
 ### Defense-in-Depth (Clinical Docs)
 
@@ -582,30 +582,31 @@ The pipeline is fully config-driven. To add a new document type:
 
 **Skill**: [`hcls-provider-imaging`](skills/hcls-provider-imaging/)
 
-A comprehensive DICOM imaging solution with an 18-table data model, metadata search, and ML-ready embeddings.
+A comprehensive DICOM imaging solution with a 19-table data model, metadata search, and ML-ready embeddings.
 
 ### Sub-Skills
 
 | Sub-Skill | Purpose |
 |-----------|---------|
-| `dicom-parser` | Parse DICOM file metadata with pydicom, generate DDL from 18-table model |
+| `dicom-parser` | Parse DICOM file metadata with pydicom, generate DDL from 19-table model |
 | `dicom-ingestion` | Build ingestion pipelines (COPY INTO, Dynamic Tables, Streams + Tasks) |
 | `dicom-analytics` | Imaging metadata analytics, Cortex Search, radiology NLP |
 | `imaging-viewer` | Streamlit DICOM viewer |
 | `imaging-governance` | HIPAA compliance, PHI masking, de-identification |
 | `imaging-ml` | ML model training and deployment for imaging |
-| `data-model-knowledge` | Query the DICOM data model via CKE at runtime |
+| `data-model-knowledge` | Ground DICOM schema generation in authoritative DDL reference files |
 
-### CKE Architecture
+### Schema Grounding Architecture
 
-DICOM uses a single Schema CKE layer:
+DICOM sub-skills are grounded by the authoritative DDL reference file at `dicom-parser/references/data_model_ddl.sql` (19 tables, all column definitions). An optional Cortex Search CKE layer provides dynamic search:
 
 ```
+dicom-parser/references/data_model_ddl.sql   ← PRIMARY (19-table DDL, single source of truth)
 dicom_data_model_reference.xlsx → CSV → DICOM_MODEL_REFERENCE table
-                                            → DICOM_MODEL_SEARCH_SVC (Cortex Search)
+                                            → DICOM_MODEL_SEARCH_SVC (optional Cortex Search)
 ```
 
-Sub-skills query the search service for table definitions, column types, DICOM tag mappings, and PHI indicators. DDL can be generated dynamically using `CORTEX.COMPLETE()` grounded by search results.
+Sub-skills MUST read `data_model_ddl.sql` for DDL generation. The Cortex Search service is an optional enhancement for dynamic metadata queries.
 
 ---
 
@@ -614,6 +615,8 @@ Sub-skills query the search service for table definitions, column types, DICOM t
 **Skill**: [`hcls-provider-cdata-clinical-nlp`](skills/hcls-provider-cdata-clinical-nlp/)
 
 A GenAI-powered clinical NLP pipeline that extracts structured entities from unstructured clinical notes and normalizes them to standard terminologies — all running on Snowflake via Cortex AI COMPLETE, Dynamic Tables, and stored procedures.
+
+> **Research Use Only** — Normalization outputs are not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting. Normalization sub-skills use anti-hallucination grounding constraints but are not a substitute for clinical validation.
 
 ### What It Does
 
@@ -637,21 +640,23 @@ Clinical Notes (discharge summaries, progress notes, H&Ps)
 | `extraction-patient-context` | Social history, family history |
 | `extraction-oncology` | Cancer staging, TNM, biomarkers |
 | `extraction-safety-care-planning` | Adverse events, care plans, referrals |
-| `normalization-conditions-diagnostics` | ICD-10-CM / SNOMED CT mapping |
-| `normalization-therapeutics` | RxNorm / CPT mapping |
-| `normalization-observations` | LOINC mapping |
-| `normalization-patient-context` | Z-code / SDOH mapping |
-| `normalization-oncology` | ICD-O-3 mapping |
-| `normalization-safety-care-planning` | MedDRA mapping |
+| `normalization-conditions-diagnostics` | ICD-10-CM / SNOMED CT mapping * |
+| `normalization-therapeutics` | RxNorm / CPT mapping * |
+| `normalization-observations` | LOINC mapping * |
+| `normalization-patient-context` | Z-code / SDOH mapping * |
+| `normalization-oncology` | ICD-O-3 mapping * |
+| `normalization-safety-care-planning` | MedDRA mapping * |
 | `governance` | PHI masking, de-identification, audit trails, role setup |
 | `pipeline-implementation` | Production pipeline (6 extraction DTs + normalization SP) |
 | `data-model-knowledge` | CKE: schema reference via Cortex Search |
+
+\* *Normalization outputs are research-grade. Anti-hallucination grounding constraints are applied. See individual sub-skill SKILL.md files for details.*
 
 ### Key Design Decisions
 
 - **Extraction is code-system-agnostic** — captures text spans only; codes are NULL until normalization
 - **Terminology Preference Gate** — for any normalization intent, the router asks the user which code system(s) to use before proceeding
-- **Normalization tiers** — exact match → optional fine-tuned model (via `hcls-cross-aiml-industrymodels`) → Cortex COMPLETE fuzzy match (with confidence scores)
+- **Normalization tiers** — exact match → optional fine-tuned model (via `hcls-cross-aiml-industrymodels`) → Cortex COMPLETE fuzzy match (constrained to pick from retrieved candidates only; anti-hallucination guards applied)
 - **Single best code per entity** — one entity = one row = one code (no duplicate rows for different code systems)
 
 ### CKE Architecture
@@ -858,4 +863,4 @@ Apache License 2.0. See individual skill directories for specific licenses.
 
 ## Disclaimer
 
-These skills are provided for educational and research purposes. They do not constitute medical, legal, or regulatory advice. Professional consultation is required for clinical applications.
+These skills are provided for educational and research purposes. They are **not validated for clinical decision-making** and do not constitute medical, legal, or regulatory advice. Generated medical codes (ICD-10-CM, SNOMED CT, RxNorm, LOINC, MedDRA, ICD-O-3) require clinical review before use in patient care, billing, cancer registry reporting, or regulatory submissions. This software is not a medical device and is not intended for use in the diagnosis or treatment of patients. Professional consultation is required for clinical applications.

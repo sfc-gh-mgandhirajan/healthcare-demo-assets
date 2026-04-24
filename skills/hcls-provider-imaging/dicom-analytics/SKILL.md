@@ -1,6 +1,6 @@
 ---
 name: dicom-analytics
-description: "DICOM metadata analytics, radiology report NLP, and imaging search using Cortex AI functions and Cortex Search on Snowflake."
+description: "DICOM metadata analytics, cross-modality cohort analysis, equipment utilization, temporal trends, imaging quality scoring, radiology NLP, and Cortex Search/Agent integration on Snowflake. Use when: imaging analytics, cohort analysis, equipment utilization, temporal trends, quality scoring, radiology NLP, Cortex Search imaging, Cortex Agent imaging, Semantic View imaging."
 parent_skill: hcls-provider-imaging
 ---
 
@@ -8,191 +8,156 @@ parent_skill: hcls-provider-imaging
 
 ## When to Load
 
-Healthcare-imaging router: After user intent matches ANALYTICS.
+Parent router (`hcls-provider-imaging`) routes here on **ANALYTICS** intent: imaging analytics, metadata extraction, imaging search, study analytics, radiology NLP, report extraction, cohort analysis, equipment utilization, temporal trends, quality scoring, turnaround time.
 
 ## Prerequisites
 
-- DICOM metadata ingested (run `dicom-ingestion` skill first if needed)
-- Cortex AI functions available (COMPLETE, EXTRACT, SUMMARIZE)
-- Cortex Search service available for semantic search
+- DICOM metadata ingested into `{database}.{schema}` (run `dicom-ingestion` first if needed)
+- Core tables: `DICOM_PATIENT`, `DICOM_STUDY`, `DICOM_SERIES`, `DICOM_INSTANCE`, `DICOM_EQUIPMENT`, `RADIOLOGY_REPORTS`
+- Cortex AI functions available (`SNOWFLAKE.CORTEX.COMPLETE`), Cortex Search available
+- Target warehouse with sufficient compute for Dynamic Tables and Cortex AI calls
+
+## SQL References
+
+All DDLs and query templates are in the `references/` directory:
+- **`references/dynamic_tables.sql`** — 5 Dynamic Table DDLs (cohorts, equipment, timeline, quality, NLP findings)
+- **`references/cortex_services.sql`** — Search corpus, Cortex Search Service, Semantic View, Cortex Agent
+- **`references/query_templates.sql`** — Ad-hoc query templates (cohort, downtime, trends, anomalies, TAT, search)
+
+All SQL functionally tested against POLARIS1 (2026-04-13).
 
 ## Workflow
-
-### Step 0: Query Data Model Knowledge (Auto — Injected by Router)
-
-The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` provide source table definitions for building analytics.
-
-**Query source table definitions for analytical views:**
-```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
-    '{"query": "study series patient modality body part date description columns for analytics", "columns": ["table_name", "column_name", "data_type", "description", "dicom_tag", "relationships"]}'
-);
-```
-
-**Use the results to:**
-- Build analytical Dynamic Tables with correct source column names and join keys
-- Reference accurate column descriptions in Cortex AI prompts
-- Ensure GROUP BY / aggregation columns exist in the source tables
-- Map relationships for multi-table joins (e.g., study → series → instance)
-
-**If search service is unavailable**, fall back to the schema in `dicom-parser/SKILL.md`.
 
 ### Step 1: Understand Analytics Goals
 
 **Ask** user:
 ```
 What imaging analytics do you need?
-1. Study-level dashboards (volume, modality mix, turnaround times)
-2. Radiology report NLP (extract findings, impressions, diagnoses)
-3. Semantic search across imaging metadata and reports
-4. Population-level imaging trends
-5. Anomaly detection (missing metadata, duplicates, quality issues)
+1. Cross-modality cohort analysis (patients by modality combos, demographics, findings)
+2. Equipment utilization & operational analytics (throughput, peak hours, downtime)
+3. Temporal imaging trends & longitudinal analysis (timelines, follow-up gaps, repeats)
+4. Imaging quality & completeness scoring (metadata completeness, anomalies)
+5. Radiology report NLP (structured extraction of findings, impressions, recommendations)
+6. Enhanced Cortex Search with faceted filtering (semantic + modality/body part filters)
+7. Semantic View for natural-language analytics (text-to-SQL over imaging data)
+8. Cortex Agent integration (conversational analytics: search + structured queries)
+9. All of the above
 ```
 
-### Step 2: Build Analytical Views
+**MANDATORY STOPPING POINT:** Confirm scope before creating objects — each step creates Dynamic Tables/services with cost implications.
 
-**Goal:** Create curated analytical layers.
+### Step 2: Cross-Modality Cohort Analysis
 
-**Study Volume Analytics:**
-```sql
-CREATE OR REPLACE DYNAMIC TABLE imaging_study_metrics
-  TARGET_LAG = '30 minutes'
-  WAREHOUSE = analytics_wh
-AS
-SELECT
-  DATE_TRUNC('day', TRY_TO_DATE(study_date, 'YYYYMMDD')) AS study_day,
-  modality,
-  body_part,
-  institution,
-  COUNT(DISTINCT study_uid) AS study_count,
-  COUNT(DISTINCT patient_id) AS patient_count,
-  COUNT(DISTINCT series_uid) AS series_count,
-  COUNT(*) AS image_count
-FROM dicom_studies
-GROUP BY 1, 2, 3, 4;
-```
+**Goal:** Segment patients by modality combinations, demographics, body parts, and findings.
 
-### Step 3: Radiology Report NLP with Cortex AI
+Use ad-hoc queries from `references/query_templates.sql` (cross-modality cohort, frequency-based cohort).
 
-**Goal:** Extract structured findings from unstructured radiology reports.
+**Materialized cohort:** Create `DT_IMAGING_COHORTS` from `references/dynamic_tables.sql`.
 
-**Extract clinical entities:**
-```sql
-CREATE OR REPLACE DYNAMIC TABLE radiology_findings
-  TARGET_LAG = '1 hour'
-  WAREHOUSE = analytics_wh
-AS
-SELECT
-  study_uid,
-  patient_id,
-  report_text,
-  SNOWFLAKE.CORTEX.EXTRACT_ANSWER(
-    report_text,
-    'What are the key findings?'
-  ) AS key_findings,
-  SNOWFLAKE.CORTEX.EXTRACT_ANSWER(
-    report_text,
-    'What is the impression or diagnosis?'
-  ) AS impression,
-  SNOWFLAKE.CORTEX.EXTRACT_ANSWER(
-    report_text,
-    'Are there any critical or urgent findings?'
-  ) AS critical_findings,
-  SNOWFLAKE.CORTEX.SENTIMENT(report_text) AS report_sentiment
-FROM radiology_reports;
-```
+**MANDATORY STOPPING POINT:** Confirm cohort DT creation — consumes warehouse credits on refresh.
 
-**Summarize lengthy reports:**
-```sql
-SELECT
-  study_uid,
-  SNOWFLAKE.CORTEX.SUMMARIZE(report_text) AS report_summary
-FROM radiology_reports
-WHERE LENGTH(report_text) > 500;
-```
+### Step 3: Equipment Utilization & Operational Analytics
 
-### Step 4: Cortex Search for Imaging Metadata
+**Goal:** Scanner throughput, peak hours, downtime detection, and comparative equipment performance.
 
-**Goal:** Enable semantic search across imaging studies and reports.
+Use queries from `references/query_templates.sql` (downtime detection, comparative performance).
 
-**Create Cortex Search Service:**
-```sql
-CREATE OR REPLACE CORTEX SEARCH SERVICE imaging_search_svc
-  ON imaging_search_corpus
-  WAREHOUSE = analytics_wh
-  TARGET_LAG = '1 hour'
-AS (
-  SELECT
-    study_uid,
-    patient_id,
-    modality,
-    study_description,
-    body_part,
-    report_text,
-    CONCAT(
-      'Study: ', study_description,
-      ' Modality: ', modality,
-      ' Body Part: ', body_part,
-      ' Report: ', COALESCE(report_text, '')
-    ) AS search_text
-  FROM dicom_studies_with_reports
-);
-```
+**Materialized utilization:** Create `DT_EQUIPMENT_UTILIZATION_DEEP` from `references/dynamic_tables.sql`.
 
-**Query the search service (via Cortex Agent or API):**
-```sql
-SELECT PARSE_JSON(
-  SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'imaging_search_svc',
-    '{"query": "chest CT with pulmonary nodule", "columns": ["study_uid", "modality", "study_description"], "limit": 10}'
-  )
-);
-```
+**MANDATORY STOPPING POINT:** Confirm equipment utilization DT creation.
 
-### Step 5: Data Quality & Anomaly Detection
+### Step 4: Temporal Imaging Trends & Longitudinal Analysis
 
-**Goal:** Identify imaging data quality issues.
+**Goal:** Patient-level timelines, follow-up gaps, repeat study detection, population-level volume trends.
 
-```sql
-SELECT
-  'Missing Patient ID' AS issue,
-  COUNT(*) AS count
-FROM dicom_studies WHERE patient_id IS NULL
-UNION ALL
-SELECT
-  'Missing Modality',
-  COUNT(*)
-FROM dicom_studies WHERE modality IS NULL
-UNION ALL
-SELECT
-  'Duplicate Study UID',
-  COUNT(*)
-FROM (
-  SELECT study_uid FROM dicom_studies
-  GROUP BY study_uid HAVING COUNT(*) > 1
-);
-```
+Use queries from `references/query_templates.sql` (repeat detection, monthly trends).
 
-## Stopping Points
+**Materialized timeline:** Create `DT_PATIENT_IMAGING_TIMELINE` from `references/dynamic_tables.sql`.
 
-- After Step 1 to confirm analytics scope
-- After Step 3 before creating Cortex AI pipelines (cost implications)
-- After Step 4 before creating Search service
+**MANDATORY STOPPING POINT:** Confirm temporal DT creation.
+
+### Step 5: Imaging Quality & Completeness Scoring
+
+**Goal:** Score metadata completeness, detect anomalies, flag missing data.
+
+Use anomaly detection query from `references/query_templates.sql`.
+
+**Materialized scorecard:** Create `DT_IMAGING_QUALITY_SCORECARD` from `references/dynamic_tables.sql`.
+
+**MANDATORY STOPPING POINT:** Confirm quality scorecard DT creation.
+
+### Step 6: Radiology Report NLP
+
+**Goal:** Extract structured findings from radiology reports using `SNOWFLAKE.CORTEX.COMPLETE` with JSON output.
+
+**Materialized findings:** Create `DT_RADIOLOGY_FINDINGS` from `references/dynamic_tables.sql`.
+
+Use turnaround-time query from `references/query_templates.sql`.
+
+**MANDATORY STOPPING POINT:** NLP DT has per-token Cortex AI cost.
+
+### Step 7: Enhanced Cortex Search with Faceted Filtering
+
+**Goal:** Cortex Search Service with ATTRIBUTES for combined semantic + structured filtering.
+
+Create `IMAGING_SEARCH_CORPUS` and `IMAGING_SEARCH_SVC` from `references/cortex_services.sql`.
+
+Use search queries from `references/query_templates.sql` (semantic, single-filter, combined-filter).
+
+**MANDATORY STOPPING POINT:** Cortex Search Service runs continuously.
+
+### Step 8: Semantic View Integration
+
+**Goal:** Create a Semantic View over core DICOM tables for natural-language analytics via Cortex Analyst.
+
+Create `DICOM_ANALYTICS_SV` from `references/cortex_services.sql`.
+
+**Verify:** `DESCRIBE SEMANTIC VIEW {database}.{schema}.DICOM_ANALYTICS_SV;`
+
+**MANDATORY STOPPING POINT:** Confirm Semantic View creation before Cortex Agent setup.
+
+### Step 9: Cortex Agent Integration
+
+**Goal:** Cortex Agent combining Semantic View (structured queries) + Cortex Search (report search) for conversational imaging analytics.
+
+Create `IMAGING_ANALYTICS_AGENT` from `references/cortex_services.sql`.
+
+**Verify:** `DESCRIBE AGENT {database}.{schema}.IMAGING_ANALYTICS_AGENT;`
+
+Use example agent prompts from `references/query_templates.sql`.
+
+**MANDATORY STOPPING POINT:** Cortex Agent is the capstone integration object.
+
+## Key Schema Notes (Normalized 19-Table Model)
+
+- **MODALITY, BODY_PART_EXAMINED** are on `DICOM_SERIES` (NOT `DICOM_STUDY`)
+- **INSTITUTION_NAME, MANUFACTURER** are on `DICOM_EQUIPMENT`, joined via `SERIES_KEY` (NOT `STUDY_KEY`)
+- **STUDY_DATE** is `DATE` type, **STUDY_TIME** is `TIME` type — use `TIMESTAMP_FROM_PARTS(STUDY_DATE, STUDY_TIME)` for timestamps
+- All joins: PATIENT→STUDY via `PATIENT_KEY`, STUDY→SERIES via `STUDY_KEY`, SERIES→EQUIPMENT via `SERIES_KEY`
 
 ## Output
 
-- Analytical Dynamic Tables for study metrics
-- NLP-enriched radiology findings table
-- Cortex Search service for semantic imaging search
-- Data quality summary
+| Object | Type | Purpose |
+|--------|------|---------|
+| `DT_IMAGING_COHORTS` | Dynamic Table | Cross-modality patient cohort profiles |
+| `DT_EQUIPMENT_UTILIZATION_DEEP` | Dynamic Table | Scanner throughput, peak hours, utilization |
+| `DT_PATIENT_IMAGING_TIMELINE` | Dynamic Table | Longitudinal timelines with follow-up detection |
+| `DT_IMAGING_QUALITY_SCORECARD` | Dynamic Table | Metadata completeness and anomaly flags |
+| `DT_RADIOLOGY_FINDINGS` | Dynamic Table | NLP-extracted findings, impressions, recommendations |
+| `IMAGING_SEARCH_CORPUS` | Table | Denormalized search corpus |
+| `IMAGING_SEARCH_SVC` | Cortex Search Service | Semantic search with faceted filtering |
+| `DICOM_ANALYTICS_SV` | Semantic View | Natural-language analytics over DICOM tables |
+| `IMAGING_ANALYTICS_AGENT` | Cortex Agent | Conversational analytics (Semantic View + Search) |
 
-## Evidence Grounding: PubMed CKE
+All objects in `{database}.{schema}`.
 
-Invoke `$cke-pubmed` when radiology research context enriches imaging analytics:
+## Evidence Grounding: PubMed CKE (Optional)
 
-- Search for imaging biomarkers, modality-specific diagnostic criteria, evidence-based imaging guidelines
-- Augment Cortex AI extraction with published radiology evidence
-- Compare institutional imaging patterns against published utilization studies
+If the `$cke-pubmed` skill is available in your environment, invoke it when radiology research context enriches imaging analytics. If unavailable, skip this section — the imaging analytics workflow is fully functional without it.
 
-See `$cke-pubmed` for setup, query patterns, and the imaging research context SQL pattern.
+- Imaging biomarkers, modality-specific diagnostic criteria, evidence-based guidelines
+- Augment Cortex AI extraction prompts with published radiology evidence
+- Compare institutional patterns against published utilization benchmarks
+- Reference ACR Appropriateness Criteria for follow-up interval validation
+
+See `$cke-pubmed` for setup, query patterns, and imaging research context SQL pattern.

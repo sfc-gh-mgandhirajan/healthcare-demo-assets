@@ -1,6 +1,6 @@
 ---
 name: dicom-ingestion
-description: "DICOM data ingestion pipelines on Snowflake. Ingest imaging metadata from PACS, stages, and external sources into Snowflake using streams, tasks, and dynamic tables."
+description: "End-to-end DICOM metadata ingestion pipeline on Snowflake. Multi-table normalized loading, cascading Dynamic Tables, Snowpipe auto-ingest, Stream/Task orchestration, error handling, CDC patterns, and data validation. Use when: ingest DICOM, imaging pipeline, load images, PACS integration, stage DICOM, stream images, dynamic table imaging, Snowpipe DICOM, CDC imaging, dead letter queue."
 parent_skill: hcls-provider-imaging
 ---
 
@@ -8,170 +8,145 @@ parent_skill: hcls-provider-imaging
 
 ## When to Load
 
-Healthcare-imaging router Step: After user intent matches INGEST.
+Healthcare-imaging router routes here when intent matches INGEST.
 
 ## Prerequisites
 
-- Snowflake database and schema for imaging data
-- Source DICOM files accessible (local, S3, GCS, Azure Blob, or PACS export)
-- Appropriate roles with CREATE STAGE, CREATE TABLE, CREATE DYNAMIC TABLE privileges
-- For DICOM file parsing and schema creation, use `dicom-parser/SKILL.md` first — it provides the comprehensive 18-table data model and pydicom parser script (`scripts/parse_dicom.py`)
+- Database `{database}` with schema `{schema}`
+- Role with CREATE STAGE, CREATE TABLE, CREATE DYNAMIC TABLE, CREATE STREAM, CREATE TASK, CREATE PIPE privileges
+- For schema creation: run `dicom-parser/SKILL.md` first (19-table model)
+- Storage integration for external stages (S3/Azure/GCS)
 
-## Workflow
+## SQL References
 
-### Step 0: Query Data Model Knowledge (Auto — Injected by Router)
+All DDLs are in the `references/` directory:
+- **`references/stage_and_raw.sql`** — Stage setup, file formats, raw landing table, batch COPY INTO
+- **`references/cascading_dynamic_tables.sql`** — 5 cascading DTs + validation summary DT
+- **`references/stream_task_snowpipe.sql`** — Snowpipe, stream/task tree, error table, CDC upserts, validation queries
 
-The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` provide the target table schema.
+## Created Objects
 
-**Query target table definitions for the ingestion scope:**
-```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
-    '{"query": "study series instance patient columns data types for ingestion pipeline", "columns": ["table_name", "column_name", "data_type", "constraints", "dicom_tag", "relationships"]}'
-);
-```
+| Object | Name |
+|--------|------|
+| Raw Table | `DICOM_RAW` (change-tracked) |
+| Stream | `DICOM_RAW_STREAM` |
+| Tasks | `TASK_PROCESS_DICOM_RAW` (5min), `TASK_REFRESH_SEARCH_CORPUS` (60min) |
+| Dynamic Tables | `DT_DICOM_PATIENTS`, `DT_DICOM_STUDIES`, `DT_DICOM_SERIES`, `DT_DICOM_INSTANCES`, `DT_DICOM_EQUIPMENT` |
+| Stage/Formats | `DICOM_STAGE`, `DICOM_JSON_FORMAT`, `DICOM_CSV_FORMAT` |
 
-**Use the results to:**
-- Build accurate COPY INTO column mappings (match VARIANT paths to exact column names/types)
-- Generate Dynamic Table SELECT lists with correct column names, types, and DICOM tag paths
-- Set up Stream/Task INSERT statements with proper target schema
-- Validate that all required columns (from constraints) are populated
-
-**If search service is unavailable**, fall back to the hardcoded schema in `dicom-parser/SKILL.md`.
-
-### Step 1: Gather Source Information
-
-**Goal:** Understand the imaging data source and volume.
+## Step 1: Choose Ingestion Pattern
 
 **Ask** user:
+
 ```
-1. Where are your DICOM files? (S3 bucket, Azure Blob, GCS, local files, PACS export)
-2. What is the approximate volume? (number of studies/series/images)
-3. Is this a one-time load or continuous ingestion?
-4. Do you need to extract pixel data or metadata only?
+Select ingestion pattern:
+1. One-time batch     — COPY INTO for historical backfill
+2. Cascading DTs      — Dynamic Tables for continuous normalized ingestion
+3. Stream/Task        — Event-driven with task tree dependencies
+4. Snowpipe           — Auto-ingest from cloud storage on file arrival
 ```
 
-**Output:** Source configuration parameters
+| Pattern | Best For | Latency | Complexity |
+|---------|----------|---------|------------|
+| Batch | Historical backfill | N/A | Low |
+| Cascading DTs | Continuous multi-table normalization | 5-15 min | Medium |
+| Stream/Task | Conditional logic, error routing | 1-5 min | High |
+| Snowpipe | Cloud storage auto-ingest | ~1 min | Medium |
 
-### Step 2: Create Staging Infrastructure
+MANDATORY STOPPING POINT: Confirm pattern before proceeding.
 
-**Goal:** Set up Snowflake stages and file formats for DICOM metadata.
+## Step 2: Stage Setup
 
-**Actions:**
+Create stage, file formats from `references/stage_and_raw.sql`. For external stages, adapt URL/integration per cloud provider.
 
-1. Create an external stage pointing to the source:
-   ```sql
-   CREATE OR REPLACE STAGE imaging_stage
-     URL = 's3://bucket/dicom/'
-     STORAGE_INTEGRATION = imaging_integration;
-   ```
+## Step 3: Raw Landing Table
 
-2. Create a file format for DICOM metadata (typically JSON/Parquet exports from PACS):
-   ```sql
-   CREATE OR REPLACE FILE FORMAT dicom_json_format
-     TYPE = 'JSON'
-     STRIP_OUTER_ARRAY = TRUE;
-   ```
+Create `DICOM_RAW` with change tracking from `references/stage_and_raw.sql`. Run batch COPY INTO.
 
-3. Create the raw landing table:
-   ```sql
-   CREATE OR REPLACE TABLE dicom_raw (
-     file_path VARCHAR,
-     metadata VARIANT,
-     ingested_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
-   );
-   ```
+MANDATORY STOPPING POINT: Verify row counts.
 
-**Output:** Stage, file format, and raw table created
+## Step 4: Multi-Table Normalized Ingestion (Cascading Dynamic Tables)
 
-### Step 3: Build Ingestion Pipeline
+Cascade: Patient → Study → Series → Instance → Equipment. Each DT deduplicates on natural keys using GROUP BY or QUALIFY, with HASH() surrogate keys.
 
-**Goal:** Create automated pipeline based on user's ingestion pattern.
+Create all 5 cascading DTs from `references/cascading_dynamic_tables.sql`.
 
-**If one-time load:**
+```
+DICOM_RAW --> DT_DICOM_PATIENTS (L1)
+                  --> DT_DICOM_STUDIES (L2)
+                        --> DT_DICOM_SERIES (L3)
+                              --> DT_DICOM_INSTANCES (L4)
+                              --> DT_DICOM_EQUIPMENT (L3)
+```
+
+MANDATORY STOPPING POINT: Verify cascade refresh states.
+
 ```sql
-COPY INTO dicom_raw (file_path, metadata)
-  FROM (
-    SELECT metadata$filename, $1
-    FROM @imaging_stage
-  )
-  FILE_FORMAT = dicom_json_format
-  ON_ERROR = 'CONTINUE';
+SELECT TABLE_NAME, REFRESH_STATE, LAST_REFRESH_TIME
+FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLES())
+WHERE SCHEMA_NAME = '{schema}' ORDER BY TABLE_NAME;
 ```
 
-**If continuous ingestion — use Dynamic Tables:**
-```sql
-CREATE OR REPLACE DYNAMIC TABLE dicom_studies
-  TARGET_LAG = '10 minutes'
-  WAREHOUSE = imaging_wh
-AS
-SELECT
-  metadata:StudyInstanceUID::STRING AS study_uid,
-  metadata:PatientID::STRING AS patient_id,
-  metadata:PatientName::STRING AS patient_name,
-  metadata:StudyDate::STRING AS study_date,
-  metadata:Modality::STRING AS modality,
-  metadata:StudyDescription::STRING AS study_description,
-  metadata:SeriesInstanceUID::STRING AS series_uid,
-  metadata:SOPInstanceUID::STRING AS sop_instance_uid,
-  metadata:Rows::INT AS image_rows,
-  metadata:Columns::INT AS image_columns,
-  metadata:BitsAllocated::INT AS bits_allocated,
-  metadata:BodyPartExamined::STRING AS body_part,
-  metadata:InstitutionName::STRING AS institution,
-  file_path,
-  ingested_at
-FROM dicom_raw;
+## Step 5: Snowpipe Auto-Ingest
+
+Create `DICOM_INGEST_PIPE` from `references/stream_task_snowpipe.sql`. For Azure use `INTEGRATION = 'AZURE_EVENT_NOTIFICATION'`; for GCS use `INTEGRATION = 'GCS_PUB_SUB_NOTIFICATION'`.
+
+## Step 6: Stream/Task Orchestration
+
+Create stream + task tree from `references/stream_task_snowpipe.sql`.
+
+```
+TASK_PROCESS_DICOM_PATIENTS (root, 5 min, stream-gated)
+    +--> TASK_PROCESS_DICOM_STUDIES --> TASK_PROCESS_DICOM_SERIES
+    +--> TASK_ROUTE_INGESTION_ERRORS (parallel)
 ```
 
-**If event-driven — use Streams + Tasks:**
-```sql
-CREATE OR REPLACE STREAM dicom_raw_stream ON TABLE dicom_raw;
+Resume bottom-up: `ALTER TASK <leaf> RESUME;` then root last.
 
-CREATE OR REPLACE TASK process_dicom_metadata
-  WAREHOUSE = imaging_wh
-  SCHEDULE = '5 MINUTE'
-  WHEN SYSTEM$STREAM_HAS_DATA('dicom_raw_stream')
-AS
-  INSERT INTO dicom_studies_processed
-  SELECT
-    metadata:StudyInstanceUID::STRING AS study_uid,
-    metadata:PatientID::STRING AS patient_id,
-    metadata:StudyDate::STRING AS study_date,
-    metadata:Modality::STRING AS modality,
-    metadata
-  FROM dicom_raw_stream;
-```
+MANDATORY STOPPING POINT: Verify task execution history.
 
-### Step 4: Validate Ingestion
+## Step 7: Error Handling & Dead Letter Queue
 
-**Goal:** Verify data landed correctly.
+Create `DICOM_INGESTION_ERRORS` from `references/stream_task_snowpipe.sql`.
 
-**Actions:**
-```sql
-SELECT COUNT(*) AS total_records,
-       COUNT(DISTINCT metadata:StudyInstanceUID) AS unique_studies,
-       COUNT(DISTINCT metadata:PatientID) AS unique_patients,
-       MIN(metadata:StudyDate::STRING) AS earliest_study,
-       MAX(metadata:StudyDate::STRING) AS latest_study
-FROM dicom_raw;
-```
+| Category | Cause | Resolution |
+|----------|-------|------------|
+| `PARSE_ERROR` | Malformed JSON | Fix source export, re-stage |
+| `VALIDATION_ERROR` | Missing PatientID/StudyInstanceUID | Check PACS config |
+| `DUPLICATE` | SOPInstanceUID exists | Skip or CDC upsert |
+| `TYPE_CAST_ERROR` | Date/number conversion | Review tag format |
+| `REFERENTIAL_ERROR` | Orphaned series/instance | Re-ingest parent |
 
-**Validation Checklist:**
-- Record count matches expected volume
-- Study UIDs are unique per study
-- Patient IDs are populated
-- No critical NULL fields
+Use `TRY_TO_DATE()`, `TRY_TO_NUMBER()`, `TRY_TO_TIMESTAMP_NTZ()`, `TRY_PARSE_JSON()` throughout all SQL.
+
+## Step 8: CDC Pattern for Study Updates
+
+Handle re-reads, amendments, corrections via MERGE upserts from `references/stream_task_snowpipe.sql`.
+
+For DT pipelines, deduplication is handled by QUALIFY in DT_DICOM_INSTANCES (Step 4).
+
+## Step 9: Data Validation
+
+Run validation queries from `references/stream_task_snowpipe.sql` (referential integrity, completeness scoring, cross-table consistency).
+
+Create `DT_DICOM_VALIDATION_SUMMARY` from `references/cascading_dynamic_tables.sql`.
+
+MANDATORY STOPPING POINT: Review validation. Zero orphans and low error count required.
 
 ## Stopping Points
 
-- After Step 1 if source is unclear
-- After Step 2 before creating objects (get approval)
-- After Step 4 to confirm data quality
+- After Step 1: Confirm ingestion pattern
+- After Step 3: Verify raw table row counts
+- After Step 4: Confirm DT cascade refresh states
+- After Step 6: Verify task execution history
+- After Step 9: Review validation summary
 
 ## Output
 
-- External stage configured
-- Raw landing table with DICOM metadata
-- Automated pipeline (Dynamic Table or Stream/Task) for continuous ingestion
-- Validation summary
+- `DICOM_RAW` with change tracking
+- Cascading DTs: `DT_DICOM_PATIENTS` → `DT_DICOM_STUDIES` → `DT_DICOM_SERIES` → `DT_DICOM_INSTANCES` → `DT_DICOM_EQUIPMENT`
+- `DICOM_INGEST_PIPE` (if Snowpipe selected)
+- `DICOM_RAW_STREAM` + task tree (if Stream/Task selected)
+- `DICOM_INGESTION_ERRORS` dead-letter queue
+- `DT_DICOM_VALIDATION_SUMMARY` for continuous monitoring
+- CDC upsert patterns for study amendments

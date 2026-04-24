@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Observations Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -137,7 +139,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a clinical terminology expert specializing in observation coding. ',
-            'Given the extracted observation AND its clinical context, select the MOST SPECIFIC concept. ',
+            'Given the extracted observation AND its clinical context, select the MOST SPECIFIC concept from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n',
             CASE
                 WHEN u.category IN ('EXAM', 'IMAGING') THEN CONCAT(
@@ -159,7 +162,8 @@ SELECT
                     '- Method (technique): driven by method field (automated, manual, immunoassay, culture, etc.)\n\n'
                 )
             END,
-            'Return ONLY: {"code": "<code>", "code_system": "<LOINC or SNOMED CT>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<LOINC or SNOMED CT>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- OBSERVATION ---\n',
             'Display: "', u.display, '"\n',
             'Category: ', COALESCE(u.category, 'UNKNOWN'), '\n',

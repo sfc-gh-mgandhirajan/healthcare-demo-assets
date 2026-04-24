@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Therapeutics Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -142,7 +144,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a clinical pharmacy terminology expert specializing in RxNorm. ',
-            'Given the extracted medication AND its clinical context, select the MOST SPECIFIC RxNorm concept. ',
+            'Given the extracted medication AND its clinical context, select the MOST SPECIFIC RxNorm concept from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'Match to the appropriate RxNorm concept type (TTY) based on available context:\n',
             '- If dose AND route are known → target SCD (Semantic Clinical Drug) e.g., "Metformin 500 MG Oral Tablet"\n',
             '- If only dose is known → target SCDC (Clinical Drug Component) e.g., "Metformin 500 MG"\n',
@@ -155,7 +158,8 @@ SELECT
             '- route → oral vs injectable vs topical formulation\n',
             '- frequency → may distinguish immediate-release vs extended-release\n',
             '- evidence_text → original note may have brand name, formulation details\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "RxNorm", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "RxNorm", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- MEDICATION ---\n',
             'Display: "', m.medication_display, '"\n',
             'Dosage Text: ', COALESCE(m.dosage_text, 'NOT_SPECIFIED'), '\n',
@@ -198,7 +202,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a clinical coding expert specializing in procedure terminology. ',
-            'Given the extracted procedure AND its clinical context, select the MOST SPECIFIC code. ',
+            'Given the extracted procedure AND its clinical context, select the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n',
             CASE WHEN $NORM_CODE_SYSTEMS LIKE '%CPT%'
                 THEN CONCAT(
@@ -225,7 +230,8 @@ SELECT
             '- category → SURGICAL vs DIAGNOSTIC vs IMAGING\n',
             '- body_site + laterality → anatomical specificity\n',
             '- evidence_text → may contain approach, technique, device details\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<CPT or ICD-10-PCS or SNOMED CT>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<CPT or ICD-10-PCS or SNOMED CT>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- PROCEDURE ---\n',
             'Display: "', p.display, '"\n',
             'Category: ', COALESCE(p.category, 'NOT_SPECIFIED'), '\n',
@@ -266,14 +272,16 @@ SELECT
     SNOWFLAKE.CORTEX.COMPLETE(
         'llama3.1-70b',
         CONCAT(
-            'You are a clinical terminology expert. Given the extracted allergy/intolerance AND its context, select the MOST SPECIFIC code. ',
+            'You are a clinical terminology expert. Given the extracted allergy/intolerance AND its context, select the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'For drug allergies, prefer RxNorm. For food/environmental, prefer SNOMED CT. ',
             'Use context:\n',
             '- reaction → type of reaction helps confirm substance identification\n',
             '- severity/criticality → may distinguish allergy vs intolerance\n',
             '- is_negated → if TRUE, this is a DENIED allergy (return confidence 0.0)\n',
             '- evidence_text → original note citation\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<RxNorm or SNOMED CT>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<RxNorm or SNOMED CT>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- ALLERGY ---\n',
             'Substance: "', a.substance_display, '"\n',
             'Reaction: ', COALESCE(a.reaction_display, 'NOT_SPECIFIED'), '\n',

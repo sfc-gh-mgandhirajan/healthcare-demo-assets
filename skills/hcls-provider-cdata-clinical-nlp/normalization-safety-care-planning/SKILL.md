@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Safety & Care Planning Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -115,7 +117,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a pharmacovigilance coding expert specializing in MedDRA and clinical terminology. ',
-            'Given an adverse event description AND its clinical context, find the MOST SPECIFIC code. ',
+            'Given an adverse event description AND its clinical context, find the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n\n',
             'MedDRA hierarchy: Always return a Preferred Term (PT) level code — NOT SOC, HLGT, HLT, or LLT.\n',
             'If the extracted text maps to a Lowest Level Term (LLT), return the parent PT instead.\n',
@@ -128,7 +131,8 @@ SELECT
             '- suspect medication → drug-induced PTs (e.g., "Drug-induced liver injury" vs "Hepatotoxicity")\n',
             '- suspect device → device-related PTs\n',
             '- evidence_text → original note may have specific clinical details\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<MedDRA or SNOMED CT>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<MedDRA or SNOMED CT>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- ADVERSE EVENT ---\n',
             'Event: "', u.event_display, '"\n',
             'Seriousness: ', COALESCE(u.seriousness, 'NOT_SPECIFIED'), '\n',

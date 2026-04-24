@@ -6,6 +6,8 @@ parent_skill: hcls-provider-cdata-clinical-nlp
 
 # Patient Context Terminology Normalization
 
+> **Research Use Only** — Not validated for clinical decision-making. Generated codes require clinical review before use in patient care, billing, or regulatory reporting.
+
 ## Scope
 
 | Target Table | Code Fields | Code Systems | Semantic Groups |
@@ -129,7 +131,8 @@ SELECT
         'llama3.1-70b',
         CONCAT(
             'You are a clinical coding expert specializing in SDOH and ICD-10-CM Z-codes. ',
-            'Given the SDOH domain and evidence text, select the MOST SPECIFIC ICD-10-CM Z-code. ',
+            'Given the SDOH domain and evidence text, select the MOST SPECIFIC ICD-10-CM Z-code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the candidate Z-codes provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'Return ONLY a JSON object: {"code": "<Z-code>", "code_system": "ICD-10-CM", "confidence": <0.0-1.0>}.\n\n',
             'SDOH Domain: ', s.sdoh_domain, '\n',
             'Display: "', COALESCE(s.display, ''), '"\n',
@@ -176,7 +179,8 @@ SELECT
     SNOWFLAKE.CORTEX.COMPLETE(
         'llama3.1-70b',
         CONCAT(
-            'You are a clinical terminology expert. Given a family history condition with its context, find the MOST SPECIFIC code. ',
+            'You are a clinical terminology expert. Given a family history condition with its context, find the MOST SPECIFIC code from the CANDIDATES list below. ',
+            'CRITICAL CONSTRAINT: You MUST choose a code from the CANDIDATES list provided. Do NOT invent, recall, or generate codes from memory. If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}. ',
             'IMPORTANT: The user has requested coding in: ', $NORM_CODE_SYSTEMS_DISPLAY, '. Only return codes from the requested system(s).\n',
             'Use the context to drive specificity:\n',
             '- relationship → may affect code choice (e.g., maternal vs paternal for hereditary conditions)\n',
@@ -184,7 +188,8 @@ SELECT
             '- deceased_flag → cause of death context\n',
             '- is_negated → if TRUE, this is a DENIED family history (no code needed, return confidence 0.0)\n',
             '- evidence_text → original note citation may contain details not in the display\n\n',
-            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}.\n\n',
+            'Return ONLY: {"code": "<code>", "code_system": "<system>", "confidence": <0.0-1.0>}. ',
+            'If no candidate matches or the CANDIDATES list is empty, return {"code": null, "code_system": null, "confidence": 0.0}.\n\n',
             '--- FAMILY HISTORY CONDITION ---\n',
             'Condition: "', f.condition_display, '"\n',
             'Relationship: ', COALESCE(f.relationship_display, 'UNKNOWN'), '\n',

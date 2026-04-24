@@ -69,20 +69,51 @@ This preflight runs ONCE at router load. The result determines whether Step 0 be
 
 ## Terminology Preference Gate (NORMALIZE_* intents only)
 
-For any NORMALIZE_* intent, **ask the user** for their code system preference before proceeding. Do NOT assume a default.
+For any NORMALIZE_* intent, **you MUST use `ask_user_question`** to collect the code system preference before proceeding. Do NOT assume a default. Do NOT proceed without an explicit user selection.
 
-### Gate Prompt
+### Gate Implementation (MANDATORY)
 
-> What code system(s) should we normalize to? This depends on your use case:
->
-> | Use Case | Recommended Code Systems |
-> |----------|------------------------|
-> | **US billing / claims** | ICD-10-CM (conditions), CPT (procedures), RxNorm (medications) |
-> | **Clinical interoperability / FHIR** | SNOMED CT (conditions, procedures, findings), RxNorm (medications), LOINC (observations) |
-> | **Research / analytics** | SNOMED CT (broad clinical coverage) |
-> | **Pharmacovigilance / regulatory** | MedDRA (adverse events) |
-> | **Cancer registry** | ICD-O-3 (site + histology) |
-> | **Dual coding** | Both ICD-10-CM and SNOMED CT (maximum interoperability) |
+Use `ask_user_question` with the following structure. This is NOT optional — the gate MUST fire before any normalization sub-skill is loaded:
+
+```json
+{
+  "questions": [
+    {
+      "header": "Code Systems",
+      "question": "Which code system(s) should we normalize to?",
+      "multiSelect": false,
+      "options": [
+        {
+          "label": "US Billing/Claims",
+          "description": "ICD-10-CM (conditions), CPT (procedures), RxNorm (medications), LOINC (observations)"
+        },
+        {
+          "label": "Clinical/FHIR",
+          "description": "SNOMED CT (conditions, procedures, findings), RxNorm (medications), LOINC (observations)"
+        },
+        {
+          "label": "Dual Coding",
+          "description": "Both ICD-10-CM and SNOMED CT for maximum interoperability"
+        },
+        {
+          "label": "Cancer Registry",
+          "description": "ICD-O-3 (site + histology), MedDRA (adverse events)"
+        },
+        {
+          "label": "Pharmacovigilance",
+          "description": "MedDRA (adverse events), SNOMED CT (clinical findings)"
+        },
+        {
+          "label": "All Available",
+          "description": "Use the preferred code system per concept category (ICD-10-CM, SNOMED CT, RxNorm, LOINC, MedDRA, ICD-O-3)"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**MANDATORY STOPPING POINT:** Do NOT load any normalization sub-skill until the user responds to this gate. If the user has not been asked, the gate has not fired.
 
 ### Set `$NORM_CODE_SYSTEMS` Context Variable
 

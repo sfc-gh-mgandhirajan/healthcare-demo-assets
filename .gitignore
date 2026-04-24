@@ -42,6 +42,14 @@ Thumbs.db
 *.log
 *.swp
 
+# Audit files
+skills/FULL_AUDIT.md
+skills/AUDIT_RESPONSE.md
+
+# PDFs and PDF generators
+documentation/*.pdf
+scripts/generate_audit_response_pdf.py
+
 # Cortex Code local state (credentials, plans, conversation history)
 .snowflake/
 

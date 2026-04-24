@@ -1,6 +1,6 @@
 ---
 name: imaging-governance
-description: "HIPAA-compliant governance for medical imaging data: PHI masking, de-identification, classification, row-access policies, and audit trails on Snowflake."
+description: "HIPAA-compliant governance for DICOM imaging data on Snowflake. Full 19-table PHI masking, VARIANT masking, object tagging, row-access policies, aggregation policies, de-identification, audit trails, and data retention. Use when: imaging governance, HIPAA, PHI masking, imaging audit, imaging classification, imaging access policy, de-identification, DICOM governance, imaging data retention, consent management."
 parent_skill: hcls-provider-imaging
 ---
 
@@ -8,159 +8,145 @@ parent_skill: hcls-provider-imaging
 
 ## When to Load
 
-Healthcare-imaging router: After user intent matches GOVERNANCE.
+Parent router (`hcls-provider-imaging`) routes here on **GOVERNANCE** intent: imaging governance, HIPAA, PHI masking, imaging audit, classification, access policy, de-identification, consent management, data retention.
 
 ## Prerequisites
 
-- Imaging metadata tables exist in Snowflake
-- ACCOUNTADMIN or SECURITYADMIN role access for policy creation
-- Understanding of HIPAA Safe Harbor de-identification requirements
+- DICOM imaging tables deployed in Snowflake (19-table model or subset)
+- ACCOUNTADMIN or SECURITYADMIN role for policy/tag creation
+- Active warehouse (e.g., `{warehouse}`)
+
+## SQL References
+
+All DDLs are in the `references/` directory:
+- **`references/policies_and_tags.sql`** — Tags (PHI_TYPE, SENSITIVITY_LEVEL, HIPAA_SAFE_HARBOR), masking policies (STRING/DATE/NUMBER/VARIANT), tag application, row access policies, aggregation policy, consent registry
+- **`references/audit_deidentification_retention.sql`** — De-identification DT, audit view, anomalous access alert, retention registry, archival task
 
 ## Workflow
 
-### Step 0: Query Data Model Knowledge for PHI Columns (Auto — Injected by Router)
+### PHI Column Inventory
 
-The healthcare-imaging router automatically runs this step before loading this skill. The search results from `DICOM_MODEL_SEARCH_SVC` identify all PHI-containing columns across the DICOM data model.
+The following tables/columns contain Protected Health Information (PHI) per the DICOM data model:
 
-**Query PHI columns:**
+| Table | PHI Column | Type | HIPAA ID |
+|-------|-----------|------|----------|
+| DICOM_PATIENT | patient_name | STRING | Name |
+| DICOM_PATIENT | patient_id | STRING | MRN |
+| DICOM_PATIENT | patient_birth_date | DATE | DOB |
+| DICOM_STUDY | referring_physician | STRING | Name |
+| DICOM_STUDY | accession_number | STRING | Unique ID |
+| DICOM_EQUIPMENT | device_serial_number | STRING | Device Serial |
+| DICOM_EQUIPMENT | station_name | STRING | Device ID |
+| DICOM_PROCEDURE_STEP | performing_physician | STRING | Name |
+| DICOM_FILE_LOCATION | storage_uri | STRING | May embed patient ID in path |
+| DICOM_RAW | metadata | VARIANT | Embedded PHI tags |
+| RADIOLOGY_REPORTS | patient_id | STRING | MRN |
+| RADIOLOGY_REPORTS | radiologist_name | STRING | Name |
+| RADIOLOGY_REPORTS | report_text | STRING | Free-text PHI |
+
+MANDATORY STOPPING POINT: Present PHI column inventory to user. Confirm scope before proceeding.
+
+### Step 1: PHI Discovery & Classification
+
+**Goal:** Auto-detect PHI columns not in the inventory above.
+
+Run `SYSTEM$CLASSIFY` on each PHI-containing table with `{'auto_tag': true}`. Cross-reference results with the PHI column inventory. Verify coverage against **HIPAA Safe Harbor 18 identifiers**.
+
+MANDATORY STOPPING POINT: Present classification results and coverage gaps before creating tags.
+
+### Step 2: Object Tagging for PHI Classification
+
+**Goal:** Create tag taxonomy and apply to all PHI columns.
+
+Create tags and apply from `references/policies_and_tags.sql`.
+
+Verify:
 ```sql
-SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'UNSTRUCTURED_HEALTHDATA.DATA_MODEL_KNOWLEDGE.DICOM_MODEL_SEARCH_SVC',
-    '{"query": "PHI protected health information patient name ID birth date identifiers", "columns": ["table_name", "column_name", "data_type", "contains_phi", "description", "dicom_tag"]}'
-);
+SELECT * FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES_ALL_COLUMNS(
+    '{database}.{schema}.DICOM_PATIENT', 'TABLE'))
+WHERE TAG_NAME IN ('PHI_TYPE', 'SENSITIVITY_LEVEL', 'HIPAA_SAFE_HARBOR');
 ```
 
-**Use the results to:**
-- Automatically identify every column flagged `contains_phi = Y` across all 18 tables
-- Generate masking policies targeting the exact PHI columns (no manual enumeration)
-- Scope de-identification pipelines to the correct columns
-- Verify HIPAA Safe Harbor coverage against the data model reference
+MANDATORY STOPPING POINT: Confirm all PHI columns tagged before creating masking policies.
 
-**If search service is unavailable**, fall back to the hardcoded HIPAA 18 identifiers list below.
+### Step 3: Dynamic Data Masking — All Data Types
 
-### Step 1: Assess Governance Requirements
+**Goal:** Create and apply masking policies for STRING, DATE, NUMBER columns.
 
-**Ask** user:
-```
-What governance capabilities do you need?
-1. PHI masking (mask patient name, MRN, DOB in queries)
-2. DICOM de-identification (remove/hash HIPAA 18 identifiers)
-3. Sensitive data classification (auto-detect PHI columns)
-4. Role-based access policies (restrict imaging data by role)
-5. Audit trails (who accessed what imaging data)
-6. All of the above
-```
+Create and apply policies from `references/policies_and_tags.sql`. Authorized roles: `PHI_AUTHORIZED`, `IMAGING_ADMIN`.
 
-### Step 2: Classify Sensitive Imaging Data
+MANDATORY STOPPING POINT: Verify masking with a test query before proceeding to VARIANT masking.
 
-**Goal:** Auto-detect PHI in imaging metadata tables.
+### Step 4: VARIANT Column Masking for DICOM Raw Metadata
 
-**Invoke** the `sensitive-data-classification` skill for SYSTEM$CLASSIFY.
+**Goal:** Mask PHI DICOM tags inside VARIANT while preserving non-PHI metadata.
 
-```sql
-SELECT SYSTEM$CLASSIFY('imaging_db.imaging_schema.dicom_studies', {'auto_tag': true});
-```
+PHI DICOM tags to redact: PatientName, PatientID, PatientBirthDate, ReferringPhysicianName, InstitutionName, InstitutionAddress, PerformingPhysicianName, OperatorsName, PatientAddress, PatientTelephoneNumbers, DeviceSerialNumber, StationName.
 
-**HIPAA Safe Harbor — 18 identifiers to protect in DICOM:**
-- Patient Name, Patient ID (MRN), Date of Birth, Study Date
-- Institution Name, Referring Physician, Address/ZIP
-- Phone, Email, SSN, Medical Record Numbers
-- Device Serial Numbers, Unique Identifiers (UIDs)
+Apply `PHI_VARIANT_MASK` from `references/policies_and_tags.sql`. If VARIANT keys use tag notation (e.g., `00100010`), adapt OBJECT_DELETE keys accordingly.
 
-### Step 3: Create Masking Policies for PHI
+### Step 5: Row Access Policies
 
-**Goal:** Mask PHI fields based on role.
+**Goal:** Restrict imaging data by institution, department, and patient consent.
 
-**Invoke** the `data-policy` skill for masking policy best practices.
+Create institution RAP, department RAP, and consent-based RAP from `references/policies_and_tags.sql`.
 
-```sql
-CREATE OR REPLACE MASKING POLICY phi_string_mask AS (val STRING)
-RETURNS STRING ->
-  CASE
-    WHEN IS_ROLE_IN_SESSION('PHI_AUTHORIZED') THEN val
-    ELSE '***MASKED***'
-  END;
+MANDATORY STOPPING POINT: Test RAPs with multiple roles before proceeding.
 
-CREATE OR REPLACE MASKING POLICY phi_date_mask AS (val DATE)
-RETURNS DATE ->
-  CASE
-    WHEN IS_ROLE_IN_SESSION('PHI_AUTHORIZED') THEN val
-    ELSE DATE_FROM_PARTS(YEAR(val), 1, 1)
-  END;
+### Step 6: Aggregation Policies
 
-ALTER TABLE dicom_studies MODIFY COLUMN patient_name
-  SET MASKING POLICY phi_string_mask;
-ALTER TABLE dicom_studies MODIFY COLUMN patient_id
-  SET MASKING POLICY phi_string_mask;
-ALTER TABLE dicom_studies MODIFY COLUMN study_date
-  SET MASKING POLICY phi_date_mask;
-```
+**Goal:** Enforce k-anonymity (minimum cell size) for research analytics.
 
-### Step 4: Row-Access Policies
+Create and apply `IMAGING_MIN_CELL_SIZE` aggregation policy from `references/policies_and_tags.sql`. Research analysts must use GROUP BY with aggregates; groups smaller than 5 are suppressed.
 
-**Goal:** Restrict imaging data visibility by institution or department.
+### Step 7: De-Identification Pipeline — HIPAA Safe Harbor
 
-```sql
-CREATE OR REPLACE ROW ACCESS POLICY imaging_institution_policy
-AS (institution_val VARCHAR) RETURNS BOOLEAN ->
-  IS_ROLE_IN_SESSION('IMAGING_ADMIN')
-  OR institution_val IN (
-    SELECT institution FROM imaging_role_mapping
-    WHERE role_name = CURRENT_ROLE()
-  );
+**Goal:** Create de-identified Dynamic Table covering all 18 HIPAA Safe Harbor identifiers.
 
-ALTER TABLE dicom_studies ADD ROW ACCESS POLICY imaging_institution_policy
-  ON (institution);
-```
+Create `DICOM_STUDIES_DEIDENTIFIED` from `references/audit_deidentification_retention.sql`.
 
-### Step 5: DICOM De-Identification Pipeline
+MANDATORY STOPPING POINT: Validate de-identification — query the Dynamic Table and confirm no PHI leaks.
 
-**Goal:** Create a de-identified copy of imaging metadata for research.
+### Step 8: Audit Trail & Monitoring
 
-```sql
-CREATE OR REPLACE TABLE dicom_studies_deidentified AS
-SELECT
-  SHA2(study_uid, 256) AS study_uid_hash,
-  SHA2(patient_id, 256) AS patient_id_hash,
-  '***' AS patient_name,
-  DATE_FROM_PARTS(YEAR(TRY_TO_DATE(study_date, 'YYYYMMDD')), 1, 1) AS study_year,
-  modality,
-  body_part,
-  image_rows,
-  image_columns,
-  bits_allocated
-FROM dicom_studies;
-```
+**Goal:** Monitor PHI access, detect anomalies, create compliance dashboards.
 
-### Step 6: Audit Trail Setup
+Create audit view and alert from `references/audit_deidentification_retention.sql`.
 
-**Goal:** Monitor PHI access via Snowflake ACCESS_HISTORY.
+### Step 9: Data Retention & Lifecycle
 
-**Invoke** the `data-governance` skill for audit queries.
+**Goal:** Configure retention, time-travel, and archival for HIPAA-mandated periods (6 years).
 
-```sql
-SELECT
-  user_name,
-  query_start_time,
-  direct_objects_accessed
-FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY
-WHERE ARRAY_CONTAINS('DICOM_STUDIES'::VARIANT, 
-  TRANSFORM(direct_objects_accessed, o -> o:objectName))
-ORDER BY query_start_time DESC
-LIMIT 100;
-```
+Apply retention settings and create archival task from `references/audit_deidentification_retention.sql`.
+
+MANDATORY STOPPING POINT: Review retention settings and archival schedule before enabling the task.
 
 ## Stopping Points
 
-- After Step 1 to confirm scope
-- After Step 2 before applying tags (review classification results)
-- After Step 3 before applying masking policies (get security approval)
-- After Step 4 before applying row-access policies
+- After PHI Column Inventory: Confirm scope before proceeding
+- After Step 1: Review classification results and coverage gaps
+- After Step 2: Verify all PHI columns are tagged before masking
+- After Step 3: Test masking with authorized and unauthorized roles
+- After Step 5: Test RAPs with multiple roles before aggregation setup
+- After Step 7: Validate de-identified Dynamic Table contains no PHI
+- After Step 9: Review retention settings and archival schedule
 
 ## Output
 
-- PHI columns classified and tagged
-- Masking policies applied to all PHI fields
-- Row-access policies for institutional data segregation
-- De-identified research dataset
-- Audit query templates for compliance monitoring
+- PHI column inventory covering all 18 HIPAA identifiers across imaging tables
+- Object tags (PHI_TYPE, SENSITIVITY_LEVEL, HIPAA_SAFE_HARBOR) on all PHI columns
+- Masking policies for STRING, DATE, NUMBER, and VARIANT data types
+- VARIANT masking that redacts PHI DICOM tags while preserving clinical metadata
+- Row access policies: institution-based, department-based, and consent-based
+- Aggregation policy enforcing k-anonymity (min cell size = 5)
+- De-identified Dynamic Table for research (HIPAA Safe Harbor compliant)
+- PHI access audit view and anomalous access alerting
+- Data retention registry and automated archival task
+- Consent management registry for research data governance
+
+## Next
+
+Return to parent router for next workflow. Common follow-ups:
+- ANALYTICS: Build analytics over de-identified data
+- VIEWER: Role-aware dashboard respecting masking policies
+- AGENT: Conversational access with governance-enforced data visibility
