@@ -1,0 +1,14 @@
+spec:
+  containers:
+    - name: tmf-governance-app
+      image: /UNSTRUCTURED_HEALTHDATA/EDWARDS_CLINICAL_DOCS/APP_REPO/tmf-governance:latest
+      env:
+        SNOWFLAKE_WAREHOUSE: BI_WH
+        PORT: "8080"
+      readinessProbe:
+        port: 8080
+        path: /
+  endpoints:
+    - name: app
+      port: 8080
+      public: true

@@ -1,0 +1,257 @@
+name: TMF_ANALYTICS_VIEW
+tables:
+  - name: DOCUMENT_METADATA
+    base_table:
+      database: UNSTRUCTURED_HEALTHDATA
+      schema: EDWARDS_CLINICAL_DOCS
+      table: DOCUMENT_METADATA
+    dimensions:
+      - name: FILE_PATH
+        expr: FILE_PATH
+        description: Path to the source PDF file on the Snowflake stage
+        synonyms:
+          - file name
+          - document path
+          - source file
+      - name: TRIAL_NAME
+        expr: TRIAL_NAME
+        description: Name of the Edwards Lifesciences clinical trial (e.g., ALLIANCE, ENCIRCLE, TRISCEND II, ALT-FLOW II, CLASP IID)
+        synonyms:
+          - trial
+          - study
+          - clinical trial
+          - study name
+        sample_values:
+          - ALLIANCE
+          - ENCIRCLE
+          - TRISCEND II
+          - ALT-FLOW II
+          - CLASP IID
+      - name: DOCUMENT_TYPE
+        expr: DOCUMENT_TYPE
+        description: Type of clinical trial document - Protocol, ICF (Informed Consent Form), or Regulatory Submission
+        synonyms:
+          - doc type
+          - document category
+          - type of document
+        sample_values:
+          - Protocol
+          - ICF
+          - Regulatory Submission
+      - name: VERSION
+        expr: VERSION
+        description: Document version number (e.g., v1.0, v2.0, v3.0)
+        synonyms:
+          - document version
+          - ver
+          - revision
+      - name: DEVICE_NAME
+        expr: DEVICE_NAME
+        description: Edwards Lifesciences medical device name (e.g., SAPIEN X4, PASCAL, EVOQUE, SAPIEN M3, APTURE)
+        synonyms:
+          - device
+          - product
+          - medical device
+          - valve
+      - name: INDICATION
+        expr: INDICATION
+        description: Clinical indication or condition the device treats (e.g., aortic stenosis, mitral regurgitation, tricuspid regurgitation, HFpEF)
+        synonyms:
+          - condition
+          - disease
+          - therapeutic area
+      - name: NCT_NUMBER
+        expr: NCT_NUMBER
+        description: ClinicalTrials.gov NCT registration identifier
+        synonyms:
+          - NCT
+          - clinicaltrials.gov ID
+          - registration number
+      - name: PI_NAME
+        expr: PI_NAME
+        description: Principal Investigator full name
+        synonyms:
+          - PI
+          - principal investigator
+          - lead investigator
+      - name: SITE_NAME
+        expr: SITE_NAME
+        description: Clinical trial site or hospital name (e.g., Cleveland Clinic, Mayo Clinic, Cedars-Sinai)
+        synonyms:
+          - site
+          - hospital
+          - clinical site
+          - center
+      - name: SITE_ID
+        expr: SITE_ID
+        description: Clinical site identifier code (e.g., Site-001, Site-002)
+        synonyms:
+          - site number
+          - site code
+      - name: STUDY_PHASE
+        expr: STUDY_PHASE
+        description: Clinical trial phase (e.g., Phase II, Phase III, Pivotal)
+        synonyms:
+          - phase
+          - trial phase
+      - name: AMENDMENT_NUMBER
+        expr: AMENDMENT_NUMBER
+        description: Protocol amendment number if the document is an amendment. None if not applicable.
+        synonyms:
+          - amendment
+          - protocol amendment
+      - name: SPONSOR
+        expr: SPONSOR
+        description: Trial sponsor organization (Edwards Lifesciences Corporation)
+        synonyms:
+          - sponsoring company
+      - name: JURISDICTION
+        expr: JURISDICTION
+        description: Regulatory jurisdiction for submissions (e.g., FDA, CE Mark, Health Canada)
+        synonyms:
+          - regulatory authority
+          - regulatory body
+          - region
+      - name: TMF_ZONE
+        expr: TMF_ZONE
+        description: DIA TMF Reference Model zone classification (e.g., Zone 01 - Trial Management, Zone 04 - IRB/IEC and Other Approvals, Zone 05 - Regulatory)
+        synonyms:
+          - TMF section
+          - zone
+          - trial master file zone
+        sample_values:
+          - Zone 01 - Trial Management
+          - Zone 04 - IRB/IEC and Other Approvals
+          - Zone 05 - Regulatory
+      - name: FUNCTIONAL_GROUP
+        expr: FUNCTIONAL_GROUP
+        description: Responsible functional team (Clinical Operations, Regulatory Affairs, Data Management)
+        synonyms:
+          - team
+          - department
+          - function
+          - responsible group
+        sample_values:
+          - Clinical Operations
+          - Regulatory Affairs
+          - Data Management
+      - name: COMPLETENESS_STATUS
+        expr: COMPLETENESS_STATUS
+        description: Document completeness status for TMF governance - Current (up to date), Outdated (needs update), or Missing
+        synonyms:
+          - status
+          - document status
+          - completeness
+          - health status
+        sample_values:
+          - Current
+          - Outdated
+    facts:
+      - name: FILE_SIZE
+        expr: FILE_SIZE
+        description: Size of the source PDF file in bytes
+        synonyms:
+          - document size
+      - name: DAYS_SINCE_UPLOAD
+        expr: DAYS_SINCE_UPLOAD
+        description: Number of days since the document was last uploaded or updated. Higher values may indicate stale documents.
+        synonyms:
+          - age
+          - days old
+          - staleness
+          - how old
+    time_dimensions:
+      - name: UPLOAD_TIMESTAMP
+        expr: UPLOAD_TIMESTAMP
+        description: Timestamp when the document was uploaded to the Snowflake stage
+        data_type: TIMESTAMP
+        synonyms:
+          - upload date
+          - date uploaded
+      - name: PROCESSED_AT
+        expr: PROCESSED_AT
+        description: Timestamp when AI extraction was performed on the document
+        data_type: TIMESTAMP
+        synonyms:
+          - extraction date
+          - processing date
+    metrics:
+      - name: DOCUMENT_COUNT
+        expr: COUNT(*)
+        description: Total number of documents
+        synonyms:
+          - number of documents
+          - doc count
+          - total documents
+          - how many documents
+      - name: UNIQUE_TRIAL_COUNT
+        expr: COUNT(DISTINCT TRIAL_NAME)
+        description: Number of distinct clinical trials
+        synonyms:
+          - number of trials
+          - trial count
+      - name: OUTDATED_DOCUMENT_COUNT
+        expr: COUNT(CASE WHEN COMPLETENESS_STATUS = 'Outdated' THEN 1 END)
+        description: Number of documents with Outdated completeness status that need to be updated
+        synonyms:
+          - outdated docs
+          - stale documents
+          - docs needing update
+      - name: CURRENT_DOCUMENT_COUNT
+        expr: COUNT(CASE WHEN COMPLETENESS_STATUS = 'Current' THEN 1 END)
+        description: Number of documents with Current completeness status
+        synonyms:
+          - up to date docs
+          - current docs
+      - name: COMPLETENESS_PERCENTAGE
+        expr: "ROUND(100.0 * COUNT(CASE WHEN COMPLETENESS_STATUS = 'Current' THEN 1 END) / NULLIF(COUNT(*), 0), 1)"
+        description: Percentage of documents that are current and up to date. Higher is better. Target is above 90%.
+        synonyms:
+          - completeness rate
+          - health score
+          - completeness score
+          - percent complete
+      - name: AVG_DAYS_SINCE_UPLOAD
+        expr: ROUND(AVG(DAYS_SINCE_UPLOAD), 0)
+        description: Average number of days since documents were last uploaded
+        synonyms:
+          - average age
+          - average staleness
+      - name: AMENDMENT_COUNT
+        expr: "COUNT(CASE WHEN AMENDMENT_NUMBER IS NOT NULL AND AMENDMENT_NUMBER != 'None' THEN 1 END)"
+        description: Number of protocol amendments filed
+        synonyms:
+          - number of amendments
+          - amendments filed
+      - name: UNIQUE_SITE_COUNT
+        expr: COUNT(DISTINCT SITE_NAME)
+        description: Number of distinct clinical sites with documents
+        synonyms:
+          - number of sites
+          - site count
+    filters:
+      - name: CURRENT_DOCUMENTS_ONLY
+        expr: COMPLETENESS_STATUS = 'Current'
+        description: Filter to show only documents with Current status
+      - name: OUTDATED_DOCUMENTS_ONLY
+        expr: COMPLETENESS_STATUS = 'Outdated'
+        description: Filter to show only documents needing updates
+      - name: PROTOCOLS_ONLY
+        expr: DOCUMENT_TYPE = 'Protocol'
+        description: Filter to show only Protocol documents
+      - name: ICF_ONLY
+        expr: DOCUMENT_TYPE = 'ICF'
+        description: Filter to show only Informed Consent Forms
+verified_queries:
+  - question: How many documents do we have per trial?
+    sql: SELECT TRIAL_NAME, COUNT(*) AS DOCUMENT_COUNT FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA GROUP BY TRIAL_NAME ORDER BY DOCUMENT_COUNT DESC
+  - question: What is the completeness percentage for each trial?
+    sql: "SELECT TRIAL_NAME, ROUND(100.0 * COUNT(CASE WHEN COMPLETENESS_STATUS = 'Current' THEN 1 END) / NULLIF(COUNT(*), 0), 1) AS COMPLETENESS_PERCENTAGE, COUNT(*) AS TOTAL_DOCS FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA GROUP BY TRIAL_NAME ORDER BY COMPLETENESS_PERCENTAGE ASC"
+  - question: Which documents are outdated?
+    sql: "SELECT TRIAL_NAME, DOCUMENT_TYPE, VERSION, SITE_NAME, DAYS_SINCE_UPLOAD FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA WHERE COMPLETENESS_STATUS = 'Outdated' ORDER BY DAYS_SINCE_UPLOAD DESC"
+  - question: Show me all documents for the ALLIANCE trial
+    sql: SELECT TRIAL_NAME, DOCUMENT_TYPE, VERSION, SITE_NAME, COMPLETENESS_STATUS, DAYS_SINCE_UPLOAD FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA WHERE TRIAL_NAME = 'ALLIANCE' ORDER BY DOCUMENT_TYPE, VERSION
+  - question: How many amendments have been filed per trial?
+    sql: "SELECT TRIAL_NAME, COUNT(CASE WHEN AMENDMENT_NUMBER IS NOT NULL AND AMENDMENT_NUMBER != 'None' THEN 1 END) AS AMENDMENT_COUNT FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA GROUP BY TRIAL_NAME ORDER BY AMENDMENT_COUNT DESC"
+  - question: What is the document breakdown by TMF zone?
+    sql: SELECT TMF_ZONE, COUNT(*) AS DOCUMENT_COUNT, COMPLETENESS_STATUS FROM UNSTRUCTURED_HEALTHDATA.EDWARDS_CLINICAL_DOCS.DOCUMENT_METADATA GROUP BY TMF_ZONE, COMPLETENESS_STATUS ORDER BY TMF_ZONE, COMPLETENESS_STATUS
