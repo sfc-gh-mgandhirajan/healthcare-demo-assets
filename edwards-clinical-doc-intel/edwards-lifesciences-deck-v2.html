@@ -1637,13 +1637,193 @@
       </div>
     </div>
 
+    <!-- ==================== PAGE 12: FROM DEMO TO PROTOTYPE ==================== -->
+    <div class="page next bg-gradient" data-index="11">
+      <div class="page-inner">
+        <div style="position: relative; z-index: 2;">
+          <div class="page-label fade-in" style="margin-bottom: 10px;">Prototype Blueprint</div>
+          <h2 class="fade-in fade-in-d1" style="font-size: 26px; margin-bottom: 10px;">From Demo to <span class="highlight">Production Prototype</span></h2>
+          <p class="body-text fade-in fade-in-d1" style="max-width: 700px; margin-bottom: 16px; font-size: 13px;">The demo proves the AI capabilities. The prototype grounds them in Edwards&rsquo; real Veeva Vault data model &mdash; making every metric, every search, and every agent answer traceable to your actual eTMF entities.</p>
+
+          <div class="lifecycle-flow fade-in fade-in-d2">
+            <div class="lifecycle-header">
+              <div>Layer</div>
+              <div>What It Contains</div>
+              <div>Why It Matters</div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name">
+                <div class="stage-icon" style="background: rgba(41,181,232,0.12);">
+                  <span style="font-size: 18px;">&#9679;</span>
+                </div>
+                <div class="stage-title">Layer 1<br><span style="font-size: 11px; color: var(--sf-body-grey);">Veeva Vault Base Tables</span></div>
+              </div>
+              <div class="stage-risk" style="background: transparent;">
+                <p>10 tables mirroring Veeva Vault objects: <strong>VAULT_STUDY</strong>, <strong>VAULT_SITE</strong>, <strong>VAULT_DOCUMENT</strong>, <strong>VAULT_PERSON</strong>, <strong>VAULT_EDL</strong>, <strong>VAULT_EDL_ITEM</strong>, VAULT_STUDY_COUNTRY, VAULT_ORGANIZATION, VAULT_STUDY_PERSON, VAULT_QUALITY_ISSUE</p>
+              </div>
+              <div class="stage-capability">
+                <p>Structured metadata lands from Veeva via Direct Data Connector / OpenFlow &mdash; the same objects Edwards extracts today via Qlik (documents__v, study__v, site__v, edl__v, etc.)</p>
+              </div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name">
+                <div class="stage-icon" style="background: rgba(125,68,207,0.12);">
+                  <span style="font-size: 18px;">&#9679;</span>
+                </div>
+                <div class="stage-title">Layer 2<br><span style="font-size: 11px; color: var(--sf-body-grey);">AI-Enriched Tables</span></div>
+              </div>
+              <div class="stage-risk" style="background: transparent;">
+                <p><strong>PARSED_DOCUMENTS</strong> (AI_PARSE_DOCUMENT), <strong>DOCUMENT_AI_EXTRACT</strong> (AI_EXTRACT), <strong>SEARCH_CORPUS</strong> (Cortex Search input)</p>
+              </div>
+              <div class="stage-capability">
+                <p>Cortex AI reads the actual PDFs/DOCX from Snowflake Stage, extracts full text + structured entities (endpoints, criteria, amendments) that don&rsquo;t exist in Veeva metadata</p>
+              </div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name">
+                <div class="stage-icon" style="background: rgba(26,138,74,0.12);">
+                  <span style="font-size: 18px;">&#9679;</span>
+                </div>
+                <div class="stage-title">Layer 3<br><span style="font-size: 11px; color: var(--sf-body-grey);">Governance &amp; Analytics</span></div>
+              </div>
+              <div class="stage-risk" style="background: transparent;">
+                <p><strong>TMF_COMPLETENESS_VIEW</strong>, <strong>TMF_ANALYTICS_VIEW</strong> (Semantic View), <strong>Cortex Agent</strong> (5 tools), <strong>Cortex Search</strong>, <strong>ClinicalTrials.gov CKE</strong></p>
+              </div>
+              <div class="stage-capability">
+                <p>Completeness computed from EDL (expected) vs. actual documents. Semantic View now spans structured Veeva data + AI-enriched content. Agent gains a new <strong>study_oversight</strong> tool.</p>
+              </div>
+            </div>
+          </div>
+
+          <p class="small-text fade-in fade-in-d3" style="text-align: center; margin-top: 10px;">Layer 1 is what Veeva gives you. Layer 2 is what Cortex AI adds. Layer 3 is the intelligence that neither can deliver alone.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE 13: VEEVA VAULT BASE TABLES ==================== -->
+    <div class="page next bg-dark" data-index="12">
+      <div class="page-inner">
+        <div style="position: relative; z-index: 2;">
+          <div class="page-label fade-in" style="margin-bottom: 10px;">Layer 1 Detail</div>
+          <h2 class="fade-in fade-in-d1" style="font-size: 24px; margin-bottom: 12px;">Veeva Vault Entities &rarr; <span class="highlight">Snowflake Base Tables</span></h2>
+          <p class="body-text fade-in fade-in-d1" style="max-width: 700px; margin-bottom: 14px; font-size: 13px;">These 10 tables mirror the exact Veeva Vault objects Edwards extracts today. In the prototype, they&rsquo;re populated with synthetic data matching your 5 active trials. In production, OpenFlow or Direct Data Connector fills them automatically.</p>
+
+          <div class="lifecycle-flow fade-in fade-in-d2" style="font-size: 12px;">
+            <div class="lifecycle-header">
+              <div>Snowflake Table</div>
+              <div>Veeva Source Object</div>
+              <div>Key Columns</div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_STUDY</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>study__v</p></div>
+              <div class="stage-capability"><p>study_id, study_name, device, indication, NCT#, phase, status</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_SITE</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>site__v</p></div>
+              <div class="stage-capability"><p>site_id, site_name, study_id, country, activation_date, status</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_DOCUMENT</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>documents__v</p></div>
+              <div class="stage-capability"><p>doc_id, study_id, site_id, doc_type, version, lifecycle_state, is_deleted</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_EDL</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>edl__v</p></div>
+              <div class="stage-capability"><p>edl_id, study_id, tmf_zone, tmf_section &mdash; the &ldquo;expected&rdquo; TMF template</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_EDL_ITEM</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>edl_item__v</p></div>
+              <div class="stage-capability"><p>edl_item_id, edl_id, expected_doc_type, site_level, required, status</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_PERSON</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>person__sys</p></div>
+              <div class="stage-capability"><p>person_id, name, email, organization_id</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_STUDY_PERSON</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>study_person__clin</p></div>
+              <div class="stage-capability"><p>study_id, person_id, site_id, role (PI, CRA, Monitor)</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_STUDY_COUNTRY</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>study_country__v</p></div>
+              <div class="stage-capability"><p>study_id, country, enrollment_status, target_enrollment</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_ORGANIZATION</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>organization__v</p></div>
+              <div class="stage-capability"><p>org_id, org_name, org_type (Sponsor, CRO, Site)</p></div>
+            </div>
+            <div class="lifecycle-stage">
+              <div class="stage-name"><div class="stage-title" style="font-size: 12px;">VAULT_QUALITY_ISSUE</div></div>
+              <div class="stage-risk" style="background: transparent;"><p>quality_issue__v</p></div>
+              <div class="stage-capability"><p>issue_id, study_id, site_id, doc_id, severity, status</p></div>
+            </div>
+          </div>
+
+          <p class="small-text fade-in fade-in-d3" style="text-align: center; margin-top: 8px;">These are the <strong>same 13 objects</strong> Edwards currently extracts from Veeva Vault via Qlik &mdash; now landing directly in Snowflake.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE 14: WHAT THIS ENABLES ==================== -->
+    <div class="page next bg-teal" data-index="13">
+      <div class="page-inner">
+        <div style="position: relative; z-index: 2;">
+          <div class="page-label fade-in" style="margin-bottom: 10px;">Prototype Value</div>
+          <h2 class="fade-in fade-in-d1" style="font-size: 26px; margin-bottom: 14px;">What This <span class="highlight">Enables</span></h2>
+          <p class="body-text fade-in fade-in-d1" style="max-width: 700px; margin-bottom: 16px; font-size: 13px;">Grounding the demo in Veeva Vault entities unlocks capabilities that matter to Edwards today &mdash; not as future roadmap, but as prototype-ready outcomes.</p>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="fade-in fade-in-d2">
+            <div class="card" style="border-left: 3px solid var(--sf-blue); padding: 14px;">
+              <h3 style="font-size: 13px; color: var(--sf-dk2); margin-bottom: 6px;">&#10004; Real TMF Completeness</h3>
+              <p style="font-size: 12px; line-height: 1.5; color: var(--sf-body-grey);">Compare EDL (expected documents) vs. actual documents filed. No more fabricated completeness &mdash; the score is computed from the same TMF template Edwards uses in Veeva Vault.</p>
+              <p style="font-size: 11px; margin-top: 6px; color: var(--sf-tbl-grey); font-style: italic;">Why it matters: Inspection-grade completeness, not demo-grade estimates.</p>
+            </div>
+            <div class="card" style="border-left: 3px solid var(--sf-green); padding: 14px;">
+              <h3 style="font-size: 13px; color: var(--sf-green); margin-bottom: 6px;">&#10004; ISF Reconciliation</h3>
+              <p style="font-size: 12px; line-height: 1.5; color: var(--sf-body-grey);">Cross-reference site-level expected docs vs. filed docs per site. This is Edwards&rsquo; Priority 2 use case from the Veeva Vault discovery.</p>
+              <p style="font-size: 11px; margin-top: 6px; color: var(--sf-tbl-grey); font-style: italic;">Why it matters: ISF reconciliation is the #1 inspection finding across the industry.</p>
+            </div>
+            <div class="card" style="border-left: 3px solid var(--sf-orange); padding: 14px;">
+              <h3 style="font-size: 13px; color: var(--sf-orange); margin-bottom: 6px;">&#10004; Expired Document Monitoring</h3>
+              <p style="font-size: 12px; line-height: 1.5; color: var(--sf-body-grey);">With EDL expected dates + document lifecycle states from Veeva, compute exactly which documents are past due &mdash; not approximated from upload timestamps.</p>
+              <p style="font-size: 11px; margin-top: 6px; color: var(--sf-tbl-grey); font-style: italic;">Why it matters: Edwards&rsquo; Priority 1 business need. Currently done manually.</p>
+            </div>
+            <div class="card" style="border-left: 3px solid var(--sf-violet); padding: 14px;">
+              <h3 style="font-size: 13px; color: var(--sf-violet); margin-bottom: 6px;">&#10004; Study Oversight &amp; Site Intelligence</h3>
+              <p style="font-size: 12px; line-height: 1.5; color: var(--sf-body-grey);">Enrollment by country, site activation status, PI assignments, quality issue tracking &mdash; all queryable through the AI Agent. &ldquo;Which sites for TRISCEND II haven&rsquo;t activated yet?&rdquo;</p>
+              <p style="font-size: 11px; margin-top: 6px; color: var(--sf-tbl-grey); font-style: italic;">Why it matters: Operational visibility that currently requires manual Veeva Vault exports.</p>
+            </div>
+          </div>
+
+          <div class="divider fade-in fade-in-d3" style="max-width: 100%; margin: 16px 0 12px;"></div>
+
+          <div class="fade-in fade-in-d4" style="text-align: center;">
+            <p style="font-size: 14px; font-weight: 600; color: var(--sf-dk1); margin-bottom: 8px;">The demo showed what&rsquo;s possible. The prototype makes it real &mdash; grounded in Edwards&rsquo; actual Veeva Vault entities, with the same objects your teams extract today.</p>
+            <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 10px;">
+              <span class="pill pill-blue" style="font-size: 11px; padding: 4px 10px;">Veeva Direct Data</span>
+              <span class="pill pill-teal" style="font-size: 11px; padding: 4px 10px;">Cortex AI</span>
+              <span class="pill pill-green" style="font-size: 11px; padding: 4px 10px;">Cortex Agent</span>
+              <span class="pill" style="font-size: 11px; padding: 4px 10px; background: rgba(125,68,207,0.1); color: var(--sf-violet);">895K Documents</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
 <div class="bottom-bar">
   <button class="nav-btn" id="prevBtn" onclick="navigate(-1)" disabled>&larr; Prev</button>
   <div class="progress-dots" id="progressDots"></div>
-  <span class="page-counter" id="pageCounter">1 / 11</span>
+  <span class="page-counter" id="pageCounter">1 / 14</span>
   <button class="nav-btn" id="nextBtn" onclick="navigate(1)">Next &rarr;</button>
 </div>
 

@@ -107,3 +107,79 @@
 | Repo | Image Repository | APP_REPO |
 | Pool | Compute Pool | EDWARDS_TMF_POOL |
 | Service | SPCS Service | TMF_GOVERNANCE_APP |
+
+---
+
+## BACKLOG
+
+### 1. Markdown Table Formatting in Agent Chat
+**Issue**: Cortex Agent returns markdown tables with rows on a single line (no newlines between rows). The `fix_markdown_tables()` function in `app.py` attempts to split rows but doesn't fully resolve all cases. ReactMarkdown renders tables as plain text when row breaks are missing.
+**Next step**: Debug with live agent responses to identify remaining edge cases in the row-splitting regex.
+
+### 2. Document Ingestion Pipeline (Streams + Tasks)
+**Current state**: No automated pipeline exists. PDFs were manually uploaded to `@ETMF_STAGE`, and `AI_PARSE_DOCUMENT` + `AI_EXTRACT` were run as ad-hoc SQL. Results were manually inserted into `PARSED_DOCUMENTS`, `DOCUMENT_METADATA`, and `SEARCH_CORPUS`.
+**What's needed**: A Stream on `@ETMF_STAGE` (or directory table) triggering a Task that runs the parse → extract → load chain automatically when new PDFs land. This would make the demo end-to-end: drop a PDF on the stage and it appears in the app minutes later.
+**Snowflake features**: Directory Tables, Streams, Tasks, AI_PARSE_DOCUMENT, AI_EXTRACT.
+
+### 3. Functional Group Gaps View (Trial Drilldown Enhancement)
+
+**Concept**: Add a "Team Accountability" tab/section to the Trial Drilldown screen that answers: *"Which functional groups own which documents, and where are they falling behind?"*
+
+**Why it matters**: In a real TMF, documents are owned by different functional groups (Clinical Ops, Regulatory Affairs, Data Management, Safety/Pharmacovigilance, etc.). During inspection prep, the TMF Manager needs to know not just *which* documents are outdated, but *which team* is responsible for remediating them. This is a key OneTMF governance concept.
+
+**Data available**: `DOCUMENT_METADATA` already has `functional_group` and `tmf_zone` columns. Current data shows 3 groups across 3 zones — would need to expand synthetic data to cover more groups (Data Management, Safety, Biostatistics, Medical Writing) for a realistic demo.
+
+**Proposed UX**:
+1. **Heatmap card** in Trial Drilldown: Functional Group (rows) × TMF Zone (columns), cells colored by completeness % (green/amber/red). Instantly shows which team × zone combinations have gaps.
+2. **Expandable rows**: Click a functional group row to see its specific documents, versions, and statuses.
+3. **Accountability metrics**: Per-group stats — total docs owned, % current, oldest document age, days since last upload.
+4. **Action items**: For each group with outdated docs, show a remediation checklist (e.g., "Clinical Ops: Update ICF v2.0 at Cleveland Clinic and Mayo Clinic").
+
+**Backend changes needed**:
+- New endpoint: `GET /api/trials/<name>/gaps-by-group` — returns functional group × zone completeness matrix
+- Expand synthetic data: Add more functional groups and TMF zones to `generate_synthetic_docs.py`
+
+**Snowflake features this would showcase**:
+- TMF zone taxonomy (ICH-GCP E6(R2) compliance)
+- Cross-dimensional governance (group × zone × trial)
+- Could add a Cortex Agent question: "Which functional groups have outstanding remediation items for ALLIANCE?"
+
+**Effort estimate**: ~2-3 hours (synthetic data expansion + new API endpoint + frontend heatmap component)
+
+### 4. Veeva Vault Prototype — Ground Demo in Real eTMF Entities
+
+**Context**: Edwards Veeva Vault Discovery (2026-03-09) confirmed they extract 13 Vault objects from `edwards-etmf.veevavault.com` (Clinical Ops / eTMF) via Qlik today. The prototype aligns our demo to their actual data model.
+
+**Deck**: `edwards-lifesciences-deck-v2.html` (slides 12-14) presents the 3-layer architecture.
+
+**Phase 1 — Create Veeva Base Tables** (Layer 1):
+10 Snowflake tables mirroring Veeva Vault objects, populated with synthetic data for our 5 trials:
+- VAULT_STUDY (study__v) — trial master record
+- VAULT_SITE (site__v) — investigator sites
+- VAULT_DOCUMENT (documents__v) — document metadata from Vault
+- VAULT_EDL (edl__v) — Expected Document List (TMF completeness template)
+- VAULT_EDL_ITEM (edl_item__v) — expected document line items
+- VAULT_PERSON (person__sys) — people
+- VAULT_STUDY_PERSON (study_person__clin) — person × study role
+- VAULT_STUDY_COUNTRY (study_country__v) — enrollment by country
+- VAULT_ORGANIZATION (organization__v) — sponsors, CROs, sites
+- VAULT_QUALITY_ISSUE (quality_issue__v) — quality findings
+
+**Phase 2 — Rebuild DOCUMENT_METADATA as a view** joining VAULT_DOCUMENT + VAULT_STUDY + VAULT_SITE + AI_EXTRACT. App queries unchanged (backward compatible).
+
+**Phase 3 — Add TMF_COMPLETENESS_VIEW** computed from EDL expected vs. actual documents. Replaces fabricated `completeness_status`.
+
+**Phase 4 — Expand Semantic View** with new metrics from base tables (site count, country count, enrollment targets, quality issues).
+
+**Phase 5 — Add agent tool** (`study_oversight`) for structured Veeva data queries.
+
+**What this enables**:
+1. Real TMF completeness (EDL expected vs. actual)
+2. ISF reconciliation (Edwards Priority 2)
+3. Expired document monitoring (Edwards Priority 1)
+4. Study oversight / site intelligence via AI Agent
+5. Person/role queries from structured data
+6. Quality issue tracking linked to documents/sites
+
+**Studies to expand with** (from Edwards Priority 3 — TMTT):
+CARDIOBAND, CLASP II TR, CLASP IIF, CLASP TR EFS, M3 EFS, MiCLASP, TRIBAND, TriCLASP, TRISCEND, TRISCEND III EU, TRISCEND JAPAN, TWIST EFS

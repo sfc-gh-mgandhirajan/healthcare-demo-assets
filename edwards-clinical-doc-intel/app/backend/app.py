@@ -120,16 +120,16 @@ def get_trials():
         cur.execute("""
             SELECT 
                 trial_name,
-                device_name,
-                indication,
-                nct_number,
+                ANY_VALUE(device_name) AS device_name,
+                ANY_VALUE(indication) AS indication,
+                ANY_VALUE(nct_number) AS nct_number,
                 COUNT(*) AS doc_count,
                 COUNT(CASE WHEN completeness_status = 'Current' THEN 1 END) AS current_count,
                 COUNT(CASE WHEN completeness_status = 'Outdated' THEN 1 END) AS outdated_count,
                 ROUND(100.0 * COUNT(CASE WHEN completeness_status = 'Current' THEN 1 END) / NULLIF(COUNT(*), 0), 1) AS completeness_pct,
                 ROUND(AVG(days_since_upload), 0) AS avg_age
             FROM DOCUMENT_METADATA
-            GROUP BY trial_name, device_name, indication, nct_number
+            GROUP BY trial_name
             ORDER BY trial_name
         """)
         cols = [desc[0].lower() for desc in cur.description]
