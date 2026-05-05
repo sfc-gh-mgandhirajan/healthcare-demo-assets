@@ -41,6 +41,7 @@ DOMAIN_ORDER = [
     "Pharma > Drug Safety",
     "Pharma > Genomics",
     "Pharma > Lab Operations",
+    "Cross-Industry > Platform Architecture",
     "Cross-Industry > Research Strategy",
     "Cross-Industry > Skill Development",
     "Cross-Industry > Knowledge Extensions",
