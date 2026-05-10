@@ -227,10 +227,53 @@ Set via: "TARS, honesty 100%" or "strict audit" or "quick audit"
 
 ## Database Storage
 
-All audit results are stored in `TRE_HEALTHCARE_DB.TARS_AUDITOR`:
+TARS persists audit results to Snowflake. The storage location is **user-configured** — ask on first use.
 
 - **AUDIT_RUNS** — one row per audit (trust score, grade, votes, status)
 - **AUDIT_FINDINGS** — one row per check (signal, tier, weight, evidence, disposition)
+
+### Step 0: Determine Storage Location
+
+On first invocation (or if no prior audit tables found), ask the user:
+
+> "Where would you like TARS audit results stored? I need a database and schema (e.g., `MY_DB.AUDITS`). I'll create the tables there if they don't exist."
+
+Once configured, remember this for subsequent audits (store in memory). If tables already exist from a prior session, use them without re-asking.
+
+**Table creation DDL (run if tables don't exist):**
+```sql
+CREATE TABLE IF NOT EXISTS <DB.SCHEMA>.AUDIT_RUNS (
+    AUDIT_ID VARCHAR DEFAULT UUID_STRING() PRIMARY KEY,
+    AUDIT_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    TARGET_NAME VARCHAR NOT NULL,
+    TARGET_TYPE VARCHAR NOT NULL,
+    HONESTY_SETTING NUMBER DEFAULT 95,
+    TRUST_SCORE FLOAT,
+    GRADE VARCHAR,
+    C_SIGNALS NUMBER,
+    D_SIGNALS NUMBER,
+    TOTAL_CHECKS NUMBER,
+    BUILDER_VOTE VARCHAR,
+    TARS_VOTE VARCHAR,
+    HUMAN_VOTE VARCHAR,
+    HUMAN_CONDITIONS VARCHAR,
+    STATUS VARCHAR DEFAULT 'PENDING'
+);
+
+CREATE TABLE IF NOT EXISTS <DB.SCHEMA>.AUDIT_FINDINGS (
+    FINDING_ID VARCHAR DEFAULT UUID_STRING(),
+    AUDIT_ID VARCHAR NOT NULL,
+    CHECK_NAME VARCHAR NOT NULL,
+    TIER NUMBER NOT NULL,
+    SIGNAL VARCHAR NOT NULL,
+    WEIGHT FLOAT NOT NULL,
+    DESCRIPTION VARCHAR,
+    EVIDENCE VARCHAR,
+    MODEL_USED VARCHAR,
+    ACTION_REQUIRED VARCHAR,
+    HUMAN_DISPOSITION VARCHAR
+);
+```
 
 ### Execution Protocol (CoCo Invocation)
 
@@ -238,7 +281,7 @@ When user says "TARS, audit [target]":
 
 **1. Create audit run:**
 ```sql
-INSERT INTO TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS 
+INSERT INTO <DB.SCHEMA>.AUDIT_RUNS 
 (TARGET_NAME, TARGET_TYPE, HONESTY_SETTING, STATUS)
 SELECT '[target_name]', '[model|notebook|dashboard|agent|repo]', [95], 'RUNNING'
 ```
@@ -247,23 +290,23 @@ Capture the AUDIT_ID for subsequent inserts.
 **2. Execute checks and insert findings:**
 For each check, run the verification and insert:
 ```sql
-INSERT INTO TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS
+INSERT INTO <DB.SCHEMA>.AUDIT_FINDINGS
 (AUDIT_ID, CHECK_NAME, TIER, SIGNAL, WEIGHT, DESCRIPTION, EVIDENCE, MODEL_USED)
 VALUES (:audit_id, :check_name, :tier, :signal, :weight, :desc, :evidence, :model)
 ```
 
 **3. Compute trust score and update run:**
 ```sql
-UPDATE TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS
+UPDATE <DB.SCHEMA>.AUDIT_RUNS
 SET TRUST_SCORE = (
     SELECT ROUND(SUM(CASE WHEN f.SIGNAL='C' THEN f.WEIGHT ELSE 0 END) /
            NULLIF(SUM(f.WEIGHT), 0), 4)
-    FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS f
+    FROM <DB.SCHEMA>.AUDIT_FINDINGS f
     WHERE f.AUDIT_ID = :audit_id
 ),
-C_SIGNALS = (SELECT COUNT(*) FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id AND SIGNAL = 'C'),
-D_SIGNALS = (SELECT COUNT(*) FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id AND SIGNAL = 'D'),
-TOTAL_CHECKS = (SELECT COUNT(*) FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id),
+C_SIGNALS = (SELECT COUNT(*) FROM <DB.SCHEMA>.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id AND SIGNAL = 'C'),
+D_SIGNALS = (SELECT COUNT(*) FROM <DB.SCHEMA>.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id AND SIGNAL = 'D'),
+TOTAL_CHECKS = (SELECT COUNT(*) FROM <DB.SCHEMA>.AUDIT_FINDINGS WHERE AUDIT_ID = :audit_id),
 GRADE = CASE 
     WHEN TRUST_SCORE >= 0.95 THEN 'EXCELLENT'
     WHEN TRUST_SCORE >= 0.85 THEN 'GOOD'
@@ -277,7 +320,7 @@ WHERE AUDIT_ID = :audit_id
 
 **5. Record human vote:**
 ```sql
-UPDATE TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS
+UPDATE <DB.SCHEMA>.AUDIT_RUNS
 SET HUMAN_VOTE = :vote, HUMAN_CONDITIONS = :conditions, STATUS = 'COMPLETE'
 WHERE AUDIT_ID = :audit_id
 ```
@@ -308,20 +351,20 @@ Pre-configured check lists by target type:
 ```sql
 -- Latest audit per target
 SELECT TARGET_NAME, AUDIT_DATE, TRUST_SCORE, GRADE, HUMAN_VOTE, C_SIGNALS, D_SIGNALS
-FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS
+FROM <DB.SCHEMA>.AUDIT_RUNS
 QUALIFY ROW_NUMBER() OVER (PARTITION BY TARGET_NAME ORDER BY AUDIT_DATE DESC) = 1
 ORDER BY TRUST_SCORE;
 
 -- Trust trend over time
 SELECT TARGET_NAME, AUDIT_DATE, TRUST_SCORE
-FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS
+FROM <DB.SCHEMA>.AUDIT_RUNS
 WHERE STATUS = 'COMPLETE'
 ORDER BY TARGET_NAME, AUDIT_DATE;
 
 -- All D signals across audits
 SELECT r.TARGET_NAME, r.AUDIT_DATE, f.CHECK_NAME, f.TIER, f.DESCRIPTION, f.HUMAN_DISPOSITION
-FROM TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_FINDINGS f
-JOIN TRE_HEALTHCARE_DB.TARS_AUDITOR.AUDIT_RUNS r ON r.AUDIT_ID = f.AUDIT_ID
+FROM <DB.SCHEMA>.AUDIT_FINDINGS f
+JOIN <DB.SCHEMA>.AUDIT_RUNS r ON r.AUDIT_ID = f.AUDIT_ID
 WHERE f.SIGNAL = 'D'
 ORDER BY r.AUDIT_DATE DESC;
 ```
