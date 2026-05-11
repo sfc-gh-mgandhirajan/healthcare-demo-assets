@@ -1,5 +1,5 @@
 ---
-name: hcls-cross-lab-ml-optimization
+name: hcls-pharma-lab-ml-optimization
 description: Apply machine learning to optimize laboratory workflows. Use this skill when users want to reduce turnaround time (TAT), increase throughput, lower cost-per-sample, or eliminate bottlenecks in clinical, research, QC, or manufacturing labs. The skill walks the user through a structured 7-phase methodology - define the workflow, define optimization metrics, identify the most time-consuming steps, inventory source systems and entities at every step, place ML models in front of bottlenecks, run inference to predict the target variable, and explain the predictions to surface key drivers. Outputs are a workflow map, a metric tree, a bottleneck-ranked process diagram, a feature inventory keyed to source systems, ML model placement recommendations, prediction outputs, and SHAP/feature-importance-based explanations. Common triggers include lab optimization, lab workflow, turnaround time, TAT, throughput, bottleneck, predictive maintenance, sample backlog, instrument utilization, lab efficiency, lab ML, optimize lab.
 platform_affinities:
   produces: [tables, models]
