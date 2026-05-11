@@ -207,6 +207,11 @@ skills:
     description: "Catalog and manage fine-tuned industry models for health sciences skills"
     domain: "Cross-Industry > AI/ML"
 
+  hcls-cross-lab-ml-optimization:
+    triggers: "lab optimization, lab workflow, turnaround time, TAT, throughput, bottleneck, predictive maintenance, sample backlog, instrument utilization, lab efficiency, lab ML, optimize lab, autoverification, rerun prediction, QC failure prediction"
+    description: "ML for lab workflow optimization: define workflow + metrics, identify bottlenecks, place predictive models in front of bottlenecks, run inference, explain key drivers"
+    domain: "Cross-Industry > AI/ML"
+
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
     description: "ClinicalTrials.gov research database"

@@ -219,6 +219,7 @@ These skills are available to ALL sub-industries — invoke them whenever they a
 - `$hcls-cross-cke-pubmed` — pubmed biomedical literature search
 - `$hcls-cross-skill-development` — guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing
 - `$hcls-cross-aiml-industrymodels` — catalog and manage fine-tuned industry models for health sciences skills
+- `$hcls-cross-lab-ml-optimization` — ml for lab workflow optimization: define workflow + metrics, identify bottlenecks, place predictive models in front of bottlenecks, run inference, explain key drivers
 - `$hcls-cross-cke-clinical-trials` — clinicaltrials.gov research database
 - `$hcls-cross-platform-multitenancy` — router: multi-tenant data platform — tenancy decisions, rbac, data products, secure sharing, governance, ai governance, cost attribution, bcdr, modernization. industry-agnostic; health sciences optimized.
 
