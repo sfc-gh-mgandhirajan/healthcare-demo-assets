@@ -178,6 +178,11 @@ skills:
     description: "Lab instrument outputs to Allotrope JSON/CSV"
     domain: "Pharma > Lab Operations"
 
+  hcls-pharma-lab-ml-optimization:
+    triggers: "lab optimization, lab workflow, turnaround time, TAT, throughput, bottleneck, predictive maintenance, sample backlog, instrument utilization, lab efficiency, lab ML, optimize lab, autoverification, rerun prediction, QC failure prediction"
+    description: "ML for lab workflow optimization: define workflow + metrics, identify bottlenecks, place predictive models in front of bottlenecks, run inference, explain key drivers"
+    domain: "Pharma > Lab Operations"
+
   hcls-cross-research-problem-selection:
     triggers: "Research problem, project ideation, evaluate project, scientific decisions"
     description: "Scientific problem selection using Fischbach & Walsh methodology"

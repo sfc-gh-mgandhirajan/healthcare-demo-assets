@@ -322,6 +322,7 @@ Two CKEs from the Snowflake Marketplace are available as shared Cortex Search Se
 | Triggers | Skill | What It Does |
 |----------|-------|-------------|
 | Instrument files, standardize lab data, Allotrope, ASM, LIMS | `$hcls-pharma-lab-allotrope` | Lab instrument outputs to Allotrope JSON/CSV |
+| lab optimization, lab workflow, turnaround time, TAT, throughput, bottleneck, predictive maintenance, sample backlog, instrument utilization, lab efficiency, lab ML, optimize lab, autoverification, rerun prediction, QC failure prediction | `$hcls-pharma-lab-ml-optimization` | ML for lab workflow optimization: define workflow + metrics, identify bottlenecks, place predictive models in front of bottlenecks, run inference, explain key drivers |
 
 ### Cross-Industry > Platform Architecture
 
