@@ -1,6 +1,15 @@
 ---
-name: tars-trust-auditor
+name: hcls-cross-tars-trust-auditor
 description: "Independent trust auditor for AI-generated artifacts. Implements the Love Equation (dE/dt = β(C-D)E) as a quantified trust scoring system. Runs adversarial validation against models, notebooks, SQL, dashboards, and agent outputs using structurally independent LLMs via CORTEX.COMPLETE(). Produces a Trust Score with cooperative/defection signal breakdown and three-vote recommendation (Builder/TARS/Human). Use when: audit, trust score, validate model, verify output, check agent, quality gate, honesty check, independent review, TARS, trust audit, love equation, SAFE2."
+platform_affinities:
+  produces:
+    - trust audit reports (C/D signal breakdown + weighted trust score)
+    - AUDIT_RUNS and AUDIT_FINDINGS tables for longitudinal trust tracking
+  benefits_from:
+    - skill: cortex-ai-functions
+      when: "calling CORTEX.COMPLETE() for Tier 2/3 LLM-assisted checks"
+    - skill: machine-learning
+      when: "auditing model training artifacts, model cards, and registry sync"
 ---
 
 # TARS — Trust Auditor for Responsible Systems
@@ -25,7 +34,7 @@ When C > D, trust compounds exponentially. When D > C, trust collapses. TARS is 
 ## Architecture: Three-Vote Pattern
 
 ```
-Human (Todd)          CoCo (Builder)         TARS (Auditor)
+Human (User)          CoCo (Builder)         TARS (Auditor)
      |                    |                       |
      | Request            |                       |
      +------------------->|                       |
@@ -189,7 +198,7 @@ Present to human:
 ║    - [C] Metric verification: all within tolerance ║
 ║    - [C] Registry sync: 9/9 versions current       ║
 ║                                                   ║
-║  Human (Todd):    ? YOUR VOTE                     ║
+║  Human (User):    ? YOUR VOTE                     ║
 ║                                                   ║
 ╚══════════════════════════════════════════════════╝
 ```

@@ -14,7 +14,7 @@
 ### CHECK-1.2: Metric Verification
 ```sql
 -- For each claimed metric (e.g., "457 infant deaths"):
-SELECT COUNT(*) FROM TRE_HEALTHCARE_DB.MS_FIMR.DEATH WHERE CAUSE_SOURCE_VALUE != 'P95';
+SELECT COUNT(*) FROM <DB.SCHEMA.TABLE> WHERE <FILTER_CONDITION>;
 -- Compare to claimed value. Tolerance: exact match for counts, ±0.01 for rates
 ```
 **C**: Values match within tolerance
