@@ -212,6 +212,11 @@ skills:
     description: "Catalog and manage fine-tuned industry models for health sciences skills"
     domain: "Cross-Industry > AI/ML"
 
+  hcls-cross-tars-trust-auditor:
+    triggers: "audit, trust score, TARS, verify, validate model, check agent, quality gate, honesty check, independent review, trust audit, love equation, is this honest, ship check"
+    description: "Independent adversarial trust auditor — quantifies trust in AI artifacts using tiered checks (deterministic → LLM-assisted → deep reasoning) and three-vote pattern (Builder/TARS/Human)"
+    domain: "Cross-Industry > AI/ML"
+
   hcls-cross-cke-clinical-trials:
     triggers: "ClinicalTrials.gov, trial search, trial design, similar trials, feasibility, eligibility criteria"
     description: "ClinicalTrials.gov research database"

@@ -219,6 +219,7 @@ These skills are available to ALL sub-industries — invoke them whenever they a
 - `$hcls-cross-cke-pubmed` — pubmed biomedical literature search
 - `$hcls-cross-skill-development` — guided workflow to add a new industry skill: scaffold, register, regenerate orchestrator routing
 - `$hcls-cross-aiml-industrymodels` — catalog and manage fine-tuned industry models for health sciences skills
+- `$hcls-cross-tars-trust-auditor` — independent adversarial trust auditor — quantifies trust in ai artifacts using tiered checks (deterministic → llm-assisted → deep reasoning) and three-vote pattern (builder/tars/human)
 - `$hcls-cross-cke-clinical-trials` — clinicaltrials.gov research database
 - `$hcls-cross-platform-multitenancy` — router: multi-tenant data platform — tenancy decisions, rbac, data products, secure sharing, governance, ai governance, cost attribution, bcdr, modernization. industry-agnostic; health sciences optimized.
 

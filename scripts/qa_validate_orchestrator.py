@@ -41,10 +41,30 @@ clinical_docs_sub_skills = {"clinical-docs-agent", "clinical-docs-search", "clin
                             "clinical-document-extraction", "confirm-doc-types", "confirm-environment",
                             "confirm-pipeline-config", "phase-classify", "phase-extract",
                             "phase-parse-and-refresh", "data-model-knowledge"}
+
+# Dynamically detect sub-skills: any SKILL.md in a nested directory under a top-level skill
+# Top-level skill dirs are direct children of BASE that contain a SKILL.md
+top_level_dirs = set()
+for entry in os.listdir(BASE):
+    entry_path = os.path.join(BASE, entry)
+    if os.path.isdir(entry_path) and os.path.exists(os.path.join(entry_path, "SKILL.md")):
+        top_level_dirs.add(entry)
+
+# Collect all sub-skill folder names (nested dirs with SKILL.md under a top-level dir)
+nested_sub_skills = set()
+for tld in top_level_dirs:
+    tld_path = os.path.join(BASE, tld)
+    for sub_entry in os.listdir(tld_path):
+        sub_path = os.path.join(tld_path, sub_entry)
+        if os.path.isdir(sub_path) and os.path.exists(os.path.join(sub_path, "SKILL.md")):
+            nested_sub_skills.add(sub_entry)
+
+# Combine all known sub-skill exclusions
+all_sub_skills = imaging_sub_skills | clinical_docs_sub_skills | nested_sub_skills
+
 top_level_skills = {n: v for n, v in skill_names.items()
-                    if v["folder"] not in imaging_sub_skills
-                    and v["folder"] not in clinical_docs_sub_skills
-                    and n not in clinical_docs_sub_skills}
+                    if v["folder"] not in all_sub_skills
+                    and n not in all_sub_skills}
 
 print("=" * 60)
 print("QA VALIDATION REPORT")
@@ -139,8 +159,16 @@ if os.path.exists(ORCH_PROD):
 
     prod_has_skills = "$hcls-" in prod_content
 
-    if not prod_has_skills:
-        print("  SKIP: Production has no skills yet (empty scaffold) -- drift check deferred")
+    # Also check the production registry — if skills dict is empty, drift is expected
+    prod_registry_path = os.path.join(REPO, "templates/skills_production.yaml")
+    prod_registry_empty = True
+    if os.path.exists(prod_registry_path):
+        with open(prod_registry_path) as pf:
+            prod_reg = yaml.safe_load(pf)
+        prod_registry_empty = not prod_reg.get('skills')
+
+    if not prod_has_skills or prod_registry_empty:
+        print("  SKIP: Production has no graduated skills yet -- drift check deferred")
     else:
         prod_lines = prod_content.splitlines()
         inc_lines = orch_content.splitlines()
@@ -215,7 +243,9 @@ VALID_PLATFORM_SKILLS = {
     "dynamic-tables", "data-governance", "data-quality", "semantic-view",
     "developing-with-streamlit", "deploy-to-spcs", "machine-learning",
     "cortex-ai-functions", "cortex-agent", "search-optimization",
-    "skill-development",
+    "skill-development", "cost-intelligence", "security-investigation",
+    "network-security", "snowpark-python", "warehouse",
+    "workload-performance-analysis", "notification",
 }
 for d in sorted(skill_dir_names):
     skill_md = os.path.join(BASE, d, "SKILL.md")
