@@ -1,0 +1,13 @@
+{
+  "target_database": "CUSTOMER_DERIVED_DB",
+  "target_schema": "PHARMACY_COST_INTELLIGENCE",
+  "warehouse": "CUSTOMER_WH",
+  "target_lag": "1 hour",
+  "insight_format_model": "claude-opus-4-8",
+  "cardinality_profile": {
+    "PHCLM_NDC__FORMULARY": 5
+  },
+  "app_name": "PHARMACY_COST_COMMAND_CENTER",
+  "app_stage": "PHARMACY_COST_COMMAND_CENTER_CODE",
+  "app_role": "CUSTOMER_APP_ROLE"
+}

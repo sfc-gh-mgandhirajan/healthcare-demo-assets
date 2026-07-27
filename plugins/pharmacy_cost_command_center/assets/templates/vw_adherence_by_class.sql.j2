@@ -1,0 +1,15 @@
+-- VW_ADHERENCE_BY_CLASS — panel cPdcClass: adherence (PDC) by therapeutic class vs the 0.80 threshold,
+-- current 12 months. Bounded: reads DENORM_RX_ADHERENCE_DETAIL.
+CREATE OR REPLACE VIEW {{ target('VW_ADHERENCE_BY_CLASS') }} AS
+SELECT
+  THERAPEUTIC_CLASS,
+  ROUND(AVG(PDC), 3)                                                                          AS AVG_PDC,
+  ROUND(100.0 * COUNT(DISTINCT CASE WHEN NOT HAS_GAP THEN MEMBER_ID END)
+        / NULLIF(COUNT(DISTINCT MEMBER_ID),0), 1)                                             AS ADHERENT_PCT,
+  COUNT(DISTINCT MEMBER_ID)                                                                   AS MEASURED_MEMBERS,
+  0.80                                                                                        AS PDC_THRESHOLD
+FROM {{ target('DENORM_RX_ADHERENCE_DETAIL') }}
+GROUP BY THERAPEUTIC_CLASS
+HAVING COUNT(DISTINCT MEMBER_ID) >= 20
+ORDER BY AVG_PDC ASC
+LIMIT 15;

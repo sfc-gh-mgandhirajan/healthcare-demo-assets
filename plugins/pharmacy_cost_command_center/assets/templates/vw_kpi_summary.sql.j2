@@ -1,0 +1,33 @@
+-- VW_KPI_SUMMARY — the four headline KPI tiles (PMPM, trend vs plan, projected next-12, addressable).
+-- Bounded: target() only; reads DENORM_* + MDL_* in the derived DB. One row.
+CREATE OR REPLACE VIEW {{ target('VW_KPI_SUMMARY') }} AS
+WITH cur AS (
+  SELECT SUM(NET_AMOUNT) net FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12'
+),
+pri AS (
+  SELECT SUM(NET_AMOUNT) net FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} WHERE PERIOD_BUCKET='PRIOR_12'
+),
+mm_cur AS (
+  SELECT SUM(MEMBER_MONTH_FRACTION) mm FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12'
+),
+mm_pri AS (
+  SELECT SUM(MEMBER_MONTH_FRACTION) mm FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='PRIOR_12'
+),
+proj AS (
+  SELECT SUM(NET_SPEND) net12, MAX(TARGET_PMPM) target_pmpm
+  FROM {{ target('MDL_PMPM_FORECAST') }} WHERE IS_FORECAST = TRUE
+),
+addr AS (
+  SELECT SUM(ADDRESSABLE_AMOUNT) addressable FROM {{ target('MDL_ADDRESSABLE_BRIDGE') }}
+)
+SELECT
+  ROUND(cur.net / NULLIF(mm_cur.mm,0), 2)                                        AS NET_PMPM_CURRENT,
+  ROUND(pri.net / NULLIF(mm_pri.mm,0), 2)                                        AS NET_PMPM_PRIOR,
+  ROUND(((cur.net / NULLIF(mm_cur.mm,0)) / NULLIF(pri.net / NULLIF(mm_pri.mm,0),0) - 1) * 100, 1) AS PMPM_YOY_PCT,
+  ROUND(proj.target_pmpm, 2)                                                     AS TARGET_PMPM,
+  ROUND((cur.net / NULLIF(mm_cur.mm,0)) - proj.target_pmpm, 2)                    AS PMPM_VS_PLAN,
+  ROUND(proj.net12, 2)                                                           AS PROJECTED_NEXT12_SPEND,
+  ROUND(addr.addressable, 2)                                                     AS ADDRESSABLE_TOTAL,
+  ROUND(cur.net, 2)                                                              AS NET_SPEND_CURRENT_12,
+  ROUND(100.0 * addr.addressable / NULLIF(cur.net,0), 1)                         AS ADDRESSABLE_PCT_OF_SPEND
+FROM cur, pri, mm_cur, mm_pri, proj, addr;

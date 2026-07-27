@@ -1,0 +1,119 @@
+-- SV_PHARMACY_COST_INTELLIGENCE — conversational analytics layer over the derived data product.
+-- BOUNDED template: only the target DB/schema are parameterized (via target()); every object and
+-- column name is fixed by the accelerator's DENORM layer, which already absorbs all customer
+-- physical variability. Four facts (drug spend, member-months, prior auth, adherence) plus two
+-- INLINE conformed dimensions (period bucket, line of business) so the cross-fact PMPM ratio can
+-- slice current-vs-prior and by LOB without a fan trap.
+CREATE OR REPLACE SEMANTIC VIEW {{ target('SV_PHARMACY_COST_INTELLIGENCE') }}
+  TABLES (
+    drug_spend AS {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+      PRIMARY KEY (CLAIM_LINE_KEY)
+      WITH SYNONYMS ('pharmacy claims', 'drug spend', 'rx spend', 'prescription spend')
+      COMMENT = 'Adjudicated drug claim lines (Rx + medical J-code), bucketed current vs prior 12 months',
+    member_month AS {{ target('DENORM_MEMBER_MONTH_DETAIL') }}
+      PRIMARY KEY (MEMBER_MONTH_KEY)
+      WITH SYNONYMS ('enrollment', 'membership', 'member months', 'eligibility')
+      COMMENT = 'Pharmacy-covered member-months; the PMPM denominator',
+    prior_auth AS {{ target('DENORM_PRIOR_AUTH_DETAIL') }}
+      PRIMARY KEY (PA_ID)
+      WITH SYNONYMS ('prior authorizations', 'PA', 'utilization management', 'UM')
+      COMMENT = 'Prior authorization requests and decisions',
+    rx_adherence AS {{ target('DENORM_RX_ADHERENCE_DETAIL') }}
+      PRIMARY KEY (MEMBER_ID, GPI_CODE)
+      WITH SYNONYMS ('adherence', 'PDC', 'medication adherence')
+      COMMENT = 'Member x maintenance-drug adherence (PDC), current 12 months',
+    dim_period AS (
+      SELECT 'CURRENT_12' AS PERIOD_BUCKET, 'Current 12 months' AS PERIOD_LABEL, 1 AS SORT_ORDER
+      UNION ALL SELECT 'PRIOR_12', 'Prior 12 months', 2
+      UNION ALL SELECT 'OTHER', 'Outside comparison window', 3
+    ) PRIMARY KEY (PERIOD_BUCKET)
+      WITH SYNONYMS ('period', 'comparison period', 'current vs prior')
+      COMMENT = 'Conformed period bucket enabling current-vs-prior comparisons across facts',
+    dim_lob AS (
+      SELECT DISTINCT LINE_OF_BUSINESS
+      FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }}
+      WHERE LINE_OF_BUSINESS IS NOT NULL
+    ) PRIMARY KEY (LINE_OF_BUSINESS)
+      WITH SYNONYMS ('line of business', 'LOB', 'book of business')
+      COMMENT = 'Conformed line of business (Commercial, Medicare Advantage, ...)'
+  )
+  RELATIONSHIPS (
+    spend_to_period AS drug_spend (PERIOD_BUCKET) REFERENCES dim_period,
+    spend_to_lob    AS drug_spend (LINE_OF_BUSINESS) REFERENCES dim_lob,
+    mm_to_period    AS member_month (PERIOD_BUCKET) REFERENCES dim_period,
+    mm_to_lob       AS member_month (LINE_OF_BUSINESS) REFERENCES dim_lob,
+    pa_to_period    AS prior_auth (PERIOD_BUCKET) REFERENCES dim_period
+  )
+  DIMENSIONS (
+    drug_spend.benefit_type AS BENEFIT_TYPE
+      WITH SYNONYMS ('benefit', 'channel', 'benefit type')
+      COMMENT = 'TRADITIONAL_RX, SPECIALTY_PHARMACY, or SPECIALTY_MEDICAL',
+    drug_spend.therapeutic_class AS THERAPEUTIC_CLASS
+      WITH SYNONYMS ('drug class', 'therapy class', 'therapeutic category'),
+    drug_spend.drug_name AS DRUG_NAME WITH SYNONYMS ('drug', 'medication'),
+    drug_spend.is_specialty AS IS_SPECIALTY WITH SYNONYMS ('specialty flag', 'is specialty drug'),
+    drug_spend.is_generic AS IS_GENERIC WITH SYNONYMS ('generic flag'),
+    drug_spend.on_formulary_flag AS ON_FORMULARY_FLAG WITH SYNONYMS ('formulary status'),
+    drug_spend.preferred_flag AS PREFERRED_FLAG WITH SYNONYMS ('preferred drug'),
+    drug_spend.formulary_tier AS FORMULARY_TIER WITH SYNONYMS ('tier'),
+    drug_spend.site_of_care_setting AS SITE_OF_CARE_SETTING WITH SYNONYMS ('site of care', 'place of service setting'),
+    drug_spend.service_month AS DATE_TRUNC('month', SERVICE_DATE) WITH SYNONYMS ('fill month', 'service month'),
+    member_month.eligibility_month AS ELIGIBILITY_MONTH WITH SYNONYMS ('coverage month', 'enrollment month'),
+    member_month.funding_arrangement AS FUNDING_ARRANGEMENT WITH SYNONYMS ('funding', 'fully insured vs ASO'),
+    prior_auth.pa_decision AS DECISION WITH SYNONYMS ('PA decision', 'authorization decision'),
+    prior_auth.pa_status AS STATUS WITH SYNONYMS ('PA status'),
+    prior_auth.denial_reason AS DENIAL_REASON WITH SYNONYMS ('reason for denial'),
+    prior_auth.criteria_met AS CRITERIA_MET WITH SYNONYMS ('criteria met flag'),
+    prior_auth.review_type AS REVIEW_TYPE WITH SYNONYMS ('PA review type'),
+    prior_auth.pa_therapeutic_class AS THERAPEUTIC_CLASS WITH SYNONYMS ('PA drug class'),
+    prior_auth.indication AS INDICATION_DESC WITH SYNONYMS ('indication', 'diagnosis indication'),
+    prior_auth.decision_month AS DATE_TRUNC('month', DECISION_DATE) WITH SYNONYMS ('PA decision month'),
+    rx_adherence.adherence_class AS THERAPEUTIC_CLASS WITH SYNONYMS ('adherence drug class'),
+    rx_adherence.is_adherent AS IS_ADHERENT WITH SYNONYMS ('adherent', 'PDC at or above 0.8'),
+    rx_adherence.has_gap AS HAS_GAP WITH SYNONYMS ('adherence gap', 'non-adherent'),
+    dim_period.period_bucket AS PERIOD_BUCKET
+      WITH SYNONYMS ('period', 'comparison period')
+      COMMENT = 'CURRENT_12 vs PRIOR_12 vs OTHER'
+      SAMPLE_VALUES ('CURRENT_12', 'PRIOR_12', 'OTHER') IS_ENUM,
+    dim_period.period_label AS PERIOD_LABEL WITH SYNONYMS ('period name'),
+    dim_lob.line_of_business AS LINE_OF_BUSINESS WITH SYNONYMS ('LOB', 'line of business')
+  )
+  METRICS (
+    drug_spend.total_net_spend AS SUM(NET_AMOUNT)
+      WITH SYNONYMS ('net drug spend', 'net cost', 'net pharmacy spend')
+      COMMENT = 'Net drug spend after rebates',
+    drug_spend.total_gross_spend AS SUM(GROSS_AMOUNT) WITH SYNONYMS ('gross drug spend', 'gross cost'),
+    drug_spend.total_rebate AS SUM(REBATE_AMOUNT) WITH SYNONYMS ('rebates', 'rebate dollars'),
+    drug_spend.total_plan_paid AS SUM(PLAN_PAID_AMOUNT) WITH SYNONYMS ('plan paid'),
+    drug_spend.specialty_net_spend AS SUM(CASE WHEN IS_SPECIALTY THEN NET_AMOUNT ELSE 0 END)
+      WITH SYNONYMS ('specialty spend', 'specialty net spend'),
+    drug_spend.rx_claim_count AS COUNT(CLAIM_LINE_KEY) WITH SYNONYMS ('claim count', 'number of claims'),
+    member_month.total_member_months AS SUM(MEMBER_MONTH_FRACTION)
+      WITH SYNONYMS ('member months', 'PMPM denominator', 'covered months'),
+    member_month.distinct_members AS COUNT(DISTINCT MEMBER_ID)
+      WITH SYNONYMS ('members', 'distinct members', 'enrollment count'),
+    prior_auth.pa_request_count AS COUNT(PA_ID) WITH SYNONYMS ('PA count', 'number of prior auths'),
+    prior_auth.pa_approved_count AS SUM(CASE WHEN DECISION = 'APPROVED' THEN 1 ELSE 0 END) WITH SYNONYMS ('approved PAs'),
+    prior_auth.pa_denied_count AS SUM(CASE WHEN DECISION = 'DENIED' THEN 1 ELSE 0 END) WITH SYNONYMS ('denied PAs'),
+    prior_auth.pa_approval_rate AS DIV0(SUM(CASE WHEN DECISION = 'APPROVED' THEN 1 ELSE 0 END),
+                                        SUM(CASE WHEN DECISION IN ('APPROVED','DENIED') THEN 1 ELSE 0 END))
+      WITH SYNONYMS ('approval rate', 'PA approval rate')
+      COMMENT = 'Approved / (approved + denied); fraction 0-1',
+    rx_adherence.measured_members AS COUNT(DISTINCT MEMBER_ID) WITH SYNONYMS ('members measured for adherence'),
+    rx_adherence.gap_members AS COUNT(DISTINCT CASE WHEN HAS_GAP THEN MEMBER_ID END)
+      WITH SYNONYMS ('non-adherent members', 'members with gaps'),
+    rx_adherence.adherent_rate AS DIV0(COUNT(DISTINCT CASE WHEN NOT HAS_GAP THEN MEMBER_ID END),
+                                       COUNT(DISTINCT MEMBER_ID))
+      WITH SYNONYMS ('adherence rate', 'percent adherent')
+      COMMENT = 'Share of measured members with no adherence gap; fraction 0-1',
+    rx_adherence.avg_pdc AS AVG(PDC) WITH SYNONYMS ('average PDC', 'mean PDC'),
+    net_pmpm AS DIV0(drug_spend.total_net_spend, member_month.total_member_months)
+      WITH SYNONYMS ('PMPM', 'net PMPM', 'per member per month', 'net cost PMPM')
+      COMMENT = 'Net drug spend per member per month (cross-fact ratio)',
+    gross_pmpm AS DIV0(drug_spend.total_gross_spend, member_month.total_member_months)
+      WITH SYNONYMS ('gross PMPM'),
+    rebate_pmpm AS DIV0(drug_spend.total_rebate, member_month.total_member_months)
+      WITH SYNONYMS ('rebate PMPM')
+  )
+  COMMENT = 'Pharmacy Cost Command Center - conversational analytics over drug spend, membership, prior auth, and adherence'
+  AI_SQL_GENERATION 'Rates and ratios (pa_approval_rate, adherent_rate) are fractions between 0 and 1; multiply by 100 and round to 1 decimal when presenting as a percentage. Dollar metrics round to 2 decimals. For current-vs-prior (trend) questions, group or filter by dim_period.period_bucket (CURRENT_12 vs PRIOR_12). PMPM metrics are only meaningful sliced by period or line of business, not by drug-level attributes.';

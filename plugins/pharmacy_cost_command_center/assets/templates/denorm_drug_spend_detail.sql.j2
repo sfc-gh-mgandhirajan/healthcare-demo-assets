@@ -1,0 +1,116 @@
+-- DENORM_DRUG_SPEND_DETAIL — adjudicated drug claim line, union of pharmacy-benefit (Rx)
+-- and (optional) medical-benefit J-code drug lines. Structurally adaptive: arms, joins,
+-- dedup, and rebate style are all gated on what the customer mapped.
+{% set has_ndc = present('NDC_REFERENCE') %}
+{% set has_reb_join = has_rel('PHCLM_NDC__REBATE') %}
+{% set has_reb_col = has_element('DR_REBATE_PCT_WAC') and not has_reb_join %}
+{% set has_formulary = present('FORMULARY_SOURCE') %}
+{% set formulary_dedup = has_formulary and needs_dedup('PHCLM_NDC__FORMULARY') %}
+{% set has_medical = present('MEDICAL_DRUG_LINE') %}
+{% set has_med_header = present('MEDICAL_CLAIM_HEADER') %}
+{% set has_hcpcs = present('HCPCS_REFERENCE') %}
+{% set has_pos = present('POS_REFERENCE') %}
+{%- set gross_rx -%}(COALESCE(p.{{ c('PHCLM_INGREDIENT_COST') }},0) + COALESCE(p.{{ c('PHCLM_DISPENSING_FEE') }},0)){%- endset -%}
+{%- set reb_pct -%}{% if has_reb_join %}COALESCE(reb.{{ c('DR_REBATE_PCT_WAC') }},0){% elif has_reb_col %}COALESCE({{ expr('DR_REBATE_PCT_WAC','p') }},0){% else %}0{% endif %}{%- endset -%}
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+),
+lob AS (
+  SELECT {{ c('MM_MEMBER_ID') }} AS member_id, MAX({{ c('MM_LINE_OF_BUSINESS') }}) AS line_of_business
+  FROM {{ tbl('MM_MEMBER_ID') }} GROUP BY 1
+){% if formulary_dedup %},
+fx AS (   -- dedup: formulary is many-per-NDC (profiled)
+  SELECT {{ c('FD_NDC_CODE') }} AS ndc, BOOLOR_AGG({{ canon('FD_PREFERRED_FLAG','fd') }}) AS preferred_exists
+  FROM {{ tbl('FD_NDC_CODE') }} fd GROUP BY 1
+){% endif %}
+-- ===== Pharmacy-benefit (Rx) lines =====
+SELECT
+  p.{{ c('PHCLM_CLAIM_ID') }}                                   AS CLAIM_LINE_KEY,
+  CASE WHEN {{ canon('PHCLM_SPECIALTY_DRUG_FLAG','p') }} THEN 'SPECIALTY_PHARMACY' ELSE 'TRADITIONAL_RX' END AS BENEFIT_TYPE,
+  p.{{ c('PHCLM_MEMBER_ID') }}                                 AS MEMBER_ID,
+  p.{{ c('PHCLM_FILL_DATE') }}                                 AS SERVICE_DATE,
+  CASE
+    WHEN p.{{ c('PHCLM_FILL_DATE') }} >= DATEADD(month,-12,a.anchor_month) AND p.{{ c('PHCLM_FILL_DATE') }} < a.anchor_month THEN 'CURRENT_12'
+    WHEN p.{{ c('PHCLM_FILL_DATE') }} >= DATEADD(month,-24,a.anchor_month) AND p.{{ c('PHCLM_FILL_DATE') }} < DATEADD(month,-12,a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OTHER' END                                           AS PERIOD_BUCKET,
+  p.{{ c('PHCLM_NDC_CODE') }}                                  AS NDC_CODE,
+  {% if has_ndc %}n.{{ c('RNDC_GPI_CODE') }}{% else %}NULL::TEXT{% endif %}                                   AS GPI_CODE,
+  NULL::TEXT                                                   AS DRUG_HCPCS_CODE,
+  p.{{ c('PHCLM_DRUG_NAME') }}                                 AS DRUG_NAME,
+  {% if has_ndc %}COALESCE(n.{{ c('RNDC_THERAPEUTIC_CLASS_DESC') }}, p.{{ c('PHCLM_THERAPEUTIC_CLASS_CODE') }}){% else %}p.{{ c('PHCLM_THERAPEUTIC_CLASS_CODE') }}{% endif %} AS THERAPEUTIC_CLASS,
+  p.{{ c('PHCLM_THERAPEUTIC_CLASS_CODE') }}                    AS THERAPEUTIC_CLASS_CODE,
+  {{ canon('PHCLM_SPECIALTY_DRUG_FLAG','p') }}                 AS IS_SPECIALTY,
+  ({{ canon('PHCLM_GENERIC_INDICATOR','p') }} = 'GENERIC')     AS IS_GENERIC,
+  p.{{ c('PHCLM_DAYS_SUPPLY') }}                               AS DAYS_SUPPLY,
+  COALESCE(p.{{ c('PHCLM_DAYS_SUPPLY') }},0)/30.0              AS DAYS_SUPPLY_30E,
+  p.{{ c('PHCLM_QUANTITY_DISPENSED') }}                        AS QUANTITY,
+  (p.{{ c('PHCLM_FILL_NUMBER') }} = 0)                         AS IS_NEW_START,
+  {{ gross_rx }} AS GROSS_AMOUNT,
+  p.{{ c('PHCLM_PAID_AMOUNT') }}                               AS PLAN_PAID_AMOUNT,
+  {{ gross_rx }} * {{ reb_pct }}/100.0                         AS REBATE_AMOUNT,
+  {{ gross_rx }} * (1 - {{ reb_pct }}/100.0)                   AS NET_AMOUNT,
+  {{ canon('PHCLM_FORMULARY_STATUS','p') }}                    AS ON_FORMULARY_FLAG,
+  {% if formulary_dedup %}COALESCE(fx.preferred_exists, FALSE){% elif has_formulary %}COALESCE({{ canon('FD_PREFERRED_FLAG','fd') }}, FALSE){% else %}NULL::BOOLEAN{% endif %}                         AS PREFERRED_FLAG,
+  p.{{ c('PHCLM_FORMULARY_TIER') }}                            AS FORMULARY_TIER,
+  NULL::TEXT                                                   AS PLACE_OF_SERVICE_CODE,
+  'PHARMACY'                                                   AS SITE_OF_CARE_SETTING,
+  p.{{ c('PHCLM_PLAN_ID') }}                                   AS PLAN_ID,
+  lob.line_of_business                                         AS LINE_OF_BUSINESS
+FROM {{ tbl('PHCLM_CLAIM_ID') }} p
+CROSS JOIN anchor a
+{% if has_ndc %}LEFT JOIN {{ tbl('RNDC_NDC_CODE') }} n  ON {{ join('PHCLM_NDC__NDCREF','p','n') }}
+{% endif %}{% if has_reb_join %}LEFT JOIN {{ tbl('DR_NDC_CODE') }} reb  ON {{ join('PHCLM_NDC__REBATE','p','reb') }}
+{% endif %}{% if formulary_dedup %}LEFT JOIN fx  ON p.{{ c('PHCLM_NDC_CODE') }} = fx.ndc
+{% elif has_formulary %}LEFT JOIN {{ tbl('FD_NDC_CODE') }} fd  ON {{ join('PHCLM_NDC__FORMULARY','p','fd') }}
+{% endif %}LEFT JOIN lob ON p.{{ c('PHCLM_MEMBER_ID') }} = lob.member_id
+WHERE {{ canon('PHCLM_CLAIM_STATUS','p') }} = 'PAID'
+  AND {{ canon('PHCLM_REVERSAL_FLAG','p') }} = FALSE
+{% if has_medical %}
+UNION ALL
+-- ===== Medical-benefit (buy-and-bill J-code) drug lines =====
+SELECT
+  ml.{{ c('MCL_CLAIM_LINE_ID') }}                              AS CLAIM_LINE_KEY,
+  'SPECIALTY_MEDICAL'                                          AS BENEFIT_TYPE,
+  {% if has_med_header %}mh.{{ c('MCH_MEMBER_ID') }}{% else %}ml.{{ c('MCL_MEMBER_ID') }}{% endif %}                                  AS MEMBER_ID,
+  ml.{{ c('MCL_SERVICE_DATE') }}                               AS SERVICE_DATE,
+  CASE
+    WHEN ml.{{ c('MCL_SERVICE_DATE') }} >= DATEADD(month,-12,a.anchor_month) AND ml.{{ c('MCL_SERVICE_DATE') }} < a.anchor_month THEN 'CURRENT_12'
+    WHEN ml.{{ c('MCL_SERVICE_DATE') }} >= DATEADD(month,-24,a.anchor_month) AND ml.{{ c('MCL_SERVICE_DATE') }} < DATEADD(month,-12,a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OTHER' END                                           AS PERIOD_BUCKET,
+  ml.{{ c('MCL_NDC_CODE') }}                                   AS NDC_CODE,
+  NULL::TEXT                                                   AS GPI_CODE,
+  ml.{{ c('MCL_DRUG_HCPCS_CODE') }}                            AS DRUG_HCPCS_CODE,
+  {% if has_hcpcs %}h.{{ c('RHD_DRUG_NAME') }}{% else %}NULL::TEXT{% endif %}                                   AS DRUG_NAME,
+  {% if has_hcpcs %}h.{{ c('RHD_THERAPEUTIC_CLASS') }}{% else %}NULL::TEXT{% endif %}                           AS THERAPEUTIC_CLASS,
+  NULL::TEXT                                                   AS THERAPEUTIC_CLASS_CODE,
+  {{ canon('MCL_DRUG_SPECIALTY_FLAG','ml') }}                  AS IS_SPECIALTY,
+  NULL::BOOLEAN                                                AS IS_GENERIC,
+  ml.{{ c('MCL_DRUG_DAYS_SUPPLY') }}                           AS DAYS_SUPPLY,
+  COALESCE(ml.{{ c('MCL_DRUG_DAYS_SUPPLY') }},0)/30.0          AS DAYS_SUPPLY_30E,
+  ml.{{ c('MCL_DRUG_QUANTITY') }}                              AS QUANTITY,
+  FALSE                                                        AS IS_NEW_START,
+  ml.{{ c('MCL_PAID_AMOUNT') }}                                AS GROSS_AMOUNT,
+  ml.{{ c('MCL_PAID_AMOUNT') }}                                AS PLAN_PAID_AMOUNT,
+  0                                                            AS REBATE_AMOUNT,
+  ml.{{ c('MCL_PAID_AMOUNT') }}                                AS NET_AMOUNT,
+  NULL::TEXT                                                   AS ON_FORMULARY_FLAG,
+  NULL::BOOLEAN                                                AS PREFERRED_FLAG,
+  NULL::TEXT                                                   AS FORMULARY_TIER,
+  ml.{{ c('MCL_PLACE_OF_SERVICE_CODE') }}                      AS PLACE_OF_SERVICE_CODE,
+  {% if has_pos %}pos.{{ c('RPOS_SETTING_TYPE') }}{% else %}NULL::TEXT{% endif %}                             AS SITE_OF_CARE_SETTING,
+  NULL::TEXT                                                   AS PLAN_ID,
+  lob.line_of_business                                         AS LINE_OF_BUSINESS
+FROM {{ tbl('MCL_CLAIM_LINE_ID') }} ml
+CROSS JOIN anchor a
+{% if has_med_header %}JOIN {{ tbl('MCH_CLAIM_ID') }} mh        ON {{ join('MCL__MCH','ml','mh') }}
+{% endif %}{% if has_hcpcs %}LEFT JOIN {{ tbl('RHD_HCPCS_CODE') }} h  ON {{ join('MCL_HCPCS__HCPCSREF','ml','h') }}
+{% endif %}{% if has_pos %}LEFT JOIN {{ tbl('RPOS_PLACE_OF_SERVICE_CODE') }} pos ON {{ join('MCL_POS__POSREF','ml','pos') }}
+{% endif %}LEFT JOIN lob ON {% if has_med_header %}mh.{{ c('MCH_MEMBER_ID') }}{% else %}ml.{{ c('MCL_MEMBER_ID') }}{% endif %} = lob.member_id
+WHERE ml.{{ c('MCL_DRUG_HCPCS_CODE') }} IS NOT NULL
+  AND {% if has_med_header %}{{ canon('MCH_CLAIM_STATUS','mh') }}{% else %}{{ canon('MCL_CLAIM_STATUS','ml') }}{% endif %} = 'PAID'
+{% endif %}
+;

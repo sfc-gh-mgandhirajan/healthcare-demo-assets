@@ -1,0 +1,45 @@
+-- DENORM_RX_ADHERENCE_DETAIL — member x maintenance drug adherence span -> PDC. Drug-agnostic.
+-- Feeds PDC-by-class + the adherence lever. Measurement window = current 12 months to anchor.
+-- MODELED: PDC uses the standard proportion-of-days-covered proxy (sum of days supply capped at
+-- the window), rolled per member x drug (GPI). Eligibility = maintenance drugs only.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_RX_ADHERENCE_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+),
+fills AS (
+  SELECT
+    p.{{ c('PHCLM_MEMBER_ID') }}            AS member_id,
+    n.{{ c('RNDC_GPI_CODE') }}              AS gpi_code,
+    n.{{ c('RNDC_THERAPEUTIC_CLASS_DESC') }} AS therapeutic_class,
+    p.{{ c('PHCLM_DAYS_SUPPLY') }}          AS days_supply,
+    p.{{ c('PHCLM_FILL_DATE') }}            AS fill_date
+  FROM {{ tbl('PHCLM_CLAIM_ID') }} p
+  JOIN {{ tbl('RNDC_NDC_CODE') }} n ON {{ join('PHCLM_NDC__NDCREF','p','n') }}
+  CROSS JOIN anchor a
+  WHERE {{ canon('PHCLM_CLAIM_STATUS','p') }} = 'PAID'
+    AND {{ canon('PHCLM_REVERSAL_FLAG','p') }} = FALSE
+    AND {{ canon('RNDC_MAINTENANCE_DRUG_FLAG','n') }} = TRUE
+    AND p.{{ c('PHCLM_FILL_DATE') }} >= DATEADD(month,-12,a.anchor_month)
+    AND p.{{ c('PHCLM_FILL_DATE') }} <  a.anchor_month
+)
+SELECT
+  member_id                                              AS MEMBER_ID,
+  gpi_code                                               AS GPI_CODE,
+  MAX(therapeutic_class)                                 AS THERAPEUTIC_CLASS,
+  MIN(fill_date)                                         AS MEASUREMENT_PERIOD_START,
+  (SELECT anchor_month FROM anchor)                      AS MEASUREMENT_PERIOD_END,
+  LEAST(SUM(days_supply), DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor))) AS COVERED_DAYS,
+  GREATEST(DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)), 1)             AS PERIOD_DAYS,
+  ROUND(LEAST(SUM(days_supply), DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)))
+        / GREATEST(DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)), 1), 3) AS PDC,
+  (LEAST(SUM(days_supply), DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)))
+        / GREATEST(DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)), 1)) >= 0.80 AS IS_ADHERENT,
+  (LEAST(SUM(days_supply), DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)))
+        / GREATEST(DATEDIFF('day', MIN(fill_date), (SELECT anchor_month FROM anchor)), 1)) < 0.80 AS HAS_GAP
+FROM fills
+GROUP BY member_id, gpi_code
+HAVING COUNT(*) >= 2   -- PDC is meaningful only with a refill history
+;

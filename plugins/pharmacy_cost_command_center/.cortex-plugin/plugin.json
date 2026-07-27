@@ -1,0 +1,8 @@
+{
+  "name": "pharmacy-cost-command-center",
+  "description": "Deploy the Pharmacy Cost Command Center accelerator on your own Snowflake data. Maps your source to a conformance contract, generates the derived data product from templates, and stands up the app.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Snowflake HCLS Solutions"
+  }
+}

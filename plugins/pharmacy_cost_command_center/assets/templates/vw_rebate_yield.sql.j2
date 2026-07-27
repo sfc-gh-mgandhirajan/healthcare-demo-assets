@@ -1,0 +1,14 @@
+-- VW_REBATE_YIELD — panel cRebate: rebate captured as a % of gross spend, by therapeutic class,
+-- current 12 months. Bounded: reads DENORM_DRUG_SPEND_DETAIL.
+CREATE OR REPLACE VIEW {{ target('VW_REBATE_YIELD') }} AS
+SELECT
+  THERAPEUTIC_CLASS,
+  ROUND(SUM(REBATE_AMOUNT), 2)                                      AS REBATE_AMOUNT,
+  ROUND(SUM(GROSS_AMOUNT), 2)                                       AS GROSS_SPEND,
+  ROUND(100.0 * SUM(REBATE_AMOUNT) / NULLIF(SUM(GROSS_AMOUNT),0), 1) AS REBATE_YIELD_PCT
+FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+WHERE PERIOD_BUCKET = 'CURRENT_12'
+GROUP BY THERAPEUTIC_CLASS
+HAVING SUM(GROSS_AMOUNT) > 0
+ORDER BY GROSS_SPEND DESC
+LIMIT 12;

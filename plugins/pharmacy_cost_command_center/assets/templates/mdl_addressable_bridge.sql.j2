@@ -1,0 +1,99 @@
+-- MDL_ADDRESSABLE_BRIDGE — the executable "how do we bend the trend" bridge. One row per
+-- savings lever, each a DETERMINISTIC pool of current-12-month net spend (or an avoidable-cost
+-- population) multiplied by an accelerator methodology capture rate. NO utilization-management
+-- lever (denied claims aren't paid, so there's no clean recoverable $ — UM is a PA-performance
+-- narrative panel elsewhere). Each lever self-documents its STATUS: 'ACTIVE' when the required
+-- logical objects are mapped, else 'NOT_AVAILABLE' with the reason, so the bridge stays honest
+-- across customers with different data footprints.
+--
+-- Methodology capture rates (accelerator IP, not customer bindings):
+{% set r_formulary   = 0.15 %}   -- 15% net reduction: formulary steer + incremental preferred rebate
+{% set r_site        = 0.18 %}   -- 30% HOPD->home/office net differential x 60% clinically shiftable
+{% set avoidable_pm  = 1250 %}   -- $/yr avoidable downstream medical cost per non-adherent chronic member
+{% set r_adherence   = 0.20 %}   -- realistic adherence-program capture of the avoidable pool (can't close every gap)
+{% set has_pref     = present('FORMULARY_SOURCE') %}
+{% set has_onform   = has_element('PHCLM_FORMULARY_STATUS') %}
+{% set has_formsig  = has_pref or has_onform %}
+{% set has_site     = present('MEDICAL_DRUG_LINE') and present('POS_REFERENCE') %}
+{% set has_adher    = present('NDC_REFERENCE') %}
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_ADDRESSABLE_BRIDGE') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH
+-- ===== Lever 1: Formulary & rebate optimization =====
+lvr_formulary AS (
+  SELECT
+    1 AS lever_order, 'FORMULARY_REBATES' AS lever_key,
+    'Formulary & rebate optimization' AS lever_name,
+{% if has_formsig %}
+    'ACTIVE' AS status,
+    COALESCE(SUM(NET_AMOUNT),0) AS gross_pool,
+    {{ r_formulary }} AS capture_rate,
+    'Current-12mo net spend on non-preferred / off-formulary pharmacy utilization' AS pool_basis
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+  WHERE PERIOD_BUCKET = 'CURRENT_12'
+    AND BENEFIT_TYPE IN ('TRADITIONAL_RX','SPECIALTY_PHARMACY')
+    AND {% if has_pref %}COALESCE(PREFERRED_FLAG, FALSE) = FALSE{% else %}ON_FORMULARY_FLAG = 'OFF_FORMULARY'{% endif %}
+{% else %}
+    'NOT_AVAILABLE' AS status, 0 AS gross_pool, 0 AS capture_rate,
+    'No formulary/preferred signal mapped (FORMULARY_SOURCE or PHCLM_FORMULARY_STATUS)' AS pool_basis
+{% endif %}
+),
+-- ===== Lever 2: Specialty site-of-care steerage =====
+lvr_site AS (
+  SELECT
+    2 AS lever_order, 'SPECIALTY_SITE_OF_CARE' AS lever_key,
+    'Specialty site-of-care steerage' AS lever_name,
+{% if has_site %}
+    'ACTIVE' AS status,
+    COALESCE(SUM(d.NET_AMOUNT),0) AS gross_pool,
+    {{ r_site }} AS capture_rate,
+    'Current-12mo net spend on specialty medical (buy-and-bill) drugs delivered in HIGH-cost sites' AS pool_basis
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} d
+  LEFT JOIN {{ tbl('RPOS_PLACE_OF_SERVICE_CODE') }} pos
+    ON d.PLACE_OF_SERVICE_CODE = pos.{{ c('RPOS_PLACE_OF_SERVICE_CODE') }}
+  WHERE d.PERIOD_BUCKET = 'CURRENT_12'
+    AND d.BENEFIT_TYPE = 'SPECIALTY_MEDICAL'
+    AND pos.{{ c('RPOS_TYPICAL_COST_TIER') }} = 'HIGH'
+{% else %}
+    'NOT_AVAILABLE' AS status, 0 AS gross_pool, 0 AS capture_rate,
+    'Requires MEDICAL_DRUG_LINE + POS_REFERENCE (no medical-benefit drug data mapped)' AS pool_basis
+{% endif %}
+),
+-- ===== Lever 3: Medication adherence =====
+lvr_adherence AS (
+  SELECT
+    3 AS lever_order, 'ADHERENCE' AS lever_key,
+    'Medication adherence' AS lever_name,
+{% if has_adher %}
+    'ACTIVE' AS status,
+    COALESCE(COUNT(DISTINCT MEMBER_ID),0) * {{ avoidable_pm }} AS gross_pool,
+    {{ r_adherence }} AS capture_rate,
+    'Avoidable downstream medical cost ($' || {{ avoidable_pm }} || '/yr) for non-adherent chronic-drug members (PDC < 0.80)' AS pool_basis
+  FROM {{ target('DENORM_RX_ADHERENCE_DETAIL') }}
+  WHERE HAS_GAP = TRUE
+{% else %}
+    'NOT_AVAILABLE' AS status, 0 AS gross_pool, 0 AS capture_rate,
+    'Requires NDC_REFERENCE + maintenance-drug flag for PDC (adherence detail not built)' AS pool_basis
+{% endif %}
+),
+levers AS (
+  SELECT * FROM lvr_formulary
+  UNION ALL SELECT * FROM lvr_site
+  UNION ALL SELECT * FROM lvr_adherence
+)
+SELECT
+  lever_order                                           AS LEVER_ORDER,
+  lever_key                                             AS LEVER_KEY,
+  lever_name                                            AS LEVER_NAME,
+  status                                                AS STATUS,
+  ROUND(gross_pool, 2)                                  AS GROSS_POOL,
+  capture_rate                                          AS CAPTURE_RATE,
+  ROUND(gross_pool * capture_rate, 2)                   AS ADDRESSABLE_AMOUNT,
+  ROUND(100.0 * gross_pool * capture_rate
+        / NULLIF(SUM(gross_pool * capture_rate) OVER (), 0), 1) AS PCT_OF_TOTAL,
+  pool_basis                                            AS RATIONALE
+FROM levers
+ORDER BY ADDRESSABLE_AMOUNT DESC
+;

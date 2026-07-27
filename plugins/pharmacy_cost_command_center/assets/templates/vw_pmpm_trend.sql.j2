@@ -1,0 +1,14 @@
+-- VW_PMPM_TREND — panel cTrend: monthly Net Rx PMPM (actual + base forecast) vs plan/budget line,
+-- with an illustrative high-scenario band on the forecast horizon. Bounded: reads MDL_PMPM_FORECAST.
+CREATE OR REPLACE VIEW {{ target('VW_PMPM_TREND') }} AS
+SELECT
+  MONTH,
+  IS_FORECAST,
+  CASE WHEN IS_FORECAST THEN NULL ELSE PMPM END        AS PMPM_ACTUAL,
+  CASE WHEN IS_FORECAST THEN PMPM ELSE NULL END        AS PMPM_FORECAST_BASE,
+  CASE WHEN IS_FORECAST THEN ROUND(PMPM * 1.03, 2) ELSE NULL END AS PMPM_FORECAST_HIGH,
+  TARGET_PMPM                                          AS PMPM_PLAN,
+  NET_SPEND,
+  TREND_ANNUAL_PCT
+FROM {{ target('MDL_PMPM_FORECAST') }}
+ORDER BY MONTH;
