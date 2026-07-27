@@ -1,0 +1,115 @@
+-- MDL_TAB_INSIGHTS — "AI Powered Insights" for the 4 dashboard tabs (4 rows). FOLDED pipeline:
+--   1) ONE Cortex Agent run (SNOWFLAKE.CORTEX.DATA_AGENT_RUN) that produces DEEPER, cross-cutting
+--      findings for all four bands at once (findings the tab charts do NOT already show);
+--   2) ONE AI_COMPLETE pass (Claude Opus 4.8, schema-enforced response_format) that restructures the
+--      agent's prose into per-tab JSON the app consumes programmatically (markdown bullets + tags);
+--   3) flatten that JSON into 4 rows.
+-- Bounded template: only target DB/schema, warehouse, and the format model are parameterized; the
+-- agent, band prompts, and personas are fixed accelerator content.
+-- Notes: DATA_AGENT_RUN needs a CONSTANT request body (inline literal). The format model is
+-- claude-opus-4-8, which supports Cortex structured outputs (response_format), so the per-tab JSON
+-- shape is schema-guaranteed. Refresh = a SUSPENDED daily task; this is a task-refreshed TABLE
+-- (agent runs are live/non-deterministic, not a dynamic table).
+{% set fmt_model = cfg.get('insight_format_model', 'claude-opus-4-8') %}
+CREATE OR REPLACE TABLE {{ target('MDL_TAB_INSIGHTS') }} (
+  TAB_ORDER      NUMBER,
+  TAB_KEY        VARCHAR,
+  TAB_TITLE      VARCHAR,
+  AGENT_PERSONA  VARCHAR,
+  INSIGHT_MD     VARCHAR,
+  TAGS           ARRAY,
+  RUN_ID         VARCHAR,
+  GENERATED_AT   TIMESTAMP_NTZ
+);
+
+CREATE OR REPLACE PROCEDURE {{ target('SP_REFRESH_TAB_INSIGHTS') }}()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+  INSERT OVERWRITE INTO {{ target('MDL_TAB_INSIGHTS') }}
+  WITH agent AS (
+    SELECT TRY_PARSE_JSON(
+      SNOWFLAKE.CORTEX.DATA_AGENT_RUN(
+        '{{ target('AGT_PHARMACY_COST_COMMAND_CENTER') }}',
+        '{"messages":[{"role":"user","content":[{"type":"text","text":"You are generating the AI Powered Insights shown on a four-tab pharmacy cost dashboard. For EACH of the four sections below give at most 3 DEEPER, non-obvious findings that the section charts do NOT already show, by reasoning across the whole model (spend, membership, rebates, prior auth, adherence, coverage policies). Each finding must be grounded in real numbers and end with a short so-what. Do not describe the charts. Label each section exactly as BAND A, BAND B, BAND C, BAND D. BAND A - Spend Performance and Outlook (charts already show net Rx PMPM trend and the price/volume/mix split): which classes or drugs concentrate the utilization surge, whether one line of business drives PMPM, and any cross-cutting correlation. BAND B - Cost Drivers and Composition (charts already show specialty vs traditional vs medical split, top classes, top trend contributors): how much buy-and-bill medical spend sits in high-cost sites, which high-growth classes have weak rebate yield, and overlaps with poor adherence or PA denials. BAND C - Addressable Savings Opportunity (charts already show the savings bridge by lever and waste concentration): which lever has the best dollar-per-effort and is actionable now, whether levers overlap on the same drugs, and how concentrated the opportunity is. BAND D - Cost Management Levers (charts already show rebate yield, off-formulary leakage, PA outcomes, PDC by class): classes that are both high-spend and low-adherence, off-formulary drugs with preferred alternatives and volume, and whether PA patterns suggest UM leakage - cite the coverage policy where relevant."}]}]}',
+        TRUE
+      )
+    ) AS resp
+  ),
+  agent_text AS (
+    SELECT
+      LISTAGG(CASE WHEN c.value:"type"::string = 'text' THEN c.value:"text"::string END, '\n')
+        WITHIN GROUP (ORDER BY c.index)                                         AS analysis,
+      ANY_VALUE(a.resp:"metadata":"run_id"::string)                             AS run_id
+    FROM agent a, LATERAL FLATTEN(input => a.resp:"content") c
+  ),
+  structured AS (
+    SELECT
+      run_id,
+      TRY_PARSE_JSON(
+        AI_COMPLETE(
+          '{{ fmt_model }}',
+          'You are formatting a pharmacy analyst''s findings for a four-tab dashboard. The analysis is organized into BAND A/B/C/D sections. Emit one tabs entry per band, tab_key in bandA, bandB, bandC, bandD matching BAND A..D respectively. insight_md = that band''s 2-3 findings rewritten as concise GitHub-flavored markdown bullets, bolding the key numbers, preserving every real figure exactly and inventing nothing, with no headings or preamble. tags = subset of SQL (band used quantitative data) and POLICY (band referenced a coverage policy). Analysis:\n\n'
+          || analysis,
+          object_construct('temperature', 0),
+          object_construct(
+            'type', 'json',
+            'schema', object_construct(
+              'type', 'object',
+              'properties', object_construct(
+                'tabs', object_construct(
+                  'type', 'array',
+                  'items', object_construct(
+                    'type', 'object',
+                    'properties', object_construct(
+                      'tab_key',    object_construct('type', 'string', 'enum', array_construct('bandA','bandB','bandC','bandD')),
+                      'insight_md', object_construct('type', 'string'),
+                      'tags',       object_construct('type', 'array', 'items', object_construct('type', 'string', 'enum', array_construct('SQL','POLICY')))
+                    ),
+                    'required', array_construct('tab_key','insight_md','tags')
+                  )
+                )
+              ),
+              'required', array_construct('tabs')
+            )
+          )
+        )::string
+      ) AS js
+    FROM agent_text
+  )
+  SELECT
+    CASE t.value:"tab_key"::string
+      WHEN 'bandA' THEN 1 WHEN 'bandB' THEN 2 WHEN 'bandC' THEN 3 WHEN 'bandD' THEN 4 END AS tab_order,
+    t.value:"tab_key"::string                                                   AS tab_key,
+    CASE t.value:"tab_key"::string
+      WHEN 'bandA' THEN 'Spend Performance & Outlook'
+      WHEN 'bandB' THEN 'Cost Drivers & Composition'
+      WHEN 'bandC' THEN 'Addressable Savings Opportunity'
+      WHEN 'bandD' THEN 'Cost Management Levers' END                            AS tab_title,
+    'Cost Intelligence Agent · ' || CASE t.value:"tab_key"::string
+      WHEN 'bandA' THEN 'Spend Performance & Outlook'
+      WHEN 'bandB' THEN 'Cost Drivers & Composition'
+      WHEN 'bandC' THEN 'Addressable Savings Opportunity'
+      WHEN 'bandD' THEN 'Cost Management Levers' END                            AS agent_persona,
+    t.value:"insight_md"::string                                                AS insight_md,
+    t.value:"tags"                                                              AS tags,
+    s.run_id                                                                    AS run_id,
+    CURRENT_TIMESTAMP()                                                         AS generated_at
+  FROM structured s, LATERAL FLATTEN(input => s.js:"tabs") t;
+
+  RETURN 'MDL_TAB_INSIGHTS refreshed (' || (SELECT COUNT(*) FROM {{ target('MDL_TAB_INSIGHTS') }}) || ' rows)';
+END;
+$$;
+
+-- Populate once at build time (1 agent run + 1 AI_COMPLETE).
+CALL {{ target('SP_REFRESH_TAB_INSIGHTS') }}();
+
+-- Daily refresh task. Created SUSPENDED by default; resume with ALTER TASK ... RESUME to activate.
+CREATE OR REPLACE TASK {{ target('TASK_REFRESH_TAB_INSIGHTS') }}
+  WAREHOUSE = {{ warehouse }}
+  SCHEDULE = 'USING CRON 0 6 * * * America/New_York'
+  COMMENT = 'Daily rebuild of AI Powered Insights (4 tab rows): agent findings + Claude Opus 4.8 structured formatting'
+AS
+  CALL {{ target('SP_REFRESH_TAB_INSIGHTS') }}();

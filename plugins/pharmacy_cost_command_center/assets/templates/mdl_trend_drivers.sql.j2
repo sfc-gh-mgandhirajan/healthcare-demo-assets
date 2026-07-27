@@ -1,0 +1,85 @@
+-- MDL_TREND_DRIVERS — Laspeyres Price/Volume/Mix decomposition of YoY net drug spend by
+-- therapeutic class. Consumes DENORM_DRUG_SPEND_DETAIL (current vs prior 12mo). The PRICE
+-- component is sourced from drug price history (WAC % change vs prior) and is GATED on the
+-- customer mapping the PRICE_HISTORY logical object; when absent, price + mix collapse into
+-- a single PRICE_AND_MIX residual so the bridge still balances (TOTAL = VOLUME + residual).
+--
+-- Decomposition (per class, units = 30-day equivalents):
+--   total_change  = net_curr - net_prior
+--   volume_effect = (units_curr - units_prior) * (net_prior / units_prior)     [prior-priced]
+--   price_effect  = net_prior * wtd_wac_pct_change                             [PRICE_HISTORY]
+--   mix_effect    = total_change - volume_effect - price_effect                [residual]
+{% set has_price = present('PRICE_HISTORY') %}
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_TREND_DRIVERS') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH class_agg AS (
+  SELECT
+    COALESCE(THERAPEUTIC_CLASS, 'UNCLASSIFIED')                                   AS therapeutic_class,
+    SUM(CASE WHEN PERIOD_BUCKET = 'PRIOR_12'   THEN NET_AMOUNT ELSE 0 END)        AS net_prior,
+    SUM(CASE WHEN PERIOD_BUCKET = 'CURRENT_12' THEN NET_AMOUNT ELSE 0 END)        AS net_curr,
+    SUM(CASE WHEN PERIOD_BUCKET = 'PRIOR_12'   THEN COALESCE(DAYS_SUPPLY_30E,0) ELSE 0 END) AS units_prior,
+    SUM(CASE WHEN PERIOD_BUCKET = 'CURRENT_12' THEN COALESCE(DAYS_SUPPLY_30E,0) ELSE 0 END) AS units_curr
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+  WHERE PERIOD_BUCKET IN ('PRIOR_12','CURRENT_12')
+  GROUP BY 1
+){% if has_price %},
+wac_change AS (   -- latest WAC % change per NDC (list-price trend reference)
+  SELECT ndc, pct_change FROM (
+    SELECT
+      {{ c('RDPH_NDC_CODE') }}            AS ndc,
+      {{ c('RDPH_PCT_CHANGE_VS_PRIOR') }} AS pct_change,
+      ROW_NUMBER() OVER (PARTITION BY {{ c('RDPH_NDC_CODE') }}
+                         ORDER BY {{ c('RDPH_EFFECTIVE_DATE') }} DESC) AS rn
+    FROM {{ tbl('RDPH_NDC_CODE') }}
+    WHERE {{ c('RDPH_PRICE_TYPE') }} = 'WAC'
+  ) WHERE rn = 1
+),
+class_price AS (  -- prior-spend-weighted average WAC % change per class (as a fraction)
+  SELECT
+    COALESCE(d.THERAPEUTIC_CLASS, 'UNCLASSIFIED')                                 AS therapeutic_class,
+    SUM(d.NET_AMOUNT * COALESCE(w.pct_change,0)/100.0)
+      / NULLIF(SUM(d.NET_AMOUNT), 0)                                             AS wtd_price_pct
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} d
+  LEFT JOIN wac_change w ON d.NDC_CODE = w.ndc
+  WHERE d.PERIOD_BUCKET = 'PRIOR_12'
+  GROUP BY 1
+){% endif %}
+SELECT
+  a.therapeutic_class                                                            AS THERAPEUTIC_CLASS,
+  a.net_prior                                                                    AS NET_SPEND_PRIOR,
+  a.net_curr                                                                     AS NET_SPEND_CURRENT,
+  (a.net_curr - a.net_prior)                                                     AS TOTAL_CHANGE,
+  ROUND((a.net_curr - a.net_prior) / NULLIF(a.net_prior,0) * 100, 1)             AS PCT_CHANGE,
+  a.units_prior                                                                  AS UNITS_PRIOR_30E,
+  a.units_curr                                                                   AS UNITS_CURRENT_30E,
+  -- Volume: utilization change priced at prior-period avg unit cost. Emerging classes with
+  -- no prior volume are entirely new utilization -> the full change is attributed to volume
+  -- (keeps VOLUME+PRICE+MIX = TOTAL_CHANGE for every row, so the decomposition always balances).
+  ROUND(CASE WHEN a.units_prior > 0
+             THEN (a.units_curr - a.units_prior) * (a.net_prior / a.units_prior)
+             ELSE (a.net_curr - a.net_prior) END, 2)                             AS VOLUME_EFFECT,
+{% if has_price %}
+  -- Price: prior net spend * class-weighted WAC % change (0 for emerging classes)
+  ROUND(CASE WHEN a.units_prior > 0 THEN a.net_prior * COALESCE(p.wtd_price_pct,0) ELSE 0 END, 2) AS PRICE_EFFECT,
+  -- Mix: residual (new/lost drugs, brand-generic shift, intra-class substitution)
+  ROUND(CASE WHEN a.units_prior > 0
+             THEN (a.net_curr - a.net_prior)
+                  - (a.units_curr - a.units_prior) * (a.net_prior / a.units_prior)
+                  - a.net_prior * COALESCE(p.wtd_price_pct,0)
+             ELSE 0 END, 2)                                                     AS MIX_EFFECT,
+  NULL::FLOAT                                                                    AS PRICE_AND_MIX_EFFECT,
+{% else %}
+  -- PRICE_HISTORY not mapped: price and mix are not separable -> single residual
+  NULL::FLOAT                                                                    AS PRICE_EFFECT,
+  NULL::FLOAT                                                                    AS MIX_EFFECT,
+  ROUND(CASE WHEN a.units_prior > 0
+             THEN (a.net_curr - a.net_prior) - (a.units_curr - a.units_prior) * (a.net_prior / a.units_prior)
+             ELSE 0 END, 2)                                                     AS PRICE_AND_MIX_EFFECT,
+{% endif %}
+  ROW_NUMBER() OVER (ORDER BY ABS(a.net_curr - a.net_prior) DESC)                AS DRIVER_RANK
+FROM class_agg a
+{% if has_price %}LEFT JOIN class_price p ON a.therapeutic_class = p.therapeutic_class{% endif %}
+WHERE a.net_prior > 0 OR a.net_curr > 0
+;

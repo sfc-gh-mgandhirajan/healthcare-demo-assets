@@ -1,0 +1,20 @@
+-- VW_TREND_PVM — panel cMix: decomposition of the YoY trend into Price / Volume / Mix (one row per
+-- component + share of total change). Bounded: reads MDL_TREND_DRIVERS. Uses UNPIVOT to rotate the
+-- three effect totals into rows (idiomatic Snowflake; TOTAL_CHANGE rides through as a passthrough).
+CREATE OR REPLACE VIEW {{ target('VW_TREND_PVM') }} AS
+WITH agg AS (
+  SELECT SUM(VOLUME_EFFECT) AS volume, SUM(PRICE_EFFECT) AS price, SUM(MIX_EFFECT) AS mix,
+         SUM(TOTAL_CHANGE) AS tot
+  FROM {{ target('MDL_TREND_DRIVERS') }}
+),
+unp AS (
+  SELECT COMPONENT AS comp_raw, AMOUNT, tot
+  FROM agg UNPIVOT (AMOUNT FOR COMPONENT IN (volume, price, mix))
+)
+SELECT
+  INITCAP(comp_raw)                          AS COMPONENT,
+  ROUND(AMOUNT, 2)                           AS AMOUNT,
+  ROUND(100.0 * AMOUNT / NULLIF(tot, 0), 1)  AS PCT_OF_TREND,
+  ROUND(tot, 2)                              AS TOTAL_CHANGE
+FROM unp
+ORDER BY CASE comp_raw WHEN 'VOLUME' THEN 1 WHEN 'PRICE' THEN 2 ELSE 3 END;

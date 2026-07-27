@@ -1,0 +1,36 @@
+-- AGT_PHARMACY_COST_COMMAND_CENTER — conversational agent for the accelerator. BOUNDED template:
+-- only target DB/schema (+ config warehouse) are parameterized via target()/warehouse; the spec,
+-- tool names, and instructions are fixed. Tools: Cortex Analyst over the semantic view, Cortex
+-- Search over parsed coverage policies (citation), and data-to-chart for visuals. Reads only
+-- accelerator-owned derived objects (SV_* + CSS_COVERAGE_POLICY).
+CREATE OR REPLACE AGENT {{ target('AGT_PHARMACY_COST_COMMAND_CENTER') }}
+WITH PROFILE = '{"display_name": "Pharmacy Cost Command Center"}'
+FROM SPECIFICATION $$
+{
+  "models": { "orchestration": "auto" },
+  "orchestration": { "budget": { "seconds": 900, "tokens": 400000 } },
+  "instructions": {
+    "orchestration": "You are the Pharmacy Cost Command Center analyst for a health plan. Use the query_pharmacy_cost tool (Cortex Analyst over the semantic view) for any quantitative question about drug spend, net/gross cost, PMPM, rebates, membership/member-months, prior-authorization outcomes, or medication adherence (PDC). Use the search_coverage_policies tool to answer WHY a drug is or isn't covered, or to cite coverage-policy criteria, step-therapy, or specialty site-of-care rules; always ground policy statements in retrieved passages and cite the source file. For trend or current-vs-prior questions, group or filter by period_bucket (CURRENT_12 vs PRIOR_12). PMPM is only meaningful sliced by period or line of business, never by drug-level attributes. When a question mixes 'how much' and 'why', call query_pharmacy_cost first for the numbers, then search_coverage_policies for the policy rationale. Use create_chart to visualize trends, breakdowns, and the addressable bridge when it aids the answer.",
+    "response": "Answer as a concise pharmacy-benefit analyst speaking to a Head of Pharmacy or CFO. Lead with the number and the takeaway. Format dollars as $ with thousands separators (or $M for large aggregates), rates and shares as percentages to one decimal, and PMPM as $NNN.NN. When citing a coverage policy, name the source document. Do not fabricate figures the tools did not return; if a metric is out of scope, say so and suggest the closest available cut."
+  },
+  "tools": [
+    { "tool_spec": { "type": "cortex_analyst_text_to_sql", "name": "query_pharmacy_cost",
+        "description": "Query pharmacy cost analytics via natural language: net/gross drug spend, PMPM (net/gross/rebate), rebates, specialty vs traditional vs medical-benefit spend, spend and trend by therapeutic class, prior-authorization approval/denial outcomes, and medication adherence (PDC, adherent rate, gap members). Supports current-vs-prior (period_bucket) and by line of business." } },
+    { "tool_spec": { "type": "cortex_search", "name": "search_coverage_policies",
+        "description": "Search the plan's coverage-policy documents (GLP-1, specialty site-of-care, biosimilar, formulary step-therapy) to explain coverage criteria, prior-auth requirements, and step-therapy rules, and to cite the governing policy text." } },
+    { "tool_spec": { "type": "data_to_chart", "name": "create_chart" } }
+  ],
+  "tool_resources": {
+    "query_pharmacy_cost": {
+      "execution_environment": { "type": "warehouse", "warehouse": "{{ warehouse }}", "query_timeout": 299 },
+      "semantic_view": "{{ target('SV_PHARMACY_COST_INTELLIGENCE') }}"
+    },
+    "search_coverage_policies": {
+      "execution_environment": { "type": "warehouse", "warehouse": "{{ warehouse }}", "query_timeout": 299 },
+      "search_service": "{{ target('CSS_COVERAGE_POLICY') }}",
+      "title_column": "FILE_NAME",
+      "id_column": "DOC_RELATIVE_PATH"
+    }
+  }
+}
+$$;

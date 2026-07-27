@@ -1,0 +1,68 @@
+{
+  "_comment": "Canonical join graph the Pharmacy Cost accelerator reasons over. Accelerator-owned and TARGET-AGNOSTIC: endpoints are logical OBJECTS and logical ELEMENT ids (LOGICAL_ID from logical_elements.json), never physical customer tables/columns. Phase-1 discovery instantiates each into a physical row in ACCELERATOR_CORE_RELATIONSHIPS (LEFT_OBJECT/LEFT_COLUMN/RIGHT_OBJECT/RIGHT_COLUMN/JOIN_CONDITION) for the customer's schema. REQUIRED is set MINIMALLY: only joins whose BOTH endpoints are required objects and that a required arm needs. All others stay REQUIRED=false and are present()-gated in the templates (graceful degradation). CARDINALITY hints whether the renderer must de-dup (MANY_TO_MANY / >1 rows-per-key => dedup); the profiled cardinality_profile in config.json overrides it.",
+  "relationships": [
+    {
+      "RELATIONSHIP_ID": "PHCLM_NDC__NDCREF",
+      "LEFT_OBJECT": "RX_DRUG_CLAIM", "LEFT_ELEMENT": "PHCLM_NDC_CODE",
+      "RIGHT_OBJECT": "NDC_REFERENCE", "RIGHT_ELEMENT": "RNDC_NDC_CODE",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": true,
+      "PURPOSE": "Enrich each Rx claim line to therapeutic class / GPI / specialty / generic / maintenance. Both endpoints are required objects."
+    },
+    {
+      "RELATIONSHIP_ID": "PHCLM_NDC__REBATE",
+      "LEFT_OBJECT": "RX_DRUG_CLAIM", "LEFT_ELEMENT": "PHCLM_NDC_CODE",
+      "RIGHT_OBJECT": "REBATE_SOURCE", "RIGHT_ELEMENT": "DR_NDC_CODE",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Net-of-rebate spend and rebate yield by class. Absent => net = gross. May instead be a rebate-% column on the claim (element on RX_DRUG_CLAIM, no join)."
+    },
+    {
+      "RELATIONSHIP_ID": "PHCLM_NDC__FORMULARY",
+      "LEFT_OBJECT": "RX_DRUG_CLAIM", "LEFT_ELEMENT": "PHCLM_NDC_CODE",
+      "RIGHT_OBJECT": "FORMULARY_SOURCE", "RIGHT_ELEMENT": "FD_NDC_CODE",
+      "CARDINALITY": "MANY_TO_MANY", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "On/off-formulary leakage, preferred alternative, tier. Formulary often has many rows per NDC => de-dup (see cardinality_profile.PHCLM_NDC__FORMULARY)."
+    },
+    {
+      "RELATIONSHIP_ID": "PHCLM_NDC__PRICEHIST",
+      "LEFT_OBJECT": "RX_DRUG_CLAIM", "LEFT_ELEMENT": "PHCLM_NDC_CODE",
+      "RIGHT_OBJECT": "PRICE_HISTORY", "RIGHT_ELEMENT": "RDPH_NDC_CODE",
+      "CARDINALITY": "MANY_TO_MANY", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Price component of the PVM trend decomposition (MDL_TREND_DRIVERS). Price history is NDC x effective-date; the consuming template selects the applicable period. Absent => PVM collapses to volume+mix."
+    },
+    {
+      "RELATIONSHIP_ID": "MCL__MCH",
+      "LEFT_OBJECT": "MEDICAL_DRUG_LINE", "LEFT_ELEMENT": "MCL_CLAIM_ID",
+      "RIGHT_OBJECT": "MEDICAL_CLAIM_HEADER", "RIGHT_ELEMENT": "MCH_CLAIM_ID",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Attach member / status / service dates to medical (buy-and-bill) drug lines. Absent => those fields must live on MEDICAL_DRUG_LINE and this join is dropped."
+    },
+    {
+      "RELATIONSHIP_ID": "MCL_HCPCS__HCPCSREF",
+      "LEFT_OBJECT": "MEDICAL_DRUG_LINE", "LEFT_ELEMENT": "MCL_DRUG_HCPCS_CODE",
+      "RIGHT_OBJECT": "HCPCS_REFERENCE", "RIGHT_ELEMENT": "RHD_HCPCS_CODE",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Medical drug name / class / ASP / specialty for J-code lines. Required only when MEDICAL_DRUG_LINE is present."
+    },
+    {
+      "RELATIONSHIP_ID": "MCL_POS__POSREF",
+      "LEFT_OBJECT": "MEDICAL_DRUG_LINE", "LEFT_ELEMENT": "MCL_PLACE_OF_SERVICE_CODE",
+      "RIGHT_OBJECT": "POS_REFERENCE", "RIGHT_ELEMENT": "RPOS_PLACE_OF_SERVICE_CODE",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Site-of-care setting / cost tier for specialty-medical. POS may alternatively be on the medical header (MCH_PLACE_OF_SERVICE_CODE)."
+    },
+    {
+      "RELATIONSHIP_ID": "MM_MBR__ENR",
+      "LEFT_OBJECT": "MEMBER_MONTH", "LEFT_ELEMENT": "MM_MEMBER_ID",
+      "RIGHT_OBJECT": "MEMBER_ENROLLMENT", "RIGHT_ELEMENT": "ENR_MEMBER_ID",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Enrich member-months with funding arrangement / risk score. Absent => those enrichments are omitted."
+    },
+    {
+      "RELATIONSHIP_ID": "MM_LOB__PTA",
+      "LEFT_OBJECT": "MEMBER_MONTH", "LEFT_ELEMENT": "MM_LINE_OF_BUSINESS",
+      "RIGHT_OBJECT": "PLAN_TREND", "RIGHT_ELEMENT": "PTA_LINE_OF_BUSINESS",
+      "CARDINALITY": "MANY_TO_ONE", "REL_KIND": "equi", "REQUIRED": false,
+      "PURPOSE": "Trend-vs-plan KPI and forecast baseline by line of business. Absent => plan/budget comparisons omitted."
+    }
+  ]
+}

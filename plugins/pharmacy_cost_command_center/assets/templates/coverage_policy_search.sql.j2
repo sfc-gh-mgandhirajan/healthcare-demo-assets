@@ -1,0 +1,20 @@
+-- Cortex Search over the parsed coverage policies (agent citation tool).
+-- Consumes the target COVERAGE_POLICY table; target refs + warehouse resolved by the renderer.
+CREATE OR REPLACE TABLE {{ target('COVERAGE_POLICY_CHUNKS') }} AS
+SELECT
+  FILE_NAME,
+  DOC_RELATIVE_PATH,
+  c.INDEX::INT              AS CHUNK_INDEX,
+  c.VALUE::STRING           AS CHUNK_TEXT
+FROM {{ target('COVERAGE_POLICY') }},
+     LATERAL FLATTEN(input => SNOWFLAKE.CORTEX.SPLIT_TEXT_RECURSIVE_CHARACTER(PARSED_TEXT, 'markdown', 800, 100)) c
+WHERE PARSED_TEXT IS NOT NULL;
+
+CREATE OR REPLACE CORTEX SEARCH SERVICE {{ target('CSS_COVERAGE_POLICY') }}
+  ON CHUNK_TEXT
+  ATTRIBUTES FILE_NAME, DOC_RELATIVE_PATH
+  WAREHOUSE = {{ warehouse }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  AS
+    SELECT CHUNK_TEXT, FILE_NAME, DOC_RELATIVE_PATH
+    FROM {{ target('COVERAGE_POLICY_CHUNKS') }};

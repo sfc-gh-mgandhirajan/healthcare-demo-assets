@@ -1,0 +1,31 @@
+-- GRANT_APP_ACCESS — least-privilege read grants so the deployed app can read the
+-- derived data product. Bounded template: only target()/cfg.
+-- The app queries with owner's rights: the SPCS service user runs as the role that
+-- OWNS the Application Service object (the role that ran `snow app deploy`). So {{ '{{ app_role }}' }}
+-- must be that app-OWNER role (derive it via SHOW APPLICATION SERVICES -> owner;
+-- see the app-deploy skill). The dashboard data routes use owner's rights only (no
+-- caller's rights), so owner-role grants are sufficient.
+-- Rendered by render.py --only GRANT_APP_ACCESS; run AFTER `snow app deploy`.
+-- Idempotent. No-op when the app-owner role already owns the objects.
+{% set role = cfg.get('app_role') %}
+{% set views = [
+  'VW_KPI_SUMMARY', 'VW_PMPM_TREND', 'VW_TREND_PVM', 'VW_SPEND_BY_BENEFIT',
+  'VW_HIGH_COST_CLASSES', 'VW_TREND_CONTRIBUTORS', 'VW_ADDRESSABLE_BRIDGE',
+  'VW_WASTE_CONCENTRATION', 'VW_REBATE_YIELD', 'VW_FORMULARY_LEAKAGE',
+  'VW_PA_OUTCOMES', 'VW_ADHERENCE_BY_CLASS'
+] %}
+-- Container access
+GRANT USAGE ON DATABASE {{ cfg.get('target_database') }} TO ROLE {{ role }};
+GRANT USAGE ON SCHEMA {{ cfg.get('target_database') }}.{{ cfg.get('target_schema') }} TO ROLE {{ role }};
+
+-- Presentation views (dashboard panels + KPI ribbon)
+{% for v in views %}
+GRANT SELECT ON VIEW {{ target(v) }} TO ROLE {{ role }};
+{% endfor %}
+-- Pre-baked AI Powered Insights (one row per tab)
+GRANT SELECT ON TABLE {{ target('MDL_TAB_INSIGHTS') }} TO ROLE {{ role }};
+
+-- Agent + its linked objects (powers the "Ask the agent" drawer via the Agent Run REST API)
+GRANT USAGE ON AGENT {{ target('AGT_PHARMACY_COST_COMMAND_CENTER') }} TO ROLE {{ role }};
+GRANT SELECT, REFERENCES ON SEMANTIC VIEW {{ target('SV_PHARMACY_COST_INTELLIGENCE') }} TO ROLE {{ role }};
+GRANT USAGE ON CORTEX SEARCH SERVICE {{ target('CSS_COVERAGE_POLICY') }} TO ROLE {{ role }};

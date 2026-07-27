@@ -1,0 +1,238 @@
+version: 1
+# Build manifest for the Pharmacy Cost Command Center derived data product.
+# Each object binds a template (accelerator-owned) to the customer's approved
+# conformance tables. Rendered by assets/renderer/render.py, deployed in
+# depends_on order by the derived-build skill.
+#
+# object_type: dynamic_table | table | view | semantic_view | cortex_search | agent
+# consumes:    canonical element / relationship IDs the template resolves (documentation + readiness)
+# readiness:   contract IDs that must be APPROVED before this object can build
+
+objects:
+  - object_name: DENORM_MEMBER_MONTH_DETAIL
+    object_type: dynamic_table
+    template: denorm_member_month_detail.sql.j2
+    grain: "member x eligibility month (PMPM denominator)"
+    depends_on: []
+    consumes:
+      elements: [MM_MEMBER_ID, MM_ELIGIBILITY_MONTH, MM_MEMBER_MONTH_FRACTION,
+                 MM_PHARMACY_COVERAGE_FLAG, MM_LINE_OF_BUSINESS, MM_PLAN_ID,
+                 ENR_MEMBER_ID, ENR_FUNDING_ARRANGEMENT, ENR_RISK_SCORE, DEMO_ANCHOR_MONTH]
+      relationships: [MM_MBR__ENR]
+    readiness: [MM_MEMBER_ID, MM_ELIGIBILITY_MONTH, MM_MEMBER_MONTH_FRACTION,
+                MM_PHARMACY_COVERAGE_FLAG, MM_LINE_OF_BUSINESS, DEMO_ANCHOR_MONTH]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_DRUG_SPEND_DETAIL
+    object_type: dynamic_table
+    template: denorm_drug_spend_detail.sql.j2
+    grain: "adjudicated drug claim line (Rx + medical J-code union)"
+    depends_on: []
+    consumes:
+      elements: [PHCLM_CLAIM_ID, PHCLM_MEMBER_ID, PHCLM_NDC_CODE, PHCLM_FILL_DATE, PHCLM_FILL_NUMBER,
+                 PHCLM_INGREDIENT_COST, PHCLM_DISPENSING_FEE, PHCLM_PAID_AMOUNT, PHCLM_DAYS_SUPPLY,
+                 PHCLM_QUANTITY_DISPENSED, PHCLM_GENERIC_INDICATOR, PHCLM_SPECIALTY_DRUG_FLAG,
+                 PHCLM_CLAIM_STATUS, PHCLM_REVERSAL_FLAG, PHCLM_DRUG_NAME, PHCLM_THERAPEUTIC_CLASS_CODE,
+                 PHCLM_FORMULARY_STATUS, PHCLM_FORMULARY_TIER, PHCLM_PLAN_ID,
+                 RNDC_NDC_CODE, RNDC_GPI_CODE, RNDC_THERAPEUTIC_CLASS_DESC,
+                 DR_NDC_CODE, DR_REBATE_PCT_WAC, FD_NDC_CODE, FD_PREFERRED_FLAG,
+                 MCL_CLAIM_LINE_ID, MCL_CLAIM_ID, MCL_NDC_CODE, MCL_DRUG_HCPCS_CODE, MCL_SERVICE_DATE,
+                 MCL_PAID_AMOUNT, MCL_DRUG_SPECIALTY_FLAG, MCL_DRUG_DAYS_SUPPLY, MCL_DRUG_QUANTITY,
+                 MCL_PLACE_OF_SERVICE_CODE, MCH_CLAIM_ID, MCH_MEMBER_ID, MCH_CLAIM_STATUS,
+                 RHD_HCPCS_CODE, RHD_DRUG_NAME, RHD_THERAPEUTIC_CLASS,
+                 RPOS_PLACE_OF_SERVICE_CODE, RPOS_SETTING_TYPE,
+                 MM_MEMBER_ID, MM_LINE_OF_BUSINESS, DEMO_ANCHOR_MONTH]
+      relationships: [PHCLM_NDC__NDCREF, PHCLM_NDC__REBATE, MCL__MCH, MCL_HCPCS__HCPCSREF, MCL_POS__POSREF]
+    readiness: [PHCLM_CLAIM_ID, PHCLM_MEMBER_ID, PHCLM_NDC_CODE, PHCLM_FILL_DATE, PHCLM_INGREDIENT_COST,
+                PHCLM_DISPENSING_FEE, PHCLM_CLAIM_STATUS, PHCLM_REVERSAL_FLAG, DEMO_ANCHOR_MONTH]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_PRIOR_AUTH_DETAIL
+    object_type: dynamic_table
+    template: denorm_prior_auth_detail.sql.j2
+    grain: "one prior-authorization request"
+    depends_on: []
+    consumes:
+      elements: [PA_PA_ID, PA_MEMBER_ID, PA_NDC_CODE, PA_GPI_CODE, PA_DRUG_NAME, PA_THERAPEUTIC_CLASS_DESC,
+                 PA_DECISION, PA_DECISION_DATE, PA_STATUS, PA_DENIAL_REASON, PA_CRITERIA_MET_FLAG,
+                 PA_INDICATION_CODE, PA_INDICATION_DESC, PA_REVIEW_TYPE, DEMO_ANCHOR_MONTH]
+      relationships: []
+    readiness: [PA_PA_ID, PA_DECISION, PA_DECISION_DATE, DEMO_ANCHOR_MONTH]
+    requires_logical_objects: [PRIOR_AUTH]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_RX_ADHERENCE_DETAIL
+    object_type: dynamic_table
+    template: denorm_rx_adherence_detail.sql.j2
+    grain: "member x maintenance drug (GPI) adherence span"
+    depends_on: []
+    consumes:
+      elements: [PHCLM_MEMBER_ID, PHCLM_NDC_CODE, PHCLM_DAYS_SUPPLY, PHCLM_FILL_DATE, PHCLM_CLAIM_STATUS,
+                 PHCLM_REVERSAL_FLAG, RNDC_NDC_CODE, RNDC_GPI_CODE, RNDC_THERAPEUTIC_CLASS_DESC,
+                 RNDC_MAINTENANCE_DRUG_FLAG, DEMO_ANCHOR_MONTH]
+      relationships: [PHCLM_NDC__NDCREF]
+    readiness: [PHCLM_MEMBER_ID, PHCLM_NDC_CODE, PHCLM_DAYS_SUPPLY, PHCLM_FILL_DATE, RNDC_MAINTENANCE_DRUG_FLAG, DEMO_ANCHOR_MONTH]
+    requires_logical_objects: [NDC_REFERENCE]
+    params:
+      target_lag: "1 hour"
+
+  # ---- Policy catalog + Cortex Search (Jinja templates; stage resolved from COV_POLICY_STAGE element) ----
+  - object_name: COVERAGE_POLICY
+    object_type: table
+    template: coverage_policy.sql.j2
+    grain: "one row per coverage-policy document (AI_PARSE_DOCUMENT: FILE_NAME, DOC_RELATIVE_PATH, PARSED_TEXT)"
+    depends_on: []
+    consumes:
+      elements: [COV_POLICY_STAGE]
+    requires_logical_objects: [COVERAGE_POLICY_DOCS]
+
+  - object_name: COVERAGE_POLICY_SEARCH
+    object_type: cortex_search
+    template: coverage_policy_search.sql.j2
+    grain: "policy chunks + Cortex Search service (agent citation tool)"
+    depends_on: [COVERAGE_POLICY]
+    params:
+      target_lag: "1 hour"
+
+  # ---- Analytic marts (MDL_*): exec-ready decompositions over the DENORM layer ----
+  - object_name: MDL_TREND_DRIVERS
+    object_type: dynamic_table
+    template: mdl_trend_drivers.sql.j2
+    grain: "therapeutic class x YoY Price/Volume/Mix decomposition"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL]
+    consumes:
+      elements: [RDPH_NDC_CODE, RDPH_UNIT_PRICE, RDPH_PRICE_TYPE, RDPH_PCT_CHANGE_VS_PRIOR, RDPH_EFFECTIVE_DATE]
+      relationships: [PHCLM_NDC__PRICEHIST]
+    readiness: []
+    optional_logical_objects: [PRICE_HISTORY]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_ADDRESSABLE_BRIDGE
+    object_type: dynamic_table
+    template: mdl_addressable_bridge.sql.j2
+    grain: "one row per savings lever (formulary/rebates, specialty site-of-care, adherence)"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL, DENORM_RX_ADHERENCE_DETAIL]
+    consumes:
+      elements: [RPOS_PLACE_OF_SERVICE_CODE, RPOS_TYPICAL_COST_TIER]
+      relationships: []
+    readiness: []
+    optional_logical_objects: [FORMULARY_SOURCE, MEDICAL_DRUG_LINE, POS_REFERENCE, NDC_REFERENCE]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_PMPM_FORECAST
+    object_type: dynamic_table
+    template: mdl_pmpm_forecast.sql.j2
+    grain: "one row per month (historical actuals + trend-applied forecast)"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL, DENORM_MEMBER_MONTH_DETAIL]
+    consumes:
+      elements: [DEMO_ANCHOR_MONTH, DEMO_HISTORY_MONTHS, DEMO_FORECAST_MONTHS,
+                 PTA_LINE_OF_BUSINESS, PTA_PLAN_YEAR, PTA_PRICED_RX_TREND_PCT, PTA_TARGET_RX_PMPM]
+      relationships: [MM_LOB__PTA]
+    readiness: [DEMO_ANCHOR_MONTH, DEMO_HISTORY_MONTHS, DEMO_FORECAST_MONTHS]
+    optional_logical_objects: [PLAN_TREND]
+    params:
+      target_lag: "1 hour"
+
+  # ---- Semantic view (conversational analytics): bounded template, target() only ----
+  # SV/VW/AGT read the FIXED accelerator-owned derived schema, so only DB/schema are parameterized
+  # (no contract-resolution helpers). depends_on lists the derived objects they consume.
+  - object_name: SV_PHARMACY_COST_INTELLIGENCE
+    object_type: semantic_view
+    template: sv_pharmacy_cost_intelligence.sql.j2
+    grain: "semantic layer: 4 facts (drug spend, member-months, prior auth, adherence) + 2 conformed dims"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL, DENORM_MEMBER_MONTH_DETAIL, DENORM_PRIOR_AUTH_DETAIL, DENORM_RX_ADHERENCE_DETAIL]
+
+  # ---- Thin presentation views (VW_*): one per app panel in the mockup. Bounded target()-only
+  # templates reading ONLY derived-DB objects (DENORM_*/MDL_*). App reads these directly. ----
+  - object_name: VW_KPI_SUMMARY
+    object_type: view
+    template: vw_kpi_summary.sql.j2
+    grain: "one row: headline KPI tiles (PMPM, trend vs plan, projected next-12, addressable)"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL, DENORM_MEMBER_MONTH_DETAIL, MDL_PMPM_FORECAST, MDL_ADDRESSABLE_BRIDGE]
+  - object_name: VW_PMPM_TREND
+    object_type: view
+    template: vw_pmpm_trend.sql.j2
+    grain: "one row per month (actual + base/high forecast vs plan) — panel cTrend"
+    depends_on: [MDL_PMPM_FORECAST]
+  - object_name: VW_TREND_PVM
+    object_type: view
+    template: vw_trend_pvm.sql.j2
+    grain: "one row per Price/Volume/Mix component — panel cMix"
+    depends_on: [MDL_TREND_DRIVERS]
+  - object_name: VW_HIGH_COST_CLASSES
+    object_type: view
+    template: vw_high_cost_classes.sql.j2
+    grain: "top therapeutic classes by current net spend + YoY growth — panel cHiCost"
+    depends_on: [MDL_TREND_DRIVERS]
+  - object_name: VW_TREND_CONTRIBUTORS
+    object_type: view
+    template: vw_trend_contributors.sql.j2
+    grain: "top classes by $ added YoY + dominant driver — panel cContrib"
+    depends_on: [MDL_TREND_DRIVERS]
+  - object_name: VW_ADDRESSABLE_BRIDGE
+    object_type: view
+    template: vw_addressable_bridge.sql.j2
+    grain: "one row per savings lever — panel cBridge"
+    depends_on: [MDL_ADDRESSABLE_BRIDGE]
+  - object_name: VW_SPEND_BY_BENEFIT
+    object_type: view
+    template: vw_spend_by_benefit.sql.j2
+    grain: "one row per benefit type (specialty/traditional/medical) — panel cSpecialty"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL]
+  - object_name: VW_WASTE_CONCENTRATION
+    object_type: view
+    template: vw_waste_concentration.sql.j2
+    grain: "one row per claimant band (top 1% / 1-3% / 3-5% / rest) — panel cConc"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL]
+  - object_name: VW_REBATE_YIELD
+    object_type: view
+    template: vw_rebate_yield.sql.j2
+    grain: "one row per therapeutic class: rebate yield % of gross — panel cRebate"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL]
+  - object_name: VW_FORMULARY_LEAKAGE
+    object_type: view
+    template: vw_formulary_leakage.sql.j2
+    grain: "one row per non-preferred drug: steerable net spend — panel cOffForm"
+    depends_on: [DENORM_DRUG_SPEND_DETAIL]
+  - object_name: VW_PA_OUTCOMES
+    object_type: view
+    template: vw_pa_outcomes.sql.j2
+    grain: "one row per PA decision (approve/deny/pending) — panel cPA"
+    depends_on: [DENORM_PRIOR_AUTH_DETAIL]
+  - object_name: VW_ADHERENCE_BY_CLASS
+    object_type: view
+    template: vw_adherence_by_class.sql.j2
+    grain: "one row per therapeutic class: PDC vs 0.80 — panel cPdcClass"
+    depends_on: [DENORM_RX_ADHERENCE_DETAIL]
+
+  # ---- Cortex Agent: conversational analytics + policy citation. Bounded target()-only template
+  # wiring the semantic view (Analyst) + coverage-policy Cortex Search. ----
+  - object_name: AGT_PHARMACY_COST_COMMAND_CENTER
+    object_type: agent
+    template: agt_pharmacy_cost_command_center.sql.j2
+    grain: "conversational agent: Cortex Analyst (SV) + Cortex Search (policy) + data-to-chart"
+    depends_on: [SV_PHARMACY_COST_INTELLIGENCE, COVERAGE_POLICY_SEARCH]
+
+  # ---- AI Powered Insights: per-tab deeper narrative pre-generated by the agent (batch
+  # DATA_AGENT_RUN). Table (4 rows) + refresh proc + suspended daily task. Bounded target()-only. ----
+  - object_name: MDL_TAB_INSIGHTS
+    object_type: table
+    template: mdl_tab_insights.sql.j2
+    grain: "one row per dashboard tab (bandA-D): agent-authored deeper insight + tools_used + run_id"
+    depends_on: [AGT_PHARMACY_COST_COMMAND_CENTER]
+    also_creates: [SP_REFRESH_TAB_INSIGHTS, TASK_REFRESH_TAB_INSIGHTS]
+
+  # --- Phase 4 (app-deploy): least-privilege read grants for the app's execution role. ---
+  # Not a data-product object; rendered on demand by the app-deploy skill and run
+  # AFTER `snow app deploy`. Requires cfg.app_role. Not part of the Phase-3 build order.
+  - object_name: GRANT_APP_ACCESS
+    object_type: script
+    template: app_grants.sql.j2
+    grain: "GRANT SELECT/USAGE on 12 VW_*, MDL_TAB_INSIGHTS, SV, CSS, AGT to cfg.app_role"
+    phase: app-deploy
+    depends_on: [AGT_PHARMACY_COST_COMMAND_CENTER, MDL_TAB_INSIGHTS]

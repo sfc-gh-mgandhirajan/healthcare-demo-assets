@@ -1,0 +1,31 @@
+-- DENORM_PRIOR_AUTH_DETAIL — one row per prior-authorization request.
+-- Feeds the PA approve/deny/pending visual + UM appropriateness narrative.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_PRIOR_AUTH_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+)
+SELECT
+  pa.{{ c('PA_PA_ID') }}                          AS PA_ID,
+  pa.{{ c('PA_MEMBER_ID') }}                      AS MEMBER_ID,
+  pa.{{ c('PA_NDC_CODE') }}                       AS NDC_CODE,
+  pa.{{ c('PA_GPI_CODE') }}                       AS GPI_CODE,
+  pa.{{ c('PA_DRUG_NAME') }}                      AS DRUG_NAME,
+  pa.{{ c('PA_THERAPEUTIC_CLASS_DESC') }}         AS THERAPEUTIC_CLASS,
+  {{ canon('PA_DECISION','pa') }}                 AS DECISION,
+  pa.{{ c('PA_DECISION_DATE') }}                  AS DECISION_DATE,
+  pa.{{ c('PA_STATUS') }}                         AS STATUS,
+  pa.{{ c('PA_DENIAL_REASON') }}                  AS DENIAL_REASON,
+  {{ canon('PA_CRITERIA_MET_FLAG','pa') }}        AS CRITERIA_MET,
+  pa.{{ c('PA_INDICATION_CODE') }}                AS INDICATION_CODE,
+  pa.{{ c('PA_INDICATION_DESC') }}                AS INDICATION_DESC,
+  pa.{{ c('PA_REVIEW_TYPE') }}                    AS REVIEW_TYPE,
+  CASE
+    WHEN pa.{{ c('PA_DECISION_DATE') }} >= DATEADD(month,-12,a.anchor_month) AND pa.{{ c('PA_DECISION_DATE') }} < a.anchor_month THEN 'CURRENT_12'
+    WHEN pa.{{ c('PA_DECISION_DATE') }} >= DATEADD(month,-24,a.anchor_month) AND pa.{{ c('PA_DECISION_DATE') }} < DATEADD(month,-12,a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OTHER' END                              AS PERIOD_BUCKET
+FROM {{ tbl('PA_PA_ID') }} pa
+CROSS JOIN anchor a
+;

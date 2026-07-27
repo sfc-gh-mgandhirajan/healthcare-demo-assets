@@ -1,0 +1,29 @@
+-- VW_WASTE_CONCENTRATION — panel cConc: how addressable/high-cost spend concentrates in the top
+-- claimants (top 1% / 1-3% / 3-5% / remaining), current 12 months. Bounded: DENORM_DRUG_SPEND_DETAIL.
+CREATE OR REPLACE VIEW {{ target('VW_WASTE_CONCENTRATION') }} AS
+WITH mem AS (
+  SELECT MEMBER_ID, SUM(NET_AMOUNT) net
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+  WHERE PERIOD_BUCKET = 'CURRENT_12'
+  GROUP BY MEMBER_ID
+),
+ranked AS (
+  SELECT MEMBER_ID, net, PERCENT_RANK() OVER (ORDER BY net DESC) AS pr FROM mem
+),
+banded AS (
+  SELECT net,
+    CASE WHEN pr < 0.01 THEN 'Top 1%'
+         WHEN pr < 0.03 THEN 'Top 1-3%'
+         WHEN pr < 0.05 THEN 'Top 3-5%'
+         ELSE 'Remaining 95%' END AS claimant_band,
+    CASE WHEN pr < 0.01 THEN 1 WHEN pr < 0.03 THEN 2 WHEN pr < 0.05 THEN 3 ELSE 4 END AS sort_order
+  FROM ranked
+)
+SELECT
+  claimant_band                                                   AS CLAIMANT_BAND,
+  COUNT(*)                                                        AS MEMBERS,
+  ROUND(SUM(net), 2)                                              AS NET_SPEND,
+  ROUND(100.0 * SUM(net) / SUM(SUM(net)) OVER (), 1)              AS PCT_OF_SPEND
+FROM banded
+GROUP BY claimant_band, sort_order
+ORDER BY sort_order;

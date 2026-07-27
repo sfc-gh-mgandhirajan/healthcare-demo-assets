@@ -1,0 +1,11 @@
+install:
+  commands:
+    - ["npm", "ci", "--include=dev"]
+
+run:
+  command: ["node", ".next/standalone/server.js"]
+
+profile:
+  label: "Pharmacy Cost Command Center"
+  description: "A certified pharmacy-cost book for the accountable leader — spend performance, cost drivers, the addressable prize, and the levers, with a live Cortex agent."
+  icon: icon.svg

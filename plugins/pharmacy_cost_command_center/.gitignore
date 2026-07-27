@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Logs
+*.log
+snowflake.log
+
+# Node (the app bundle builds these remotely; never commit them)
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Local scratch / rendered output (never source)
+/rendered/
+/bindings/
+/preflight/
+*.rendered.sql

@@ -1,0 +1,10 @@
+-- COVERAGE_POLICY — parsed-text catalog. Stage path resolved from the COV_POLICY_STAGE
+-- contract element (ACCELERATOR_CORE_ELEMENTS.STAGE_PATH), NOT hardcoded.
+CREATE OR REPLACE TABLE {{ target('COVERAGE_POLICY') }} AS
+SELECT
+  SPLIT_PART(RELATIVE_PATH, '/', -1)                                             AS FILE_NAME,
+  RELATIVE_PATH                                                                  AS DOC_RELATIVE_PATH,
+  TO_VARCHAR(AI_PARSE_DOCUMENT(TO_FILE('{{ stage('COV_POLICY_STAGE') }}', RELATIVE_PATH), {'mode':'LAYOUT'}):content) AS PARSED_TEXT,
+  CURRENT_TIMESTAMP()                                                            AS PARSED_AT
+FROM DIRECTORY('{{ stage('COV_POLICY_STAGE') }}')
+WHERE RELATIVE_PATH ILIKE '%.pdf';

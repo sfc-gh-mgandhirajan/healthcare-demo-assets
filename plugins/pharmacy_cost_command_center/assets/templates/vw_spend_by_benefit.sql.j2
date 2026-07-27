@@ -1,0 +1,13 @@
+-- VW_SPEND_BY_BENEFIT — panel cSpecialty: specialty vs traditional incl. medical-benefit (buy-and-bill)
+-- spend, current 12 months. Bounded: reads DENORM_DRUG_SPEND_DETAIL.
+CREATE OR REPLACE VIEW {{ target('VW_SPEND_BY_BENEFIT') }} AS
+SELECT
+  BENEFIT_TYPE,
+  ROUND(SUM(NET_AMOUNT), 2)                                        AS NET_SPEND,
+  ROUND(SUM(GROSS_AMOUNT), 2)                                      AS GROSS_SPEND,
+  COUNT(*)                                                         AS CLAIM_LINES,
+  ROUND(100.0 * SUM(NET_AMOUNT) / SUM(SUM(NET_AMOUNT)) OVER (), 1) AS PCT_OF_NET_SPEND
+FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }}
+WHERE PERIOD_BUCKET = 'CURRENT_12'
+GROUP BY BENEFIT_TYPE
+ORDER BY NET_SPEND DESC;

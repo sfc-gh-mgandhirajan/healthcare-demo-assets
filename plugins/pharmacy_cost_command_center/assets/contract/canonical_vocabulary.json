@@ -1,0 +1,227 @@
+[
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "CANONICAL_VALUE": "1",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "CANONICAL_VALUE": "2",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "CANONICAL_VALUE": "3",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "CANONICAL_VALUE": "4",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "CANONICAL_VALUE": "SPECIALTY",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_ON_FORMULARY_FLAG",
+        "CANONICAL_VALUE": "OFF_FORMULARY",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_ON_FORMULARY_FLAG",
+        "CANONICAL_VALUE": "ON_FORMULARY",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "FD_PREFERRED_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "FD_PREFERRED_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "FD_STEP_THERAPY_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "FD_STEP_THERAPY_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "MCH_CLAIM_STATUS",
+        "CANONICAL_VALUE": "PAID",
+        "SEMANTIC_ROLE": "INCLUDE_FILTER"
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_SPECIALTY_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_SPECIALTY_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "MM_PHARMACY_COVERAGE_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "INCLUDE_FILTER"
+    },
+    {
+        "LOGICAL_ID": "PA_CRITERIA_MET_FLAG",
+        "CANONICAL_VALUE": "MET",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_CRITERIA_MET_FLAG",
+        "CANONICAL_VALUE": "NOT_MET",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_CRITERIA_MET_FLAG",
+        "CANONICAL_VALUE": "UNKNOWN",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_DECISION",
+        "CANONICAL_VALUE": "APPROVED",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_DECISION",
+        "CANONICAL_VALUE": "DENIED",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_DECISION",
+        "CANONICAL_VALUE": "PENDING",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PA_STATUS",
+        "CANONICAL_VALUE": "ACTIVE",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_CLAIM_STATUS",
+        "CANONICAL_VALUE": "PAID",
+        "SEMANTIC_ROLE": "INCLUDE_FILTER"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_CLAIM_STATUS",
+        "CANONICAL_VALUE": "REVERSED",
+        "SEMANTIC_ROLE": "INCLUDE_FILTER"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FORMULARY_STATUS",
+        "CANONICAL_VALUE": "OFF_FORMULARY",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FORMULARY_STATUS",
+        "CANONICAL_VALUE": "ON_FORMULARY",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_GENERIC_INDICATOR",
+        "CANONICAL_VALUE": "BRAND",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_GENERIC_INDICATOR",
+        "CANONICAL_VALUE": "GENERIC",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_MAIL_ORDER_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_MAIL_ORDER_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_PRIOR_AUTH_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_PRIOR_AUTH_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_REVERSAL_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_REVERSAL_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_SPECIALTY_DRUG_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_SPECIALTY_DRUG_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_STEP_THERAPY_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "PHCLM_STEP_THERAPY_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "RHD_SPECIALTY_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "RNDC_GENERIC_INDICATOR",
+        "CANONICAL_VALUE": "BRAND",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "RNDC_GENERIC_INDICATOR",
+        "CANONICAL_VALUE": "GENERIC",
+        "SEMANTIC_ROLE": "CATEGORY"
+    },
+    {
+        "LOGICAL_ID": "RNDC_MAINTENANCE_DRUG_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "RNDC_MAINTENANCE_DRUG_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "RNDC_SPECIALTY_DRUG_FLAG",
+        "CANONICAL_VALUE": "FALSE",
+        "SEMANTIC_ROLE": "FLAG"
+    },
+    {
+        "LOGICAL_ID": "RNDC_SPECIALTY_DRUG_FLAG",
+        "CANONICAL_VALUE": "TRUE",
+        "SEMANTIC_ROLE": "FLAG"
+    }
+]

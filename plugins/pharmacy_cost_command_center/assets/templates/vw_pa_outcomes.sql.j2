@@ -1,0 +1,10 @@
+-- VW_PA_OUTCOMES — panel cPA: prior-authorization outcome mix (approve / deny / pending).
+-- Bounded: reads DENORM_PRIOR_AUTH_DETAIL.
+CREATE OR REPLACE VIEW {{ target('VW_PA_OUTCOMES') }} AS
+SELECT
+  DECISION,
+  COUNT(*)                                                   AS PA_COUNT,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1)         AS PCT_OF_TOTAL
+FROM {{ target('DENORM_PRIOR_AUTH_DETAIL') }}
+GROUP BY DECISION
+ORDER BY PA_COUNT DESC;

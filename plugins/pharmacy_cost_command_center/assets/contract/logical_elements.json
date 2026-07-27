@@ -1,0 +1,1002 @@
+[
+    {
+        "LOGICAL_ID": "BIO_LOINC_CODE",
+        "LABEL": "Biometric LOINC code",
+        "LOGICAL_OBJECT": "BIOMETRIC",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "BIO_MEASURE_DATE",
+        "LABEL": "Biometric measure date",
+        "LOGICAL_OBJECT": "BIOMETRIC",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "BIO_MEASURE_TYPE",
+        "LABEL": "Biometric measure type",
+        "LOGICAL_OBJECT": "BIOMETRIC",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "BIO_MEASURE_VALUE",
+        "LABEL": "Biometric measure value",
+        "LOGICAL_OBJECT": "BIOMETRIC",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "BIO_MEMBER_ID",
+        "LABEL": "Biometric member id",
+        "LOGICAL_OBJECT": "BIOMETRIC",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "COV_BIOSIM_POLICY",
+        "LABEL": "Biosimilar preference policy (COV-BIOSIM-PREF)",
+        "LOGICAL_OBJECT": "COVERAGE_POLICY_DOCS",
+        "TIER": "UNSTRUCTURED",
+        "DATA_TYPE": null,
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "COV_FORM_STEP_POLICY",
+        "LABEL": "Formulary step-therapy policy (COV-FORM-STEP)",
+        "LOGICAL_OBJECT": "COVERAGE_POLICY_DOCS",
+        "TIER": "UNSTRUCTURED",
+        "DATA_TYPE": null,
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "COV_GLP1_POLICY",
+        "LABEL": "GLP-1 appropriateness policy (COV-GLP1-APPROP)",
+        "LOGICAL_OBJECT": "COVERAGE_POLICY_DOCS",
+        "TIER": "UNSTRUCTURED",
+        "DATA_TYPE": null,
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "COV_POLICY_STAGE",
+        "LABEL": "Coverage policy document stage",
+        "LOGICAL_OBJECT": "COVERAGE_POLICY_DOCS",
+        "TIER": "UNSTRUCTURED",
+        "DATA_TYPE": null,
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "COV_SPEC_SOC_POLICY",
+        "LABEL": "Specialty site-of-care policy (COV-SPEC-SOC)",
+        "LOGICAL_OBJECT": "COVERAGE_POLICY_DOCS",
+        "TIER": "UNSTRUCTURED",
+        "DATA_TYPE": null,
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "DIAG_DIAG_CODE",
+        "LABEL": "Diagnosis code",
+        "LOGICAL_OBJECT": "DIAG_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "DIAG_DIAG_CODE_DESC",
+        "LABEL": "Diagnosis code description",
+        "LOGICAL_OBJECT": "DIAG_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "FD_FORMULARY_TIER",
+        "LABEL": "Formulary tier",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "FD_GPI_CODE",
+        "LABEL": "Formulary drug GPI",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "FD_NDC_CODE",
+        "LABEL": "Formulary drug NDC",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "FD_ON_FORMULARY_FLAG",
+        "LABEL": "On-formulary flag",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "FD_PREFERRED_FLAG",
+        "LABEL": "Preferred flag",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "FD_STEP_THERAPY_FLAG",
+        "LABEL": "Formulary step therapy flag",
+        "LOGICAL_OBJECT": "FORMULARY_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RHD_ASP_UNIT_PRICE",
+        "LABEL": "HCPCS ASP unit price",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RHD_DRUG_NAME",
+        "LABEL": "HCPCS drug name",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RHD_HCPCS_CODE",
+        "LABEL": "HCPCS drug code",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RHD_NDC_CODE",
+        "LABEL": "HCPCS-to-NDC crosswalk",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RHD_SPECIALTY_FLAG",
+        "LABEL": "HCPCS specialty flag",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RHD_THERAPEUTIC_CLASS",
+        "LABEL": "HCPCS therapeutic class",
+        "LOGICAL_OBJECT": "HCPCS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "LAB_LOINC_CODE",
+        "LABEL": "Lab LOINC code",
+        "LOGICAL_OBJECT": "LAB_RESULT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "LAB_MEMBER_ID",
+        "LABEL": "Lab result member id",
+        "LOGICAL_OBJECT": "LAB_RESULT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "LAB_RESULT_DATE",
+        "LABEL": "Lab result date",
+        "LOGICAL_OBJECT": "LAB_RESULT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "LAB_RESULT_VALUE",
+        "LABEL": "Lab result value",
+        "LOGICAL_OBJECT": "LAB_RESULT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "LAB_TEST_NAME",
+        "LABEL": "Lab test name",
+        "LOGICAL_OBJECT": "LAB_RESULT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCH_CLAIM_ID",
+        "LABEL": "Medical claim header id",
+        "LOGICAL_OBJECT": "MEDICAL_CLAIM_HEADER",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCH_CLAIM_STATUS",
+        "LABEL": "Medical claim status",
+        "LOGICAL_OBJECT": "MEDICAL_CLAIM_HEADER",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCH_MEMBER_ID",
+        "LABEL": "Medical claim member id",
+        "LOGICAL_OBJECT": "MEDICAL_CLAIM_HEADER",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCH_PLACE_OF_SERVICE_CODE",
+        "LABEL": "Medical claim header POS",
+        "LOGICAL_OBJECT": "MEDICAL_CLAIM_HEADER",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCL_CLAIM_ID",
+        "LABEL": "Medical claim id (line)",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_CLAIM_LINE_ID",
+        "LABEL": "Medical claim line id",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_DIAGNOSIS_CODE_1",
+        "LABEL": "Medical line primary diagnosis",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_DAYS_SUPPLY",
+        "LABEL": "Medical drug days supply",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_HCPCS_CODE",
+        "LABEL": "Medical drug HCPCS (J-code)",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_QUANTITY",
+        "LABEL": "Medical drug quantity",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCL_DRUG_SPECIALTY_FLAG",
+        "LABEL": "Medical drug specialty flag",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_NDC_CODE",
+        "LABEL": "Medical line NDC",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MCL_PAID_AMOUNT",
+        "LABEL": "Medical line paid amount",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_PLACE_OF_SERVICE_CODE",
+        "LABEL": "Medical line place of service",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MCL_SERVICE_DATE",
+        "LABEL": "Medical line service date",
+        "LOGICAL_OBJECT": "MEDICAL_DRUG_LINE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "ENR_FUNDING_ARRANGEMENT",
+        "LABEL": "Funding arrangement",
+        "LOGICAL_OBJECT": "MEMBER_ENROLLMENT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "ENR_LINE_OF_BUSINESS",
+        "LABEL": "Enrollment line of business",
+        "LOGICAL_OBJECT": "MEMBER_ENROLLMENT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "ENR_MEMBER_ID",
+        "LABEL": "Enrollment member id",
+        "LOGICAL_OBJECT": "MEMBER_ENROLLMENT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "ENR_PLAN_ID",
+        "LABEL": "Enrollment plan id",
+        "LOGICAL_OBJECT": "MEMBER_ENROLLMENT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "ENR_RISK_SCORE",
+        "LABEL": "Member risk score",
+        "LOGICAL_OBJECT": "MEMBER_ENROLLMENT",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "MM_ELIGIBILITY_MONTH",
+        "LABEL": "Eligibility month",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MM_LINE_OF_BUSINESS",
+        "LABEL": "Member-month line of business",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MM_MEMBER_ID",
+        "LABEL": "Member-month member id",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MM_MEMBER_MONTH_FRACTION",
+        "LABEL": "Member-month fraction",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MM_PHARMACY_COVERAGE_FLAG",
+        "LABEL": "Pharmacy coverage flag",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "MM_PLAN_ID",
+        "LABEL": "Member-month plan id",
+        "LOGICAL_OBJECT": "MEMBER_MONTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RNDC_DRUG_NAME",
+        "LABEL": "NDC master drug name",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RNDC_GENERIC_INDICATOR",
+        "LABEL": "NDC master generic indicator",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RNDC_GPI_CODE",
+        "LABEL": "NDC master GPI",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RNDC_MAINTENANCE_DRUG_FLAG",
+        "LABEL": "NDC master maintenance flag",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RNDC_NDC_CODE",
+        "LABEL": "NDC master code",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RNDC_SPECIALTY_DRUG_FLAG",
+        "LABEL": "NDC master specialty flag",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RNDC_THERAPEUTIC_CLASS_CODE",
+        "LABEL": "NDC master class code",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RNDC_THERAPEUTIC_CLASS_DESC",
+        "LABEL": "NDC master class desc",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RNDC_WAC_UNIT_PRICE",
+        "LABEL": "NDC master WAC unit price",
+        "LOGICAL_OBJECT": "NDC_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "DEMO_ANCHOR_MONTH",
+        "LABEL": "Demo clock anchor month",
+        "LOGICAL_OBJECT": "PERIOD_CLOCK",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "DEMO_FORECAST_MONTHS",
+        "LABEL": "Demo clock forecast months",
+        "LOGICAL_OBJECT": "PERIOD_CLOCK",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "DEMO_HISTORY_MONTHS",
+        "LABEL": "Demo clock history months",
+        "LOGICAL_OBJECT": "PERIOD_CLOCK",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PTA_LINE_OF_BUSINESS",
+        "LABEL": "Plan-trend line of business",
+        "LOGICAL_OBJECT": "PLAN_TREND",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PTA_PLAN_YEAR",
+        "LABEL": "Plan year",
+        "LOGICAL_OBJECT": "PLAN_TREND",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PTA_PRICED_RX_TREND_PCT",
+        "LABEL": "Priced Rx trend pct",
+        "LOGICAL_OBJECT": "PLAN_TREND",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PTA_TARGET_RX_PMPM",
+        "LABEL": "Target Rx PMPM (budget)",
+        "LOGICAL_OBJECT": "PLAN_TREND",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RPOS_PLACE_OF_SERVICE_CODE",
+        "LABEL": "POS code",
+        "LOGICAL_OBJECT": "POS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RPOS_PLACE_OF_SERVICE_DESC",
+        "LABEL": "POS description",
+        "LOGICAL_OBJECT": "POS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RPOS_SETTING_TYPE",
+        "LABEL": "POS setting type",
+        "LOGICAL_OBJECT": "POS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RPOS_TYPICAL_COST_TIER",
+        "LABEL": "POS typical cost tier",
+        "LOGICAL_OBJECT": "POS_REFERENCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RDPH_EFFECTIVE_DATE",
+        "LABEL": "Price history effective date",
+        "LOGICAL_OBJECT": "PRICE_HISTORY",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RDPH_NDC_CODE",
+        "LABEL": "Price history NDC",
+        "LOGICAL_OBJECT": "PRICE_HISTORY",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RDPH_PCT_CHANGE_VS_PRIOR",
+        "LABEL": "Price history pct change",
+        "LOGICAL_OBJECT": "PRICE_HISTORY",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "RDPH_PRICE_TYPE",
+        "LABEL": "Price history price type",
+        "LOGICAL_OBJECT": "PRICE_HISTORY",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RDPH_UNIT_PRICE",
+        "LABEL": "Price history unit price",
+        "LOGICAL_OBJECT": "PRICE_HISTORY",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_CRITERIA_MET_FLAG",
+        "LABEL": "PA criteria met flag",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_DECISION",
+        "LABEL": "PA decision",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_DECISION_DATE",
+        "LABEL": "PA decision date",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_DENIAL_REASON",
+        "LABEL": "PA denial reason",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_DRUG_NAME",
+        "LABEL": "PA drug name",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_GPI_CODE",
+        "LABEL": "PA GPI",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_INDICATION_CODE",
+        "LABEL": "PA indication code",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_INDICATION_DESC",
+        "LABEL": "PA indication description",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_MEMBER_ID",
+        "LABEL": "PA member id",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_NDC_CODE",
+        "LABEL": "PA NDC",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_PA_ID",
+        "LABEL": "Prior-auth id",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PA_REVIEW_TYPE",
+        "LABEL": "PA review type",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_STATUS",
+        "LABEL": "PA status",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PA_THERAPEUTIC_CLASS_DESC",
+        "LABEL": "PA therapeutic class",
+        "LOGICAL_OBJECT": "PRIOR_AUTH",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RA_ACCRUED_REBATE_AMOUNT",
+        "LABEL": "Accrued rebate amount",
+        "LOGICAL_OBJECT": "REBATE_ACCRUAL",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RA_GROSS_RX_SPEND",
+        "LABEL": "Accrual gross Rx spend",
+        "LOGICAL_OBJECT": "REBATE_ACCRUAL",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RA_REALIZED_REBATE_AMOUNT",
+        "LABEL": "Realized rebate amount",
+        "LOGICAL_OBJECT": "REBATE_ACCRUAL",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "RA_REBATE_QUARTER",
+        "LABEL": "Rebate accrual quarter",
+        "LOGICAL_OBJECT": "REBATE_ACCRUAL",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "DR_GPI_CODE",
+        "LABEL": "Rebate contract GPI",
+        "LOGICAL_OBJECT": "REBATE_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "DR_NDC_CODE",
+        "LABEL": "Rebate contract NDC",
+        "LOGICAL_OBJECT": "REBATE_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "DR_REBATE_PCT_WAC",
+        "LABEL": "Rebate pct of WAC",
+        "LOGICAL_OBJECT": "REBATE_SOURCE",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_CLAIM_ID",
+        "LABEL": "Rx pharmacy claim id",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_CLAIM_STATUS",
+        "LABEL": "Rx claim status",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_DAYS_SUPPLY",
+        "LABEL": "Rx days supply",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_DIAGNOSIS_CODE",
+        "LABEL": "Rx diagnosis code",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_DISPENSING_FEE",
+        "LABEL": "Rx dispensing fee",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_DRUG_NAME",
+        "LABEL": "Rx drug name",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FILL_DATE",
+        "LABEL": "Rx fill date",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "DATE",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FILL_NUMBER",
+        "LABEL": "Rx fill number",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FORMULARY_STATUS",
+        "LABEL": "Rx claim formulary status",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_FORMULARY_TIER",
+        "LABEL": "Rx claim formulary tier",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_GENERIC_INDICATOR",
+        "LABEL": "Rx generic indicator",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_INGREDIENT_COST",
+        "LABEL": "Rx ingredient cost",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_MAIL_ORDER_FLAG",
+        "LABEL": "Rx mail order flag",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_MEMBER_ID",
+        "LABEL": "Rx claim member id",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_NDC_CODE",
+        "LABEL": "Rx NDC code",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_PAID_AMOUNT",
+        "LABEL": "Rx plan paid amount",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_PLAN_ID",
+        "LABEL": "Rx plan id",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_PRIOR_AUTH_FLAG",
+        "LABEL": "Rx prior-auth flag",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_QUANTITY_DISPENSED",
+        "LABEL": "Rx quantity dispensed",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "NUMBER",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_REVERSAL_FLAG",
+        "LABEL": "Rx reversal flag",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_RX_NUMBER",
+        "LABEL": "Rx prescription number",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_SPECIALTY_DRUG_FLAG",
+        "LABEL": "Rx specialty flag",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    },
+    {
+        "LOGICAL_ID": "PHCLM_STEP_THERAPY_FLAG",
+        "LABEL": "Rx step therapy flag",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": false
+    },
+    {
+        "LOGICAL_ID": "PHCLM_THERAPEUTIC_CLASS_CODE",
+        "LABEL": "Rx therapeutic class code",
+        "LOGICAL_OBJECT": "RX_DRUG_CLAIM",
+        "TIER": "STRUCTURED",
+        "DATA_TYPE": "TEXT",
+        "IS_REQUIRED": true
+    }
+]

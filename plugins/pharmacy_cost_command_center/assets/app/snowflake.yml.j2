@@ -1,0 +1,31 @@
+definition_version: "2"
+
+# Rendered by the app-deploy skill from config.json:
+#   {{ app_name }}   <- app_name        (identifier + code stage)
+#   {{ target_database }}.{{ target_schema }}  <- target_database / target_schema
+#   {{ warehouse }}  <- warehouse
+# The app object is created INSIDE the derived data-product schema, so the
+# App-Runtime-injected SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA already point the app
+# at its own VW_*/MDL_*/agent (see lib/constants.ts) — no runtime env needed.
+entities:
+  pharmacy_cost_command_center:
+    type: snowflake-app
+    identifier:
+      name: {{ app_name }}
+      database: {{ target_database }}
+      schema: {{ target_schema }}
+    artifacts:
+      - src: ./*
+        dest: ./
+        ignore:
+          - node_modules
+          - .env*
+          - __pycache__
+          - "*.pyc"
+          - .next
+          - .git
+          - snowflake.log
+          - snowflake.yml.j2
+
+    query_warehouse: {{ warehouse }}
+    code_stage: {{ target_database }}.{{ target_schema }}.{{ app_stage }}

@@ -1,0 +1,43 @@
+-- DENORM_MEMBER_MONTH_DETAIL — member x eligibility month; the PMPM denominator + segmentation.
+-- Grain: one row per pharmacy-covered member-month. Enrollment enrichment is OPTIONAL:
+-- included only when the customer mapped the MEMBER_ENROLLMENT logical object.
+{% set has_enr = present('MEMBER_ENROLLMENT') %}
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_MEMBER_MONTH_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+){% if has_enr %},
+enr AS (  -- one row per member (avoids fan-out onto member-months)
+  SELECT
+    {{ c('ENR_MEMBER_ID') }} AS member_id,
+    MAX({{ c('ENR_FUNDING_ARRANGEMENT') }}) AS funding_arrangement,
+    MAX({{ c('ENR_RISK_SCORE') }}) AS risk_score
+  FROM {{ tbl('ENR_MEMBER_ID') }}
+  GROUP BY 1
+){% endif %}
+
+SELECT
+  mm.{{ c('MM_MEMBER_ID') }} || '|' || TO_VARCHAR(mm.{{ c('MM_ELIGIBILITY_MONTH') }}) AS MEMBER_MONTH_KEY,
+  mm.{{ c('MM_MEMBER_ID') }}            AS MEMBER_ID,
+  mm.{{ c('MM_ELIGIBILITY_MONTH') }}    AS ELIGIBILITY_MONTH,
+  mm.{{ c('MM_MEMBER_MONTH_FRACTION') }} AS MEMBER_MONTH_FRACTION,
+  {{ canon('MM_PHARMACY_COVERAGE_FLAG','mm') }} AS PHARMACY_COVERAGE_FLAG,
+  mm.{{ c('MM_LINE_OF_BUSINESS') }}     AS LINE_OF_BUSINESS,
+  {% if has_enr %}enr.funding_arrangement{% else %}NULL::TEXT{% endif %}              AS FUNDING_ARRANGEMENT,
+  mm.{{ c('MM_PLAN_ID') }}             AS PLAN_ID,
+  {% if has_enr %}enr.risk_score{% else %}NULL::FLOAT{% endif %}                       AS RISK_SCORE,
+  CASE
+    WHEN mm.{{ c('MM_ELIGIBILITY_MONTH') }} >= DATEADD(month, -12, a.anchor_month)
+         AND mm.{{ c('MM_ELIGIBILITY_MONTH') }} <  a.anchor_month THEN 'CURRENT_12'
+    WHEN mm.{{ c('MM_ELIGIBILITY_MONTH') }} >= DATEADD(month, -24, a.anchor_month)
+         AND mm.{{ c('MM_ELIGIBILITY_MONTH') }} <  DATEADD(month, -12, a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OTHER'
+  END AS PERIOD_BUCKET
+FROM {{ tbl('MM_MEMBER_ID') }} mm
+CROSS JOIN anchor a
+{% if has_enr %}LEFT JOIN enr ON mm.{{ c('MM_MEMBER_ID') }} = enr.member_id{% endif %}
+WHERE {{ canon('MM_PHARMACY_COVERAGE_FLAG','mm') }} = TRUE
+;

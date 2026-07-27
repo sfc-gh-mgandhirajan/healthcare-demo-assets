@@ -1,0 +1,109 @@
+-- MDL_PMPM_FORECAST — monthly net Rx PMPM: historical actuals over the demo history window plus
+-- a deterministic trend-applied projection over the forecast horizon. Grain: one row per month
+-- (IS_FORECAST flags projected months). The forward trend is member-month-weighted PRICED_RX_TREND
+-- from the plan's pricing assumptions when PLAN_TREND is mapped, else the observed YoY PMPM growth.
+-- Projection anchors to the stable current-12 aggregate run-rate (PMPM + avg monthly enrollment),
+-- not the noisy final months. Forecast NET_SPEND is illustrative (PMPM x held-flat denominator);
+-- PMPM is the load-bearing series.
+{% set has_plan = present('PLAN_TREND') %}
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_PMPM_FORECAST') }}
+  TARGET_LAG = '{{ params.target_lag | default(target_lag) }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH clk AS (
+  SELECT
+    {{ c('DEMO_ANCHOR_MONTH') }}    AS anchor_month,
+    {{ c('DEMO_HISTORY_MONTHS') }}  AS history_months,
+    {{ c('DEMO_FORECAST_MONTHS') }} AS forecast_months
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+),
+mm AS (
+  SELECT DATE_TRUNC('month', ELIGIBILITY_MONTH) AS m, SUM(MEMBER_MONTH_FRACTION) AS member_months
+  FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} GROUP BY 1
+),
+spend AS (
+  SELECT DATE_TRUNC('month', SERVICE_DATE) AS m, SUM(NET_AMOUNT) AS net_spend
+  FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} GROUP BY 1
+),
+monthly AS (
+  SELECT mo.m AS month,
+         COALESCE(mm.member_months,0) AS member_months,
+         COALESCE(sp.net_spend,0)     AS net_spend
+  FROM (SELECT m FROM mm UNION SELECT m FROM spend) mo
+  LEFT JOIN mm    ON mo.m = mm.m
+  LEFT JOIN spend sp ON mo.m = sp.m
+),
+hist AS (
+  SELECT mo.month, mo.member_months, mo.net_spend,
+         mo.net_spend / NULLIF(mo.member_months,0) AS pmpm
+  FROM monthly mo CROSS JOIN clk
+  WHERE mo.month >= DATEADD(month, -(clk.history_months-1), clk.anchor_month)
+    AND mo.month <= clk.anchor_month
+),
+base AS (   -- projection anchor = stable current-12 aggregate PMPM + avg monthly enrollment
+  -- (NOT the trailing months: monthly member-month runout in the tail inflates single-month PMPM)
+  SELECT
+    (SELECT SUM(NET_AMOUNT) FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12')
+      / NULLIF((SELECT SUM(MEMBER_MONTH_FRACTION) FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12'),0) AS base_pmpm,
+    (SELECT SUM(MEMBER_MONTH_FRACTION) FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12') / 12.0 AS base_mm
+),
+{% if has_plan %}
+plan_yr AS ( SELECT MAX({{ c('PTA_PLAN_YEAR') }}) AS yr FROM {{ tbl('PTA_PLAN_YEAR') }} ),
+lob_mm AS (
+  SELECT LINE_OF_BUSINESS AS lob, SUM(MEMBER_MONTH_FRACTION) AS member_months
+  FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }}
+  WHERE PERIOD_BUCKET = 'CURRENT_12' GROUP BY 1
+),
+drv AS (   -- member-month-weighted priced trend + target PMPM for the latest plan year
+  SELECT
+    SUM(w.member_months * pta.{{ c('PTA_PRICED_RX_TREND_PCT') }}) / NULLIF(SUM(w.member_months),0) AS annual_trend_pct,
+    SUM(w.member_months * pta.{{ c('PTA_TARGET_RX_PMPM') }})      / NULLIF(SUM(w.member_months),0) AS target_pmpm
+  FROM lob_mm w
+  JOIN {{ tbl('PTA_LINE_OF_BUSINESS') }} pta
+    ON w.lob = pta.{{ c('PTA_LINE_OF_BUSINESS') }}
+   AND pta.{{ c('PTA_PLAN_YEAR') }} = (SELECT yr FROM plan_yr)
+),
+{% else %}
+obs AS (
+  SELECT
+    (SELECT SUM(NET_AMOUNT) FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12')
+      / NULLIF((SELECT SUM(MEMBER_MONTH_FRACTION) FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='CURRENT_12'),0) AS pmpm_curr,
+    (SELECT SUM(NET_AMOUNT) FROM {{ target('DENORM_DRUG_SPEND_DETAIL') }} WHERE PERIOD_BUCKET='PRIOR_12')
+      / NULLIF((SELECT SUM(MEMBER_MONTH_FRACTION) FROM {{ target('DENORM_MEMBER_MONTH_DETAIL') }} WHERE PERIOD_BUCKET='PRIOR_12'),0) AS pmpm_prior
+),
+drv AS (
+  SELECT (pmpm_curr / NULLIF(pmpm_prior,0) - 1) * 100 AS annual_trend_pct, NULL::FLOAT AS target_pmpm FROM obs
+),
+{% endif %}
+gen AS ( SELECT SEQ4() + 1 AS k FROM TABLE(GENERATOR(ROWCOUNT => 60)) ),
+forecast AS (
+  SELECT
+    DATEADD(month, gen.k, clk.anchor_month) AS month,
+    base.base_pmpm * POWER(1 + (POWER(1 + drv.annual_trend_pct/100.0, 1/12.0) - 1), gen.k) AS pmpm,
+    base.base_mm AS base_mm
+  FROM gen CROSS JOIN clk CROSS JOIN base CROSS JOIN drv
+  WHERE gen.k <= clk.forecast_months
+)
+-- ===== Historical actuals =====
+SELECT
+  h.month                                    AS MONTH,
+  FALSE                                      AS IS_FORECAST,
+  ROUND(h.member_months, 1)                  AS MEMBER_MONTHS,
+  ROUND(h.net_spend, 2)                      AS NET_SPEND,
+  ROUND(h.pmpm, 2)                           AS PMPM,
+  ROUND(d.annual_trend_pct, 2)               AS TREND_ANNUAL_PCT,
+  ROUND(d.target_pmpm, 2)                    AS TARGET_PMPM
+FROM hist h CROSS JOIN drv d
+UNION ALL
+-- ===== Trend-applied projection =====
+SELECT
+  f.month                                    AS MONTH,
+  TRUE                                       AS IS_FORECAST,
+  NULL::FLOAT                                AS MEMBER_MONTHS,
+  ROUND(f.pmpm * f.base_mm, 2)               AS NET_SPEND,
+  ROUND(f.pmpm, 2)                           AS PMPM,
+  ROUND(d.annual_trend_pct, 2)               AS TREND_ANNUAL_PCT,
+  ROUND(d.target_pmpm, 2)                    AS TARGET_PMPM
+FROM forecast f CROSS JOIN drv d
+ORDER BY MONTH
+;
