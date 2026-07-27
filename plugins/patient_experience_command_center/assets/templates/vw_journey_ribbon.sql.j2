@@ -1,0 +1,5 @@
+-- VW_JOURNEY_RIBBON — the 5-stage journey ribbon (current score, prior, QoQ delta, trend).
+CREATE OR REPLACE VIEW {{ target('VW_JOURNEY_RIBBON') }} AS
+SELECT STAGE_ORDER, STAGE_KEY, STAGE_NAME, SCORE_PCT, PRIOR_PCT, QOQ_DELTA, TREND
+FROM {{ target('MDL_JOURNEY_STAGE_SCORE') }}
+ORDER BY STAGE_ORDER;

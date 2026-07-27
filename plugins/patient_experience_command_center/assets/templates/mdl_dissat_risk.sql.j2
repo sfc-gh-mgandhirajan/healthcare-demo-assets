@@ -1,0 +1,19 @@
+-- MDL_DISSAT_RISK — per-encounter detractor/grievance risk score, tier, top reasons, and consent-aware
+-- outreach channel. object_type: table (scored by MDL_DISSAT_RISK_SCORE_TASK via an incremental MERGE -
+-- ONLY new / feature-changed / model-version-changed encounters are re-scored, so warehouse inference
+-- cost tracks real incremental volume, not the full 500k every cycle). A full re-score happens only when
+-- the model version bumps (the task's WHERE detects it) - a real need, never a per-cycle tax.
+CREATE TABLE IF NOT EXISTS {{ target('MDL_DISSAT_RISK') }} (
+  ENCOUNTER_ID        NUMBER,
+  PATIENT_ID          NUMBER,
+  UNIT_ID             NUMBER,
+  RISK_SCORE          FLOAT,
+  RISK_TIER           VARCHAR,      -- HIGH >= 0.60 | MEDIUM >= 0.42 | LOW (from score distribution)
+  TOP_REASONS         ARRAY,        -- deterministic, actionable, ordered by global driver importance
+  PREFERRED_CHANNEL   VARCHAR,
+  OUTREACH_CONSENT    BOOLEAN,
+  RECOMMENDED_CHANNEL VARCHAR,      -- consent-resolved (Do Not Contact when consent withheld)
+  FEATURE_HASH        NUMBER,       -- incremental seam: re-score only when this changes
+  MODEL_VERSION       VARCHAR,
+  SCORED_AT           TIMESTAMP_NTZ
+);

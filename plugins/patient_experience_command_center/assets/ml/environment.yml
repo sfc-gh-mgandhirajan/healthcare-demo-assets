@@ -1,0 +1,10 @@
+name: px_risk_model_env
+channels:
+  - snowflake
+dependencies:
+  - snowflake-snowpark-python
+  - snowflake-ml-python
+  - xgboost
+  - scikit-learn
+  - pandas
+  - numpy

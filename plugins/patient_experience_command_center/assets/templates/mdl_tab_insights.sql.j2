@@ -1,0 +1,15 @@
+-- MDL_TAB_INSIGHTS — executive AI insight cards, one per journey stage. Grounds AI_COMPLETE in the
+-- stage's score + QoQ trend to produce a concrete, action-oriented recommendation for the CXO team.
+-- object_type: dynamic_table (AI over ~5 rows -> FULL refresh is fine at this volume).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_TAB_INSIGHTS') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE  = {{ warehouse }}
+AS
+SELECT
+  STAGE_ORDER, STAGE_KEY, STAGE_NAME, SCORE_PCT, PRIOR_PCT, QOQ_DELTA, TREND,
+  AI_COMPLETE('llama3.1-70b',
+    'You are advising a hospital Chief Experience Officer. The "' || STAGE_NAME || '" journey stage scores '
+    || ROUND(SCORE_PCT) || '% (' || TREND || ', ' || ROUND(QOQ_DELTA,1) || ' points quarter-over-quarter). '
+    || 'In ONE concise sentence, give a specific, actionable improvement recommendation for this stage.'
+  ) AS INSIGHT
+FROM {{ target('MDL_JOURNEY_STAGE_SCORE') }};

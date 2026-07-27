@@ -1,0 +1,26 @@
+-- VW_GRIEVANCE_AGING — s5 cRecovery: open grievances bucketed by time-to-regulatory-deadline.
+CREATE OR REPLACE VIEW {{ target('VW_GRIEVANCE_AGING') }} AS
+WITH g AS (
+  SELECT {{ col('GRV_REGULATORY_DUE_DATE','g') }} AS DUE
+  FROM {{ tbl('GRV_STATUS') }} g
+  WHERE {{ col('GRV_STATUS','g') }} <> 'Resolved'
+    AND {{ col('GRV_REGULATORY_DUE_DATE','g') }} IS NOT NULL
+)
+SELECT AGING_BUCKET, BUCKET_ORDER, COUNT(*) AS N_GRIEVANCES
+FROM (
+  SELECT
+    CASE
+      WHEN DUE < CURRENT_DATE                          THEN 'Overdue (past window)'
+      WHEN DUE <= DATEADD('day', 2, CURRENT_DATE)      THEN 'Due within 48h'
+      WHEN DUE <= DATEADD('day', 7, CURRENT_DATE)      THEN 'Due in 3-7 days'
+      ELSE 'On track (>7 days)'
+    END AS AGING_BUCKET,
+    CASE
+      WHEN DUE < CURRENT_DATE                          THEN 1
+      WHEN DUE <= DATEADD('day', 2, CURRENT_DATE)      THEN 2
+      WHEN DUE <= DATEADD('day', 7, CURRENT_DATE)      THEN 3 ELSE 4
+    END AS BUCKET_ORDER
+  FROM g
+)
+GROUP BY AGING_BUCKET, BUCKET_ORDER
+ORDER BY BUCKET_ORDER;

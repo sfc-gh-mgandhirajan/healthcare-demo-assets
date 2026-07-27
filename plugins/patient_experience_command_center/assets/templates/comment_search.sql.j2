@@ -1,0 +1,12 @@
+-- COMMENT_SEARCH — Cortex Search service over the enriched patient voice (agent citation tool).
+-- Bounded: reads only the derived COMMENT_ENRICHED. Indexes COMMENT_TEXT with themed/unit/sentiment attributes.
+CREATE OR REPLACE CORTEX SEARCH SERVICE {{ target('COMMENT_SEARCH') }}
+  ON COMMENT_TEXT
+  ATTRIBUTES SOURCE_TYPE, THEME, JOURNEY_STAGE, UNIT_ID, SENTIMENT_SCORE, ENCOUNTER_ID, SOURCE_ID
+  WAREHOUSE = {{ warehouse }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  AS
+    SELECT COMMENT_TEXT, SOURCE_TYPE, THEME, JOURNEY_STAGE, UNIT_ID,
+           SENTIMENT_SCORE, ENCOUNTER_ID, SOURCE_ID
+    FROM {{ target('COMMENT_ENRICHED') }}
+    WHERE COMMENT_TEXT IS NOT NULL;

@@ -1,0 +1,37 @@
+-- DENORM_ENCOUNTER_JOURNEY_DETAIL — one row per inpatient encounter: care-team process signals
+-- (med-rec, interpreter) + post-discharge close-the-loop, bucketed to period. Contract-bound.
+-- Spine = ENCOUNTER_CARE_TEAM; callback joined on encounter (optional / present()-gated).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_ENCOUNTER_JOURNEY_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }} WHERE CLOCK_ID = 'CORE'
+)
+SELECT
+  {{ col('ECT_ENCOUNTER_ID','e') }}       AS ENCOUNTER_ID,
+  {{ col('ECT_PATIENT_ID','e') }}         AS PATIENT_ID,
+  {{ col('ECT_UNIT_ID','e') }}            AS UNIT_ID,
+  {{ col('ECT_MED_REC_COMPLETED','e') }}  AS MED_REC_COMPLETED,
+  {{ col('ECT_INTERPRETER_USED','e') }}   AS INTERPRETER_USED,
+  {{ col('ECT_INTERPRETER_MODE','e') }}   AS INTERPRETER_MODE,
+{% if present('POST_DISCHARGE_CALLBACK') %}
+  cb.{{ c('CB_DISCHARGE_DATE') }}         AS DISCHARGE_DATE,
+  cb.{{ c('CB_REACHED') }}                AS CALLBACK_REACHED,
+  cb.{{ c('CB_ISSUE_IDENTIFIED') }}       AS CALLBACK_ISSUE_IDENTIFIED,
+  {{ canon('CB_OUTCOME','cb') }}          AS CALLBACK_OUTCOME,
+  CASE
+    WHEN cb.{{ c('CB_DISCHARGE_DATE') }} >  DATEADD('month', -12, a.anchor_month) THEN 'CURRENT_12'
+    WHEN cb.{{ c('CB_DISCHARGE_DATE') }} >  DATEADD('month', -24, a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OLDER'
+  END AS PERIOD_BUCKET
+{% else %}
+  NULL AS DISCHARGE_DATE, NULL AS CALLBACK_REACHED, NULL AS CALLBACK_ISSUE_IDENTIFIED,
+  NULL AS CALLBACK_OUTCOME, NULL AS PERIOD_BUCKET
+{% endif %}
+FROM {{ tbl('ECT_ENCOUNTER_ID') }} e
+{% if present('POST_DISCHARGE_CALLBACK') %}
+LEFT JOIN {{ tbl('CB_CALLBACK_ID') }} cb ON cb.{{ c('CB_ENCOUNTER_ID') }} = e.{{ c('ECT_ENCOUNTER_ID') }}
+{% endif %}
+CROSS JOIN anchor a;

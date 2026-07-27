@@ -1,0 +1,8 @@
+{
+  "name": "patient-experience-command-center",
+  "description": "Deploy the Patient Experience Command Center accelerator on your own Snowflake data in 4 phases (conformance-discover, conformance-review, derived-build, app-deploy). Maps your source (HCAHPS survey, comments, calls, grievances, callbacks, unit operations) to a conformance contract, generates the derived data product (native Cortex AISQL voice enrichment + a custom XGBoost detractor/grievance-risk model with SHAP) from templates, then bundles and deploys the Next.js command-center app on Snowflake App Runtime (SPCS).",
+  "version": "0.1.0",
+  "author": {
+    "name": "Snowflake HCLS Solutions"
+  }
+}

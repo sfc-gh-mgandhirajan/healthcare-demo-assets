@@ -1,0 +1,54 @@
+-- DENORM_SURVEY_RESPONSE_DETAIL — response-level HCAHPS top-box engine.
+-- One row per survey response: per-measure top-box booleans (via the crosswalk),
+-- unit attributes, patient demographics (optional), and period buckets vs the demo clock.
+-- Bound to the conformance contract through the renderer helpers (tbl/col/join/canon/present).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  -- single analysis anchor month from the period clock
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }}
+  WHERE CLOCK_ID = 'CORE'
+)
+SELECT
+  {{ col('SR_RESPONSE_ID','s') }}        AS RESPONSE_ID,
+  {{ col('SR_SURVEY_INSTRUMENT','s') }}  AS SURVEY_INSTRUMENT,
+  {{ col('SR_ENCOUNTER_ID','s') }}       AS ENCOUNTER_ID,
+  {{ col('SR_PATIENT_ID','s') }}         AS PATIENT_ID,
+  {{ col('SR_UNIT_ID','s') }}            AS UNIT_ID,
+  u.{{ c('FU_UNIT_NAME') }}              AS UNIT_NAME,
+  u.{{ c('FU_UNIT_TYPE') }}              AS UNIT_TYPE,
+  u.{{ c('FU_SERVICE_LINE') }}           AS SERVICE_LINE,
+  {{ col('SR_DISCHARGE_DATE','s') }}     AS DISCHARGE_DATE,
+  DATE_TRUNC('quarter', {{ col('SR_DISCHARGE_DATE','s') }}) AS DISCHARGE_QUARTER,
+  CASE
+    WHEN {{ col('SR_DISCHARGE_DATE','s') }} >  DATEADD('month', -12, a.anchor_month) THEN 'CURRENT_12'
+    WHEN {{ col('SR_DISCHARGE_DATE','s') }} >  DATEADD('month', -24, a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OLDER'
+  END AS PERIOD_BUCKET,
+  -- per-measure top-box booleans (crosswalk-driven; 4 / 9-10 / Yes = top-box)
+  {{ canon('SR_NURSE_COMM','s') }}       AS TOPBOX_H_COMP_1,
+  {{ canon('SR_DOCTOR_COMM','s') }}      AS TOPBOX_H_COMP_2,
+  {{ canon('SR_RESPONSIVENESS','s') }}   AS TOPBOX_H_COMP_3,
+  {{ canon('SR_MEDICINE_COMM','s') }}    AS TOPBOX_H_COMP_5,
+  {{ canon('SR_DISCHARGE_INFO','s') }}   AS TOPBOX_H_COMP_6,
+  {{ canon('SR_CARE_TRANSITION','s') }}  AS TOPBOX_H_COMP_7,
+  {{ canon('SR_CLEANLINESS','s') }}      AS TOPBOX_H_CLEAN_HSP,
+  {{ canon('SR_QUIETNESS','s') }}        AS TOPBOX_H_QUIET_HSP,
+  {{ canon('SR_OVERALL_RATING','s') }}   AS TOPBOX_H_HSP_RATING,
+  {{ canon('SR_RECOMMEND','s') }}        AS TOPBOX_H_RECMND,
+{% if present('PATIENT_DEMOGRAPHICS') %}
+  {{ canon('PAT_RACE','p') }}            AS RACE,
+  {{ canon('PAT_ETHNICITY','p') }}       AS ETHNICITY,
+  {{ canon('PAT_LANGUAGE','p') }}        AS LANGUAGE
+{% else %}
+  NULL AS RACE, NULL AS ETHNICITY, NULL AS LANGUAGE
+{% endif %}
+FROM {{ tbl('SR_RESPONSE_ID') }} s
+JOIN {{ tbl('FU_UNIT_ID') }} u ON {{ join('SR__UNIT','s','u') }}
+{% if present('PATIENT_DEMOGRAPHICS') %}
+LEFT JOIN {{ tbl('PAT_PATIENT_ID') }} p ON {{ join('SR__PATIENT','s','p') }}
+{% endif %}
+CROSS JOIN anchor a;

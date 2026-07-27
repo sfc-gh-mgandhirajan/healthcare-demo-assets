@@ -1,0 +1,71 @@
+-- MDL_DISSAT_RISK_SCORE_TASK — incremental model scoring. Re-scores ONLY the delta: encounters that are
+-- new, whose FEATURE_HASH changed, or that were scored under an older model version. Full re-score is not
+-- a per-cycle cost - it happens automatically only when params.model_version changes (a real need).
+-- Created SUSPENDED; the derived-build skill seeds the backlog (EXECUTE TASK once) then RESUMEs.
+-- Model scoring (MODEL!PREDICT_PROBA) cannot run incrementally inside a dynamic table (model methods force
+-- FULL refresh, and FS_PX_RISK_FEATURES is itself FULL so it has no change tracking to stream) - hence a
+-- change-detecting MERGE task instead. Reasons are deterministic per-encounter process failures (the same
+-- signals the model ranks highest); the model-derived GLOBAL decomposition lives in MDL_DRIVER_IMPORTANCE.
+CREATE OR REPLACE TASK {{ target('MDL_DISSAT_RISK_SCORE_TASK') }}
+  WAREHOUSE = {{ warehouse }}
+  SCHEDULE  = '{{ params.schedule }}'
+AS
+MERGE INTO {{ target('MDL_DISSAT_RISK') }} t
+USING (
+  WITH mv AS MODEL {{ target('PX_DISSAT_RISK_XGB') }} VERSION {{ params.model_version }},
+  delta AS (
+    SELECT f.ENCOUNTER_ID, f.PATIENT_ID, f.UNIT_ID,
+           f.F_MED_REC, f.F_INTERPRETER_USED, f.F_INTERPRETER_NEEDED, f.F_CALLBACK_REACHED,
+           f.F_CALLBACK_ISSUE, f.F_PRIOR_GRIEVANCE_CNT, f.F_COMMENT_SENTIMENT, f.F_HAS_NEGATIVE_COMMENT,
+           f.F_COMMENT_COUNT, f.F_UNIT_ID, f.F_RACE, f.F_ETHNICITY, f.F_LANGUAGE, f.PERIOD_BUCKET,
+           HASH(f.F_MED_REC,f.F_INTERPRETER_USED,f.F_INTERPRETER_NEEDED,f.F_CALLBACK_REACHED,f.F_CALLBACK_ISSUE,
+                f.F_PRIOR_GRIEVANCE_CNT,f.F_COMMENT_SENTIMENT,f.F_HAS_NEGATIVE_COMMENT,f.F_COMMENT_COUNT,
+                f.F_UNIT_ID,f.F_RACE,f.F_ETHNICITY,f.F_LANGUAGE,f.PERIOD_BUCKET) AS FEATURE_HASH
+    FROM {{ target('FS_PX_RISK_FEATURES') }} f
+    LEFT JOIN {{ target('MDL_DISSAT_RISK') }} s ON s.ENCOUNTER_ID = f.ENCOUNTER_ID
+    WHERE f.ENCOUNTER_ID IS NOT NULL
+      AND ( s.ENCOUNTER_ID IS NULL
+         OR s.MODEL_VERSION <> '{{ params.model_version }}'
+         OR s.FEATURE_HASH <> HASH(f.F_MED_REC,f.F_INTERPRETER_USED,f.F_INTERPRETER_NEEDED,f.F_CALLBACK_REACHED,
+                f.F_CALLBACK_ISSUE,f.F_PRIOR_GRIEVANCE_CNT,f.F_COMMENT_SENTIMENT,f.F_HAS_NEGATIVE_COMMENT,
+                f.F_COMMENT_COUNT,f.F_UNIT_ID,f.F_RACE,f.F_ETHNICITY,f.F_LANGUAGE,f.PERIOD_BUCKET) )
+  )
+  SELECT
+    d.ENCOUNTER_ID, d.PATIENT_ID, d.UNIT_ID, d.FEATURE_HASH,
+    mv!PREDICT_PROBA(COALESCE(d.F_MED_REC,0),COALESCE(d.F_INTERPRETER_USED,0),COALESCE(d.F_INTERPRETER_NEEDED,0),
+       COALESCE(d.F_CALLBACK_REACHED,0),COALESCE(d.F_CALLBACK_ISSUE,0),COALESCE(d.F_PRIOR_GRIEVANCE_CNT,0),
+       COALESCE(d.F_COMMENT_SENTIMENT,0),COALESCE(d.F_HAS_NEGATIVE_COMMENT,0),COALESCE(d.F_COMMENT_COUNT,0),
+       COALESCE(d.F_UNIT_ID,'UNK'),COALESCE(d.F_RACE,'UNK'),COALESCE(d.F_ETHNICITY,'UNK'),
+       COALESCE(d.F_LANGUAGE,'UNK'),COALESCE(d.PERIOD_BUCKET,'UNK')):output_feature_1::FLOAT AS RISK_SCORE,
+    ARRAY_COMPACT(ARRAY_CONSTRUCT(
+      IFF(d.F_CALLBACK_ISSUE = 1, 'Unresolved issue flagged on post-discharge callback', NULL),
+      IFF(d.F_MED_REC = 0, 'Medication reconciliation not completed', NULL),
+      IFF(d.F_CALLBACK_REACHED = 0, 'Post-discharge callback not reached', NULL),
+      IFF(d.F_INTERPRETER_NEEDED = 1 AND d.F_INTERPRETER_USED = 0, 'Interpreter needed but not used (language-access gap)', NULL),
+      IFF(d.F_PRIOR_GRIEVANCE_CNT > 0, 'Prior grievance history', NULL)
+    )) AS TOP_REASONS,
+    {{ col('PAT_PREFERRED_CONTACT_METHOD','p') }} AS PREFERRED_CHANNEL,
+    {{ col('PAT_OUTREACH_CONSENT','p') }}         AS OUTREACH_CONSENT,
+    CASE
+      WHEN NOT COALESCE({{ col('PAT_OUTREACH_CONSENT','p') }}, TRUE) THEN 'Do Not Contact'
+      WHEN {{ col('PAT_PREFERRED_CONTACT_METHOD','p') }} IN ('Text','SMS')
+           AND NOT COALESCE({{ col('PAT_SMS_CONSENT','p') }}, FALSE) THEN 'Phone'
+      ELSE COALESCE({{ col('PAT_PREFERRED_CONTACT_METHOD','p') }}, 'Phone')
+    END AS RECOMMENDED_CHANNEL
+  FROM delta d
+  LEFT JOIN {{ tbl('PAT_PATIENT_ID') }} p ON p.{{ c('PAT_PATIENT_ID') }} = d.PATIENT_ID
+) src
+ON t.ENCOUNTER_ID = src.ENCOUNTER_ID
+WHEN MATCHED THEN UPDATE SET
+  RISK_SCORE = src.RISK_SCORE,
+  RISK_TIER  = CASE WHEN src.RISK_SCORE >= 0.60 THEN 'HIGH' WHEN src.RISK_SCORE >= 0.42 THEN 'MEDIUM' ELSE 'LOW' END,
+  TOP_REASONS = src.TOP_REASONS, PREFERRED_CHANNEL = src.PREFERRED_CHANNEL, OUTREACH_CONSENT = src.OUTREACH_CONSENT,
+  RECOMMENDED_CHANNEL = src.RECOMMENDED_CHANNEL, FEATURE_HASH = src.FEATURE_HASH,
+  MODEL_VERSION = '{{ params.model_version }}', SCORED_AT = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN INSERT
+  (ENCOUNTER_ID, PATIENT_ID, UNIT_ID, RISK_SCORE, RISK_TIER, TOP_REASONS, PREFERRED_CHANNEL, OUTREACH_CONSENT,
+   RECOMMENDED_CHANNEL, FEATURE_HASH, MODEL_VERSION, SCORED_AT)
+  VALUES (src.ENCOUNTER_ID, src.PATIENT_ID, src.UNIT_ID, src.RISK_SCORE,
+   CASE WHEN src.RISK_SCORE >= 0.60 THEN 'HIGH' WHEN src.RISK_SCORE >= 0.42 THEN 'MEDIUM' ELSE 'LOW' END,
+   src.TOP_REASONS, src.PREFERRED_CHANNEL, src.OUTREACH_CONSENT, src.RECOMMENDED_CHANNEL, src.FEATURE_HASH,
+   '{{ params.model_version }}', CURRENT_TIMESTAMP());

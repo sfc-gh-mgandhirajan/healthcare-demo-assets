@@ -1,0 +1,32 @@
+-- GRANT_APP_ACCESS — least-privilege grants so the deployed Patient Experience
+-- Command Center app can read the derived data product and write governed actions.
+-- Bounded template: only target()/cfg (no conformance bindings needed).
+--
+-- The app queries with owner's rights: the SPCS service user runs as the role that
+-- OWNS the Application Service object (the role that ran `snow app deploy`), NOT
+-- necessarily config.app_role. So {{ '{{ app_role }}' }} must be that app-OWNER role
+-- (derive it via SHOW APPLICATION SERVICES -> owner; see the app-deploy skill).
+-- Rendered by render.py --only GRANT_APP_ACCESS; run AFTER `snow app deploy`.
+-- Idempotent. No-op when the app-owner role already owns the objects.
+{% set role = cfg.get('app_role') %}
+{% set views = [
+  'VW_HOUSE_KPIS', 'VW_JOURNEY_RIBBON', 'VW_WAIT_BY_AREA', 'VW_ACCESS_MOMENTUM',
+  'VW_MEASURE_BENCHMARK', 'VW_MEASURE_TREND', 'VW_EQUITY_GAP', 'VW_DRIVER_IMPORTANCE',
+  'VW_UNIT_SCORECARD', 'VW_POINTS_LOST', 'VW_DISCHARGE_READINESS', 'VW_GRIEVANCE_AGING',
+  'VW_RECOVERY_SLA', 'VW_VOICE_THEMES', 'VW_TAB_INSIGHTS'
+] %}
+-- Container access
+GRANT USAGE ON DATABASE {{ cfg.get('target_database') }} TO ROLE {{ role }};
+GRANT USAGE ON SCHEMA {{ cfg.get('target_database') }}.{{ cfg.get('target_schema') }} TO ROLE {{ role }};
+
+-- Presentation views (5-stage journey board panels + KPI ribbon + AI insight tabs)
+{% for v in views %}
+GRANT SELECT ON VIEW {{ target(v) }} TO ROLE {{ role }};
+{% endfor %}
+-- Governed action write path (the action rail POSTs OPEN actions and reads them back)
+GRANT SELECT, INSERT, UPDATE ON TABLE {{ target('ACTION_EVENT_LOG') }} TO ROLE {{ role }};
+
+-- Agent + its linked objects (powers the "Ask the agent" rail via the Agent Run REST API)
+GRANT USAGE ON AGENT {{ target('AGT_PATIENT_EXPERIENCE') }} TO ROLE {{ role }};
+GRANT SELECT, REFERENCES ON SEMANTIC VIEW {{ target('SV_PATIENT_EXPERIENCE_INTELLIGENCE') }} TO ROLE {{ role }};
+GRANT USAGE ON CORTEX SEARCH SERVICE {{ target('COMMENT_SEARCH') }} TO ROLE {{ role }};

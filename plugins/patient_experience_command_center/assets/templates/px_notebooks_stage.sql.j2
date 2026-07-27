@@ -1,0 +1,6 @@
+-- PX_NOTEBOOKS — internal stage that backs the headless ML Notebook Project Object (NPO).
+-- Holds the plugin's ML notebook + environment file (assets/ml/*), PUT here by the derived-build skill
+-- before the NPO is created. SSE + directory-enabled (required for CREATE NOTEBOOK PROJECT FROM stage).
+CREATE STAGE IF NOT EXISTS {{ target('PX_NOTEBOOKS') }}
+  DIRECTORY  = (ENABLE = TRUE)
+  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');

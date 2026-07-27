@@ -1,0 +1,5 @@
+-- CALL_RECORDING_STAGE_STREAM — change detector on the recording stage's directory table.
+-- Only files added AFTER this stream is created flow through the task; pre-existing files are
+-- seeded once into the File Log during the build (see derived-build skill / seed step).
+CREATE OR REPLACE STREAM {{ target('CALL_RECORDING_STAGE_STREAM') }}
+  ON STAGE {{ stage('CC_RECORDING_STAGE')[1:] }};

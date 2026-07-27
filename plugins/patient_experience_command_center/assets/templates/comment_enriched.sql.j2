@@ -1,0 +1,50 @@
+-- COMMENT_ENRICHED — unified patient voice, INCREMENTAL dynamic table with native Cortex enrichment.
+-- object_type: dynamic_table. Union of survey comments + online reviews + call transcripts; per row:
+-- sentiment (SNOWFLAKE.CORTEX.SENTIMENT) + experience THEME + JOURNEY_STAGE (AI_CLASSIFY), all called
+-- INLINE (no LATERAL) so AI runs once per new row and the DT stays INCREMENTAL — new comments/reviews/
+-- transcripts get enriched exactly once as they land, never re-scored.
+-- Cost is bounded by a DETERMINISTIC hash-modulo filter (params.sample_bp basis points out of 1000):
+-- deterministic keeps the DT incremental-eligible, whereas SAMPLE() is non-deterministic and forces FULL
+-- refresh (re-paying AI on every row every refresh). For full production enrichment set sample_bp: 1000.
+-- No CURRENT_TIMESTAMP in the SELECT list (non-deterministic -> would also force FULL).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('COMMENT_ENRICHED') }}
+  TARGET_LAG   = '{{ params.target_lag }}'
+  WAREHOUSE    = {{ warehouse }}
+  REFRESH_MODE = INCREMENTAL
+AS
+WITH src AS (
+  SELECT 'SURVEY_COMMENT'::VARCHAR AS SOURCE_TYPE,
+         {{ col('CMT_COMMENT_ID','c') }}::VARCHAR AS SOURCE_ID,
+         {{ col('CMT_ENCOUNTER_ID','c') }}::VARCHAR AS ENCOUNTER_ID,
+         {{ col('CMT_UNIT_ID','c') }}::VARCHAR AS UNIT_ID,
+         {{ col('CMT_COMMENT_TEXT','c') }}::VARCHAR AS COMMENT_TEXT,
+         {{ col('CMT_COLLECTED_DATE','c') }} AS EVENT_DATE
+  FROM {{ tbl('CMT_COMMENT_ID') }} c
+  WHERE {{ col('CMT_COMMENT_TEXT','c') }} IS NOT NULL
+    AND MOD(ABS(HASH({{ col('CMT_COMMENT_ID','c') }})), 1000) < {{ params.sample_bp }}
+  UNION ALL
+  SELECT 'ONLINE_REVIEW',
+         {{ col('OR_REVIEW_ID','r') }}::VARCHAR, NULL, NULL,
+         {{ col('OR_REVIEW_TEXT','r') }}::VARCHAR, {{ col('OR_REVIEW_DATE','r') }}
+  FROM {{ tbl('OR_REVIEW_ID') }} r
+  WHERE {{ col('OR_REVIEW_TEXT','r') }} IS NOT NULL
+    AND MOD(ABS(HASH({{ col('OR_REVIEW_ID','r') }})), 1000) < {{ params.sample_bp }}
+  UNION ALL
+  SELECT 'CALL_TRANSCRIPT', CALL_ID::VARCHAR, NULL, NULL, TRANSCRIPT_TEXT, NULL
+  FROM {{ target('CALL_TRANSCRIPT') }}
+  WHERE TRANSCRIPT_TEXT IS NOT NULL
+)
+SELECT
+  SOURCE_TYPE, SOURCE_ID, ENCOUNTER_ID, UNIT_ID, COMMENT_TEXT, EVENT_DATE,
+  SNOWFLAKE.CORTEX.SENTIMENT(COMMENT_TEXT) AS SENTIMENT_SCORE,
+  AI_CLASSIFY(COMMENT_TEXT, [
+    'Access & Timeliness','Staff Courtesy','Wayfinding & Environment','Nurse Communication',
+    'Doctor Communication','Information Consistency','Staff Responsiveness','Pain & Comfort',
+    'Quietness & Rest','Medication Communication','Discharge Instructions','Care Transition',
+    'Follow-up & Closing the Loop','Grievance Handling','Loyalty & Recommend','Billing','Other'
+  ]):labels[0]::VARCHAR AS THEME,
+  AI_CLASSIFY(COMMENT_TEXT, [
+    'Arrival & Access','Admission & Communication','Care & Responsiveness',
+    'Discharge & Transition','Follow-up & Loyalty'
+  ]):labels[0]::VARCHAR AS JOURNEY_STAGE
+FROM src;

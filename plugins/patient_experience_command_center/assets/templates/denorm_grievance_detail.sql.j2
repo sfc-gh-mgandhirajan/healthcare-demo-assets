@@ -1,0 +1,37 @@
+-- DENORM_GRIEVANCE_DETAIL — one row per grievance/complaint case with aging + SLA state.
+-- Contract-bound: reads GRIEVANCE_CASE; aging/buckets computed vs the demo-clock anchor ("today").
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_GRIEVANCE_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }} WHERE CLOCK_ID = 'CORE'
+)
+SELECT
+  {{ col('GRV_CASE_ID','g') }}              AS CASE_ID,
+  {{ col('GRV_PATIENT_ID','g') }}           AS PATIENT_ID,
+  {{ col('GRV_ENCOUNTER_ID','g') }}         AS ENCOUNTER_ID,
+  {{ col('GRV_UNIT_ID','g') }}              AS UNIT_ID,
+  {{ canon('GRV_CASE_TYPE','g') }}          AS CASE_TYPE,
+  {{ canon('GRV_CATEGORY','g') }}           AS CATEGORY,
+  {{ canon('GRV_SEVERITY','g') }}           AS SEVERITY,
+  {{ canon('GRV_STATUS','g') }}             AS STATUS,
+  {{ col('GRV_RECEIVED_DATE','g') }}        AS RECEIVED_DATE,
+  {{ col('GRV_REGULATORY_DUE_DATE','g') }}  AS REGULATORY_DUE_DATE,
+  {{ col('GRV_RESOLVED_DATE','g') }}        AS RESOLVED_DATE,
+  ({{ col('GRV_RESOLVED_DATE','g') }} IS NOT NULL)                                                        AS IS_RESOLVED,
+  DATEDIFF('day', {{ col('GRV_RECEIVED_DATE','g') }}, COALESCE({{ col('GRV_RESOLVED_DATE','g') }}, a.anchor_month)) AS AGE_DAYS,
+  DATEDIFF('day', a.anchor_month, {{ col('GRV_REGULATORY_DUE_DATE','g') }})                                AS DAYS_TO_DUE,
+  CASE
+    WHEN {{ col('GRV_RESOLVED_DATE','g') }} IS NOT NULL                                    THEN 'Resolved'
+    WHEN {{ col('GRV_REGULATORY_DUE_DATE','g') }} <  a.anchor_month                        THEN 'Overdue'
+    WHEN {{ col('GRV_REGULATORY_DUE_DATE','g') }} <= DATEADD('day', 2, a.anchor_month)     THEN 'Due within 48h'
+    WHEN {{ col('GRV_REGULATORY_DUE_DATE','g') }} <= DATEADD('day', 7, a.anchor_month)     THEN 'Due in 3-7 days'
+    ELSE 'On track'
+  END AS AGING_BUCKET,
+  -- SLA adherence: resolved on/before the regulatory window
+  IFF({{ col('GRV_RESOLVED_DATE','g') }} IS NOT NULL
+      AND {{ col('GRV_RESOLVED_DATE','g') }} <= {{ col('GRV_REGULATORY_DUE_DATE','g') }}, TRUE, FALSE) AS CLOSED_IN_WINDOW
+FROM {{ tbl('GRV_CASE_ID') }} g
+CROSS JOIN anchor a;

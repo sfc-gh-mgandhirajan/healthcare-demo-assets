@@ -1,0 +1,17 @@
+-- VW_WAIT_BY_AREA — s1 cWait: average wait vs target by access area (ED + Clinic/Imaging/Lab).
+CREATE OR REPLACE VIEW {{ target('VW_WAIT_BY_AREA') }} AS
+WITH w AS (
+  SELECT {{ col('VT_AREA','v') }} AS AREA, {{ col('VT_WAIT_MINUTES','v') }} AS WAIT_MIN
+  FROM {{ tbl('VT_AREA') }} v
+  UNION ALL
+  SELECT 'ED', {{ col('ED_WAIT_MINUTES','e') }} FROM {{ tbl('ED_WAIT_MINUTES') }} e
+)
+SELECT
+  w.AREA,
+  ROUND(AVG(w.WAIT_MIN), 1) AS AVG_WAIT_MIN,
+  MAX(tg.{{ c('OPS_TARGET_VALUE') }}) AS TARGET_MIN
+FROM w
+LEFT JOIN {{ tbl('OPS_TARGET_KEY') }} tg
+  ON {{ col('OPS_TARGET_TYPE','tg') }} = 'WAIT' AND {{ col('OPS_TARGET_KEY','tg') }} = w.AREA
+GROUP BY w.AREA
+ORDER BY AVG_WAIT_MIN DESC;

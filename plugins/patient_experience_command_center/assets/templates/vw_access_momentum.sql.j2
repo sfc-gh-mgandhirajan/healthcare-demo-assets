@@ -1,0 +1,26 @@
+-- VW_ACCESS_MOMENTUM — s1 cNoShow: access on-time rate + LWBS rate over the last 5 quarters
+-- (real quarterly trend from operational event dates, not just current/prior).
+CREATE OR REPLACE VIEW {{ target('VW_ACCESS_MOMENTUM') }} AS
+WITH ev AS (
+  SELECT DATE_TRUNC('quarter', {{ col('VT_ARRIVAL_DATETIME','v') }}) AS QUARTER,
+         {{ col('VT_AREA','v') }} AS AREA, {{ col('VT_WAIT_MINUTES','v') }} AS WAIT_MIN,
+         IFF({{ col('VT_LEFT_BEFORE_SEEN','v') }}, 1, 0) AS LWBS
+  FROM {{ tbl('VT_AREA') }} v
+  UNION ALL
+  SELECT DATE_TRUNC('quarter', {{ col('ED_ARRIVAL_DATETIME','e') }}), 'ED',
+         {{ col('ED_WAIT_MINUTES','e') }}, IFF({{ col('ED_LWBS','e') }}, 1, 0)
+  FROM {{ tbl('ED_LWBS') }} e
+),
+tgt AS (
+  SELECT {{ col('OPS_TARGET_KEY','o') }} AS AREA, {{ col('OPS_TARGET_VALUE','o') }} AS TV
+  FROM {{ tbl('OPS_TARGET_KEY') }} o WHERE {{ col('OPS_TARGET_TYPE','o') }} = 'WAIT'
+)
+SELECT
+  ev.QUARTER,
+  ROUND(AVG(IFF(ev.WAIT_MIN <= COALESCE(tgt.TV, 99999), 1, 0)) * 100, 1) AS ON_TIME_PCT,
+  ROUND(AVG(ev.LWBS) * 100, 2) AS LWBS_PCT,
+  COUNT(*) AS N_VISITS
+FROM ev LEFT JOIN tgt ON tgt.AREA = ev.AREA
+WHERE ev.QUARTER >= DATEADD('quarter', -4, (SELECT MAX(DATE_TRUNC('quarter', {{ col('ED_ARRIVAL_DATETIME','e2') }})) FROM {{ tbl('ED_LWBS') }} e2))
+GROUP BY ev.QUARTER
+ORDER BY ev.QUARTER;

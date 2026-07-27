@@ -1,0 +1,5 @@
+-- VW_EQUITY_GAP — nurse-communication top-box gap vs house average by race cohort (equity panel).
+CREATE OR REPLACE VIEW {{ target('VW_EQUITY_GAP') }} AS
+SELECT RACE, NURSE_TOPBOX, HOUSE_AVG, GAP_PTS, N_RESPONSES
+FROM {{ target('MDL_EQUITY_GAP') }}
+ORDER BY GAP_PTS;

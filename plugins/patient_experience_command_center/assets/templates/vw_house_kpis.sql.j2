@@ -1,0 +1,19 @@
+-- VW_HOUSE_KPIS — one-row house-level headline KPIs for the command center header.
+CREATE OR REPLACE VIEW {{ target('VW_HOUSE_KPIS') }} AS
+SELECT
+  (SELECT COMPOSITE_TOPBOX FROM {{ target('MDL_STAR_RATING') }} WHERE ENTITY_LEVEL='HOUSE')            AS COMPOSITE_TOPBOX,
+  (SELECT STAR_LEVEL FROM {{ target('MDL_STAR_RATING') }} WHERE ENTITY_LEVEL='HOUSE')                  AS STAR_LEVEL,
+  (SELECT PTS_TO_NEXT_STAR FROM {{ target('MDL_STAR_RATING') }} WHERE ENTITY_LEVEL='HOUSE')            AS PTS_TO_NEXT_STAR,
+  (SELECT ROUND(AVG(IFF(TOPBOX_H_RECMND,1,0))*100,1) FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}) AS RECOMMEND_TOPBOX_PCT,
+  (SELECT COUNT_IF(RISK_TIER='HIGH') FROM {{ target('MDL_DISSAT_RISK') }})                             AS HIGH_RISK_ENCOUNTERS,
+  (SELECT ROUND(AVG(RISK_SCORE),3) FROM {{ target('MDL_DISSAT_RISK') }})                               AS AVG_DETRACTOR_RISK,
+  (SELECT ROUND(SUM(WEIGHTED_CONTRIB_PTS),1) FROM {{ target('MDL_POINTS_LOST') }})                     AS COMPOSITE_YOY_DELTA_PTS,
+  (SELECT COUNT(*) FROM {{ tbl('GRV_STATUS') }} g WHERE {{ col('GRV_STATUS','g') }} <> 'Resolved')      AS PATIENTS_AWAITING_RECOVERY,
+  (SELECT COUNT(*) FROM {{ tbl('GRV_STATUS') }} g WHERE {{ col('GRV_STATUS','g') }} <> 'Resolved'
+     AND {{ col('GRV_REGULATORY_DUE_DATE','g') }} IS NOT NULL)                                          AS FORMAL_GRIEVANCES_OPEN,
+  (SELECT {{ col('OPS_TARGET_VALUE','o') }} FROM {{ tbl('OPS_TARGET_KEY') }} o
+     WHERE {{ col('OPS_TARGET_TYPE','o') }}='PAYMENT_BASE' AND {{ col('OPS_TARGET_KEY','o') }}='NET_INPATIENT_REVENUE') AS NET_INPATIENT_REVENUE,
+  ROUND(
+    (SELECT {{ col('OPS_TARGET_VALUE','o') }} FROM {{ tbl('OPS_TARGET_KEY') }} o
+      WHERE {{ col('OPS_TARGET_TYPE','o') }}='PAYMENT_BASE' AND {{ col('OPS_TARGET_KEY','o') }}='NET_INPATIENT_REVENUE') * 0.02, 0
+  ) AS VBP_AT_RISK_USD;   -- 2% of inpatient revenue at risk under HCAHPS-weighted VBP

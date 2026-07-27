@@ -1,0 +1,11 @@
+profile:
+  label: "Patient Experience Command Center"
+  description: "Certified patient-experience intelligence along the care journey — HCAHPS, Voice-of-Patient AI, and a governed action queue for the CXO and Patient Experience team."
+  icon: icon.svg
+
+install:
+  commands:
+    - ["npm", "ci", "--include=dev"]
+
+run:
+  command: ["node", ".next/standalone/server.js"]

@@ -1,0 +1,69 @@
+-- SV_PATIENT_EXPERIENCE_INTELLIGENCE — Cortex Analyst semantic view for the Patient Experience Command
+-- Center. Grain: HCAHPS survey response, joined to its encounter's detractor-risk score. Exposes the
+-- experience metrics (HCAHPS top-box rates, recommend, overall rating), the risk lens (avg risk, high-risk
+-- counts), and the dimensions a CXO slices by (unit / service line / period / demographics / risk tier /
+-- outreach channel). Contract-bound only indirectly: it reads accelerator-owned derived objects whose
+-- schemas are fixed, so it references them by target() name with stable columns.
+CREATE OR REPLACE SEMANTIC VIEW {{ target('SV_PATIENT_EXPERIENCE_INTELLIGENCE') }}
+  TABLES (
+    survey AS {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}
+      PRIMARY KEY (RESPONSE_ID)
+      WITH SYNONYMS ('surveys','hcahps responses','patient surveys')
+      COMMENT = 'One HCAHPS survey response with per-measure top-box flags, unit, demographics, and period.',
+    risk AS {{ target('MDL_DISSAT_RISK') }}
+      PRIMARY KEY (ENCOUNTER_ID)
+      WITH SYNONYMS ('detractor risk','dissatisfaction risk','risk score')
+      COMMENT = 'Per-encounter modeled detractor/grievance risk score, tier, and consent-aware channel.'
+  )
+  RELATIONSHIPS (
+    survey_to_risk AS survey (ENCOUNTER_ID) REFERENCES risk (ENCOUNTER_ID)
+  )
+  FACTS (
+    risk.f_risk_score   AS RISK_SCORE,
+    risk.f_is_high_risk AS IFF(RISK_TIER = 'HIGH', 1, 0)
+  )
+  DIMENSIONS (
+    survey.unit_name       AS UNIT_NAME        WITH SYNONYMS = ('unit','ward','nursing unit') COMMENT = 'Inpatient unit name.',
+    survey.unit_type       AS UNIT_TYPE        WITH SYNONYMS = ('unit category') COMMENT = 'Unit type.',
+    survey.service_line    AS SERVICE_LINE     WITH SYNONYMS = ('service','specialty') COMMENT = 'Service line.',
+    survey.period_bucket   AS PERIOD_BUCKET    WITH SYNONYMS = ('period','current or prior') COMMENT = 'CURRENT vs PRIOR reporting window.',
+    survey.discharge_quarter AS DISCHARGE_QUARTER WITH SYNONYMS = ('quarter','discharge quarter') COMMENT = 'Quarter of discharge.',
+    survey.race            AS RACE             WITH SYNONYMS = ('patient race') COMMENT = 'Patient race (equity analysis).',
+    survey.ethnicity       AS ETHNICITY        COMMENT = 'Patient ethnicity.',
+    survey.language        AS LANGUAGE         WITH SYNONYMS = ('preferred language') COMMENT = 'Patient preferred language.',
+    survey.survey_instrument AS SURVEY_INSTRUMENT COMMENT = 'Survey instrument.',
+    risk.risk_tier         AS RISK_TIER        WITH SYNONYMS = ('risk level','risk band') COMMENT = 'HIGH / MEDIUM / LOW modeled detractor risk.',
+    risk.recommended_channel AS RECOMMENDED_CHANNEL WITH SYNONYMS = ('outreach channel','contact channel') COMMENT = 'Consent-aware recommended outreach channel.'
+  )
+  METRICS (
+    survey.response_count           AS COUNT(survey.RESPONSE_ID)                     WITH SYNONYMS = ('surveys','number of responses','n') COMMENT = 'Number of HCAHPS survey responses.',
+    survey.nurse_comm_topbox_pct    AS AVG(IFF(survey.TOPBOX_H_COMP_1, 1, 0)) * 100  WITH SYNONYMS = ('nurse communication top-box') COMMENT = 'Nurse communication top-box rate (%).',
+    survey.doctor_comm_topbox_pct   AS AVG(IFF(survey.TOPBOX_H_COMP_2, 1, 0)) * 100  WITH SYNONYMS = ('doctor communication top-box') COMMENT = 'Doctor communication top-box rate (%).',
+    survey.responsiveness_topbox_pct AS AVG(IFF(survey.TOPBOX_H_COMP_3, 1, 0)) * 100 WITH SYNONYMS = ('staff responsiveness top-box') COMMENT = 'Staff responsiveness top-box rate (%).',
+    survey.medicine_comm_topbox_pct AS AVG(IFF(survey.TOPBOX_H_COMP_5, 1, 0)) * 100  WITH SYNONYMS = ('medication communication top-box') COMMENT = 'Communication about medicines top-box rate (%).',
+    survey.discharge_info_topbox_pct AS AVG(IFF(survey.TOPBOX_H_COMP_6, 1, 0)) * 100 WITH SYNONYMS = ('discharge information top-box') COMMENT = 'Discharge information top-box rate (%).',
+    survey.care_transition_topbox_pct AS AVG(IFF(survey.TOPBOX_H_COMP_7, 1, 0)) * 100 WITH SYNONYMS = ('care transition top-box') COMMENT = 'Care transition top-box rate (%).',
+    survey.cleanliness_topbox_pct   AS AVG(IFF(survey.TOPBOX_H_CLEAN_HSP, 1, 0)) * 100 COMMENT = 'Cleanliness top-box rate (%).',
+    survey.quietness_topbox_pct     AS AVG(IFF(survey.TOPBOX_H_QUIET_HSP, 1, 0)) * 100 COMMENT = 'Quietness top-box rate (%).',
+    survey.overall_rating_topbox_pct AS AVG(IFF(survey.TOPBOX_H_HSP_RATING, 1, 0)) * 100 WITH SYNONYMS = ('overall hospital rating 9-10') COMMENT = 'Overall hospital rating 9-10 top-box rate (%).',
+    survey.recommend_topbox_pct     AS AVG(IFF(survey.TOPBOX_H_RECMND, 1, 0)) * 100  WITH SYNONYMS = ('would recommend','recommend rate') COMMENT = 'Would definitely recommend top-box rate (%).',
+    survey.avg_risk_score           AS AVG(risk.f_risk_score)                        WITH SYNONYMS = ('average detractor risk') COMMENT = 'Average modeled detractor risk (0-1) of the responding encounters.',
+    survey.high_risk_responses      AS SUM(risk.f_is_high_risk)                       WITH SYNONYMS = ('high risk count','at-risk patients') COMMENT = 'Responses whose encounter is HIGH modeled detractor risk.'
+  )
+  COMMENT = 'Patient Experience Command Center: HCAHPS experience metrics + modeled detractor risk by unit, service line, period, demographics, and risk tier.'
+  AI_VERIFIED_QUERIES (
+    lowest_recommend_units AS (
+      QUESTION 'Which units have the lowest would-recommend rate and how many high detractor-risk patients do they have?'
+      VERIFIED_AT 1784600000
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = px_data_stewards)'
+      SQL 'SELECT * FROM SEMANTIC_VIEW({{ target('SV_PATIENT_EXPERIENCE_INTELLIGENCE') }} METRICS survey.recommend_topbox_pct, survey.high_risk_responses DIMENSIONS survey.unit_name) ORDER BY recommend_topbox_pct ASC NULLS LAST'
+    ),
+    nurse_comm_equity AS (
+      QUESTION 'What is the nurse communication top-box rate by patient race?'
+      VERIFIED_AT 1784600000
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = px_data_stewards)'
+      SQL 'SELECT * FROM SEMANTIC_VIEW({{ target('SV_PATIENT_EXPERIENCE_INTELLIGENCE') }} METRICS survey.nurse_comm_topbox_pct, survey.response_count DIMENSIONS survey.race) ORDER BY nurse_comm_topbox_pct ASC NULLS LAST'
+    )
+  );
