@@ -1,0 +1,12 @@
+[project]
+name = "dicom-explorer"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "snowflake-connector-python>=3.3.0",
+    "streamlit[snowflake]>=1.54.0",
+    "plotly>=5.24.0",
+    "pandas>=2.0.0",
+    "requests>=2.31.0",
+    "streamlit-floating-container>=0.2.0",
+]

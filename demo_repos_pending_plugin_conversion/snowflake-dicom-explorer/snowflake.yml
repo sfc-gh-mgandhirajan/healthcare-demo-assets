@@ -1,0 +1,18 @@
+definition_version: 2
+entities:
+  dicom_explorer_sf:
+    type: streamlit
+    identifier:
+      name: DICOM_EXPLORER_SF
+      database: EW_IMAGING_DB
+      schema: EXPLORER
+    query_warehouse: COMPUTE_WH
+    compute_pool: CTTI_DASHBOARD_POOL
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    external_access_integrations:
+      - ALLOW_ALL_ACCESS_INTEGRATION
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
+      - pyproject.toml
+      - .streamlit/config.toml
