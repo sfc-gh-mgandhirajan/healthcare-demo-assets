@@ -93,15 +93,11 @@ Execute the rendered SQL in `build_manifest.yaml` `depends_on` order:
 | 3 | `02_ingest.sql` | `SP_MAUDE_INGEST` proc, weekly sync task, backfill task | engineer |
 | 4 | `07_backfill_fanout.sql` | Launches the parallel backfill lanes (async) | engineer |
 | 5 | `03_curated.sql` | Star schema Dynamic Tables | engineer |
-| 6 | `04_analytics.sql` | MDR-grain views, semantic view, Cortex Search, AI enrichment DDL | engineer |
-| 7 | `05_agents.sql` | Both Cortex Agents + clinician grants | engineer |
-| 8 | `06_profiling.sql` | Profiling queries + DMFs | engineer |
 
-Step 4 (the fan-out) runs **async**. Proceed to steps 5-8 while it loads.
-
-`08_enrichment.sql` is **not** in this list on purpose — it runs in Step 4 below,
-after the backfill is verified. Running it here would classify a near-empty
-`EVENT_NARRATIVE` and ship a dead table.
+**STOP here.** Wait for the backfill fan-out (step 4) to complete before proceeding.
+Do NOT execute `04_analytics.sql` until Step 4 below confirms all partitions are
+loaded and the Dynamic Tables are refreshed. The Cortex Search service needs a full
+corpus to build its index efficiently.
 
 **Monitor the backfill:**
 ```sql
@@ -109,7 +105,7 @@ SELECT status, COUNT(*) AS partitions, SUM(loaded_records) AS rows_loaded
 FROM <TARGET_DB>.RAW.LOAD_CONTROL GROUP BY status;
 ```
 
-## Step 4: Verify and finalize
+## Step 4: Post-backfill - refresh, build, and finalize
 
 Once `LOAD_CONTROL` shows all partitions LOADED with 0 FAILED:
 
@@ -123,7 +119,8 @@ SELECT
 For a `full` load these should match exactly. For a scoped load, `raw_rows` will be
 less than `manifest_total` by design.
 
-2. **Refresh the Dynamic Tables** (or wait for the target lag):
+2. **Refresh ALL Dynamic Tables** — this is mandatory, not optional. The DTs must
+   be current before creating the Cortex Search service or running enrichment:
 ```sql
 ALTER DYNAMIC TABLE <TARGET_DB>.CURATED.FACT_ADVERSE_EVENT REFRESH;
 ALTER DYNAMIC TABLE <TARGET_DB>.CURATED.DIM_DEVICE REFRESH;
@@ -132,18 +129,34 @@ ALTER DYNAMIC TABLE <TARGET_DB>.CURATED.PATIENT_OUTCOME REFRESH;
 ALTER DYNAMIC TABLE <TARGET_DB>.CURATED.BRIDGE_DEVICE_PROBLEM REFRESH;
 ```
 
-3. **Confirm the search service is serving:**
-```sql
-SHOW CORTEX SEARCH SERVICES LIKE 'MAUDE_NARRATIVE_SEARCH' IN SCHEMA <TARGET_DB>.ANALYTICS;
--- serving_state must be ACTIVE (INITIALIZING means the index is still building)
-```
-If it stays `INITIALIZING` with `source_data_num_rows = 0` for over an hour, DROP and
-re-create the service - the initial index build can wedge.
+3. **Execute the remaining DDL** — now that the corpus is loaded and DTs are
+   refreshed, run the analytics, agents, and profiling scripts:
 
-4. **Resume the weekly sync:**
-```sql
-ALTER TASK <TARGET_DB>.RAW.TASK_MAUDE_WEEKLY_SYNC RESUME;
-```
+| Order | File | What it creates | Role needed |
+|---|---|---|---|
+| 6 | `04_analytics.sql` | MDR-grain views, semantic view, Cortex Search, AI enrichment DDL | engineer |
+| 7 | `05_agents.sql` | Both Cortex Agents + clinician grants | engineer |
+| 8 | `06_profiling.sql` | Profiling queries + DMFs | engineer |
+
+   The Cortex Search service (`MAUDE_NARRATIVE_SEARCH`) is created inside
+   `04_analytics.sql`. Once created, it begins indexing in the background
+   (serverless, no warehouse credits). This is a **fire-and-forget** operation.
+
+4. **Inform the user about the search service build:**
+
+   After executing `04_analytics.sql`, tell the user:
+
+   > The Cortex Search service (`MAUDE_NARRATIVE_SEARCH`) has been created and is
+   > now indexing the narrative corpus in the background. This typically takes
+   > 30-60 minutes depending on corpus size. The Semantic View and Cortex Analyst
+   > agent are usable immediately for structured queries. The narrative search
+   > agent will return results once the index build completes.
+   >
+   > Check status:
+   > ```sql
+   > SHOW CORTEX SEARCH SERVICES LIKE 'MAUDE_NARRATIVE_SEARCH' IN SCHEMA <TARGET_DB>.ANALYTICS;
+   > -- serving_state = ACTIVE means ready; INITIALIZING means still building
+   > ```
 
 5. **Drop the transient backfill lanes:**
 ```sql
@@ -152,10 +165,14 @@ DECLARE i INT; BEGIN FOR i IN 0 TO 50 DO
 END FOR; END;
 ```
 
-6. **Populate the AI enrichment** — now that the corpus is loaded, run the
-   deferred `08_enrichment.sql`. It self-guards: if `EVENT_NARRATIVE` is still
-   below `enrichment_min_corpus_rows` it fails fast rather than sampling an
-   empty table. Verify it landed:
+6. **Resume the weekly sync:**
+```sql
+ALTER TASK <TARGET_DB>.RAW.TASK_MAUDE_WEEKLY_SYNC RESUME;
+```
+
+7. **Populate the AI enrichment** — run the deferred `08_enrichment.sql`. It
+   self-guards: if `EVENT_NARRATIVE` is still below `enrichment_min_corpus_rows`
+   it fails fast rather than sampling an empty table. Verify it landed:
 ```sql
 SELECT COUNT(*) AS enriched_rows,
        COUNT(DISTINCT mdr_text_key) AS distinct_segments
@@ -164,7 +181,7 @@ FROM <TARGET_DB>.ANALYTICS.AI_EVENT_ENRICHMENT;
 -- and equal distinct_segments (grain is one row per narrative segment)
 ```
 
-7. **Confirm citation IDs are unique** — agents cite on `MDR_TEXT_KEY`, the
+8. **Confirm citation IDs are unique** — agents cite on `MDR_TEXT_KEY`, the
    FDA-assigned per-segment key. `mdr_report_key` is NOT unique in this corpus
    (an MDR carries many narrative segments), so citing on it collapses or
    mis-attributes results:
@@ -175,8 +192,10 @@ WHERE narrative_text IS NOT NULL AND narrative_length >= 20;
 -- rows_ must equal ids
 ```
 
-8. **Test an agent** - in Snowsight (AI & ML > Agents) or via `/cortex-agent` chat
-   against `<TARGET_DB>.ANALYTICS.MAUDE_DEVICE_SAFETY_AGENT`.
+9. **Test an agent** - in Snowsight (AI & ML > Agents) or via `/cortex-agent` chat
+   against `<TARGET_DB>.ANALYTICS.MAUDE_DEVICE_SAFETY_AGENT`. The structured
+   analyst agent works immediately; the narrative search agent works once the
+   Cortex Search index reaches `ACTIVE` state (~30-60 min after creation).
 
 ## What gets deployed
 
