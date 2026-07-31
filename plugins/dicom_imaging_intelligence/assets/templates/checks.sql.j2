@@ -1,0 +1,94 @@
+-- =============================================================================
+-- Post-deploy validation.
+--
+-- One row per invariant, uniform shape: CHECK_NAME | STATUS | DETAIL.
+--   PASS  the invariant holds
+--   FAIL  something is wrong and needs attention
+--   WARN  not a failure - an optional component simply is not deployed yet
+--
+-- Safe to run repeatedly. Reads only; changes nothing.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+WITH counts AS (
+    SELECT
+        (SELECT COUNT(*) FROM DICOM_SOURCE_CONFIG)                        AS sources,
+        (SELECT COUNT(*) FROM DICOM_SOURCE_CONFIG WHERE ENABLED)          AS sources_on,
+        (SELECT COUNT(*) FROM DICOM_SOURCE_PREFIX WHERE ENABLED)          AS prefixes,
+        (SELECT COUNT(*) FROM DICOM_FILE_MANIFEST)                        AS files,
+        (SELECT COUNT_IF(STATUS = 'LOADED')  FROM DICOM_FILE_MANIFEST)    AS loaded,
+        (SELECT COUNT_IF(STATUS = 'NEW')     FROM DICOM_FILE_MANIFEST)    AS pending,
+        (SELECT COUNT_IF(STATUS = 'ERROR')   FROM DICOM_FILE_MANIFEST)    AS errored,
+        (SELECT COUNT_IF(STATUS = 'DELETED') FROM DICOM_FILE_MANIFEST)    AS deleted,
+        (SELECT COUNT(*) FROM DICOM_CARDIAC_METADATA)                     AS meta,
+        (SELECT COUNT(DISTINCT FILE_NAME) FROM DICOM_CARDIAC_METADATA)    AS meta_distinct,
+        (SELECT COUNT(*) FROM DICOM_SERIES_REGISTRY)                      AS series,
+        (SELECT COUNT(*) FROM DICOM_BASE64_IMAGES)                        AS images,
+        (SELECT COUNT(*) FROM DICOM_EMBEDDINGS)                           AS embeddings,
+        (SELECT COUNT(*) FROM DICOM_LOAD_ERRORS WHERE NOT RESOLVED)       AS quarantined,
+        (SELECT COUNT(*) FROM DICOM_BASE64_IMAGES b
+           LEFT JOIN DICOM_CARDIAC_METADATA m ON m.FILE_NAME = b.FILE_NAME
+          WHERE m.FILE_NAME IS NULL)                                      AS image_orphans,
+        (SELECT COUNT(*) FROM DICOM_EMBEDDINGS e
+           LEFT JOIN DICOM_CARDIAC_METADATA m ON m.FILE_NAME = e.FILE_NAME
+          WHERE m.FILE_NAME IS NULL)                                      AS embed_orphans
+)
+SELECT 'sources_registered' AS CHECK_NAME,
+       IFF(sources_on > 0, 'PASS', 'WARN') AS STATUS,
+       sources_on::STRING || ' of ' || sources::STRING || ' source(s) enabled' AS DETAIL
+FROM counts
+UNION ALL SELECT 'scan_prefixes',
+       IFF(prefixes > 0, 'PASS', 'WARN'),
+       prefixes::STRING || ' enabled prefix(es)' FROM counts
+UNION ALL SELECT 'files_discovered',
+       IFF(files > 0, 'PASS', 'WARN'),
+       files::STRING || ' file(s) in the manifest' FROM counts
+UNION ALL SELECT 'metadata_no_fanout',
+       IFF(meta = meta_distinct, 'PASS', 'FAIL'),
+       meta::STRING || ' rows / ' || meta_distinct::STRING
+       || ' distinct files (must be equal)' FROM counts
+UNION ALL SELECT 'metadata_matches_loaded',
+       IFF(meta = loaded, 'PASS', 'WARN'),
+       meta::STRING || ' metadata rows vs ' || loaded::STRING
+       || ' LOADED manifest rows' FROM counts
+UNION ALL SELECT 'series_derived',
+       IFF(series > 0 OR meta = 0, 'PASS', 'FAIL'),
+       series::STRING || ' series in the registry' FROM counts
+UNION ALL SELECT 'work_pending',
+       IFF(pending = 0, 'PASS', 'WARN'),
+       pending::STRING || ' file(s) awaiting metadata extraction' FROM counts
+UNION ALL SELECT 'quarantined_files',
+       IFF(quarantined = 0, 'PASS', 'WARN'),
+       quarantined::STRING || ' file(s) in DICOM_LOAD_ERRORS'
+       || IFF(quarantined = 0, '', ' - inspect V_DICOM_LOAD_ERRORS_RECENT') FROM counts
+UNION ALL SELECT 'awaiting_reconcile',
+       IFF(deleted = 0, 'PASS', 'WARN'),
+       deleted::STRING || ' file(s) marked DELETED - run SP_RECONCILE_DELETES' FROM counts
+UNION ALL SELECT 'image_orphans',
+       IFF(image_orphans = 0, 'PASS', 'FAIL'),
+       image_orphans::STRING || ' base64 row(s) with no metadata row' FROM counts
+UNION ALL SELECT 'embedding_orphans',
+       IFF(embed_orphans = 0, 'PASS', 'FAIL'),
+       embed_orphans::STRING || ' embedding(s) with no metadata row' FROM counts
+UNION ALL SELECT 'images_rendered',
+       IFF(images > 0 OR meta = 0, 'PASS', 'WARN'),
+       images::STRING || ' base64 image(s)' FROM counts
+UNION ALL SELECT 'embeddings_present',
+       IFF(embeddings > 0, 'PASS', 'WARN'),
+       embeddings::STRING || ' embedding(s)'
+       || IFF(embeddings = 0, ' - run the image-search phase', '') FROM counts
+ORDER BY CHECK_NAME;
+
+-- Tasks must be SUSPENDED after a deploy: nothing should bill until the operator
+-- explicitly resumes with SP_RESUME_PIPELINE.
+SHOW TASKS IN SCHEMA {{ db }}.{{ schema }};
+SELECT
+    'tasks_suspended'                                              AS CHECK_NAME,
+    IFF(COUNT(*) = COUNT_IF("state" = 'suspended'), 'PASS', 'WARN') AS STATUS,
+    COUNT_IF("state" = 'suspended')::STRING || ' of ' || COUNT(*)::STRING
+        || ' task(s) suspended'                                    AS DETAIL
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

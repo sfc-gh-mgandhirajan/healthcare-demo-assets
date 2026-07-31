@@ -1,0 +1,93 @@
+-- =============================================================================
+-- 13: Initial Backfill
+--
+-- Runs the pipeline once, synchronously, so a fresh deploy has data without
+-- waiting for the scheduled tasks (which are created SUSPENDED).
+--
+-- This file used to be 07_data_load.sql and did a TRUNCATE plus a full reload of
+-- every file. It is now a thin wrapper over the same procedures the task DAG
+-- calls, which means:
+--
+--   - the backfill and the steady-state pipeline cannot drift apart
+--   - re-running this is cheap; it only processes what is outstanding
+--   - it is numbered 13 rather than 07 because it now DEPENDS on the procedures
+--     in 11, and at 07 it would sort ahead of them
+--
+-- Batch sizes here are larger than the task defaults: this is a deliberate
+-- one-shot run on a real warehouse, not a background poll.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- 1. Discover files.
+--
+-- Files already present in DICOM_CARDIAC_METADATA are adopted as LOADED rather
+-- than queued as NEW, so re-running this after a partial load does not reparse
+-- work that is already done.
+-- -----------------------------------------------------------------------------
+CALL SP_SCAN_ALL_SOURCES();
+
+-- -----------------------------------------------------------------------------
+-- 2. Parse DICOM tags.
+--
+-- Unreadable files land in DICOM_LOAD_ERRORS instead of aborting the run, so one
+-- corrupt file in a corpus does not fail the whole backfill.
+-- -----------------------------------------------------------------------------
+CALL SP_LOAD_METADATA(100000);
+
+-- -----------------------------------------------------------------------------
+-- 3. Derive the series registry from the parsed metadata.
+-- -----------------------------------------------------------------------------
+CALL SP_REFRESH_SERIES_REGISTRY();
+
+-- -----------------------------------------------------------------------------
+-- 4. Render base64 PNGs for embedding.
+--
+-- Safe to run before the MedSigLIP model exists - this step only needs the
+-- Python UDF, not the GPU service.
+-- -----------------------------------------------------------------------------
+CALL SP_CONVERT_IMAGES(100000);
+
+-- -----------------------------------------------------------------------------
+-- 5. Embed, if the GPU service is already up.
+--
+-- On a fresh account it will not be, and this returns a SKIPPED message rather
+-- than failing. Run dicom-search/run_medsiglip_pipeline.py to create the
+-- service, then either call this again or let TASK_DICOM_EMBED pick it up.
+-- -----------------------------------------------------------------------------
+CALL SP_EMBED_PENDING(100000);
+
+-- -----------------------------------------------------------------------------
+-- Verify.
+--
+-- TOTAL_ROWS and DISTINCT_FILES must match. If they differ, something fanned
+-- out and metadata is attached to the wrong files.
+-- -----------------------------------------------------------------------------
+SELECT
+    COUNT(*)                        AS TOTAL_ROWS,
+    COUNT(DISTINCT FILE_NAME)       AS DISTINCT_FILES,
+    COUNT(DISTINCT SERIES_INSTANCE_UID) AS SERIES,
+    COUNT(DISTINCT COLLECTION_NAME) AS COLLECTIONS,
+    COUNT(DISTINCT PATIENT_ID)      AS PATIENTS
+FROM DICOM_CARDIAC_METADATA;
+
+-- Per-series breakdown. DELTA is non-zero only if the source contents shifted
+-- relative to the seeded expectations (customer sources have no seed, so
+-- EXPECTED_FILES is NULL and DELTA is NULL - that is normal).
+SELECT
+    COLLECTION_NAME,
+    SERIES_LABEL,
+    MODALITY,
+    FILE_COUNT,
+    EXPECTED_FILES,
+    FILE_COUNT - EXPECTED_FILES AS DELTA
+FROM DICOM_SERIES_REGISTRY
+ORDER BY COLLECTION_NAME, SERIES_LABEL;
+
+-- Outstanding work and anything quarantined.
+SELECT * FROM V_DICOM_PIPELINE_STATUS;
+SELECT * FROM V_DICOM_LOAD_ERRORS_RECENT LIMIT 20;

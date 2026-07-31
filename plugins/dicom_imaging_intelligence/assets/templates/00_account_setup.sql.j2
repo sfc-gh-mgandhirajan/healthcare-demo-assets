@@ -1,0 +1,212 @@
+-- =============================================================================
+-- 00: Account Setup
+-- Provisions the account-level objects this demo depends on:
+--   - Warehouse for SQL, UDF execution, and Cortex Search refresh
+--   - CPU compute pool for the Streamlit container runtime
+--   - GPU compute pool for MedSigLIP SPCS inference
+--   - Network rule + external access integration for PyPI and HuggingFace
+--
+-- Rename any object by editing the DECLARE block below. Names are declared
+-- once and used everywhere in this file.
+--
+-- Requires ACCOUNTADMIN (compute pools, network rules, integrations).
+-- Scripts 01 onward run as SYSADMIN.
+--
+-- NOTE: The HuggingFace token secret is NOT created here. It must live in
+-- {{ db }}.{{ schema }}, which does not exist until 01 runs, and an
+-- external access integration can only reference a secret that already
+-- exists. setup.sh handles the secret + integration binding as a second
+-- phase after 01. See the "Manual secret setup" section in README.md if you
+-- are running these scripts by hand.
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    -- ---------------------------------------------------------------------
+    -- Rename here to fit your account conventions
+    -- ---------------------------------------------------------------------
+    demo_db       STRING DEFAULT '{{ db }}';
+    demo_schema   STRING DEFAULT '{{ schema }}';
+    demo_wh       STRING DEFAULT '{{ warehouse }}';
+    demo_wh_size  STRING DEFAULT '{{ cfg.warehouse_size }}';        -- 2,848 files through a Python UDF
+    app_pool      STRING DEFAULT '{{ cfg.app_pool }}';
+    app_family    STRING DEFAULT '{{ cfg.app_pool_family }}';
+    gpu_pool      STRING DEFAULT '{{ cfg.gpu_pool }}';
+    gpu_family    STRING DEFAULT '{{ cfg.gpu_pool_family }}';
+    net_rule      STRING DEFAULT '{{ cfg.network_rule }}';
+    eai_name      STRING DEFAULT '{{ cfg.eai_name }}';
+    owner_role    STRING DEFAULT '{{ owner_role }}';
+    fq_schema     STRING;
+    fq_rule       STRING;
+    stmt          STRING;
+BEGIN
+    fq_schema := demo_db || '.' || demo_schema;
+    fq_rule   := fq_schema || '.' || net_rule;
+
+    -- ---------------------------------------------------------------------
+    -- Database and schema
+    --
+    -- Created here, not only in 01, because the network rule below is a
+    -- SCHEMA-level object and needs a deterministic home. Creating it
+    -- unqualified would silently place it in whatever the connection's
+    -- default database happens to be, and would fail outright on a
+    -- connection with no default database set.
+    --
+    -- Ownership is handed to SYSADMIN immediately: scripts 01-09 run as
+    -- SYSADMIN and need to create agents, services, and policies here.
+    -- Leaving these ACCOUNTADMIN-owned causes "must have CREATE AGENT
+    -- granted on SCHEMA" failures at 09.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE DATABASE IF NOT EXISTS ' || demo_db
+         || ' COMMENT = ''Snowflake DICOM Explorer - Cardiac Imaging Intelligence Platform.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'CREATE SCHEMA IF NOT EXISTS ' || fq_schema
+         || ' COMMENT = ''DICOM metadata, UDFs, AI enrichments, and governance objects.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON DATABASE ' || demo_db
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON SCHEMA ' || fq_schema
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Warehouse
+    -- INITIALLY_SUSPENDED so creation costs nothing; 60s auto-suspend keeps
+    -- idle cost near zero between deploy steps.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE WAREHOUSE IF NOT EXISTS ' || demo_wh
+         || ' WAREHOUSE_SIZE = ' || demo_wh_size
+         || ' AUTO_SUSPEND = 60'
+         || ' AUTO_RESUME = TRUE'
+         || ' INITIALLY_SUSPENDED = TRUE'
+         || ' COMMENT = ''DICOM Explorer: SQL, DICOM UDF execution, Cortex Search refresh''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE ON WAREHOUSE ' || demo_wh || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- CPU compute pool: Streamlit container runtime
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE COMPUTE POOL IF NOT EXISTS ' || app_pool
+         || ' MIN_NODES = 1'
+         || ' MAX_NODES = 1'
+         || ' INSTANCE_FAMILY = ' || app_family
+         || ' AUTO_RESUME = TRUE'
+         || ' AUTO_SUSPEND_SECS = 600'
+         || ' COMMENT = ''DICOM Explorer: Streamlit in Snowflake container runtime''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE, MONITOR ON COMPUTE POOL ' || app_pool || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- GPU compute pool: MedSigLIP-448 SPCS inference service
+    -- 3 nodes: the ML Job, model build (kaniko), and inference service all
+    -- need a node simultaneously during deploy. With fewer nodes the model
+    -- build deadlocks waiting for the ML Job to release its node.
+    -- AUTO_SUSPEND_SECS = 3600 (1 hour) so the pool stays warm through a
+    -- demo session without billing overnight.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE COMPUTE POOL IF NOT EXISTS ' || gpu_pool
+         || ' MIN_NODES = 3'
+         || ' MAX_NODES = 3'
+         || ' INSTANCE_FAMILY = ' || gpu_family
+         || ' AUTO_RESUME = TRUE'
+         || ' AUTO_SUSPEND_SECS = 3600'
+         || ' COMMENT = ''DICOM Explorer: MedSigLIP-448 GPU inference service''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE, MONITOR ON COMPUTE POOL ' || gpu_pool || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Egress network rule (schema-level, fully qualified)
+    --
+    -- This is deliberately UNRESTRICTED on 443/80, which is broader than a
+    -- demo would ideally ship. The reason:
+    --
+    -- HuggingFace serves model weights from dynamic, undocumented CDN
+    -- hostnames. A scoped allowlist of huggingface.co + cdn-lfs.huggingface.co
+    -- + transfer.xethub.hf.co is NOT sufficient - downloads get redirected to
+    -- hosts like us.aws.cdn.hf.co and cas-bridge.xethub.hf.co, which rotate.
+    -- A blocked host does not fail cleanly either: hf-xet retries silently and
+    -- the job hangs with zero log output.
+    --
+    -- If your security posture does not allow this, two alternatives:
+    --
+    --   1. Scope it and accept maintenance. Start from:
+    --        'pypi.org', 'pypi.python.org', 'files.pythonhosted.org',
+    --        'huggingface.co', 'cdn-lfs.huggingface.co',
+    --        'cdn-lfs-us-1.huggingface.co', 'transfer.xethub.hf.co',
+    --        'cas-bridge.xethub.hf.co', 'cas-server.xethub.hf.co',
+    --        'us.aws.cdn.hf.co'
+    --      then add whatever else appears in NameResolutionError messages.
+    --
+    --   2. Better for production: download the model ONCE, store the weights
+    --      in a Snowflake stage, and have the job read from the stage. Then
+    --      no egress is needed for any subsequent deploy, and this rule can
+    --      be narrowed to PyPI only (or dropped if you vendor packages too).
+    --
+    -- PyPI access is also covered here. Snowflake ships a built-in rule
+    -- (snowflake.external_access.pypi_rule) if you only need PyPI.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE OR REPLACE NETWORK RULE ' || fq_rule
+         || ' MODE = EGRESS'
+         || ' TYPE = HOST_PORT'
+         || ' VALUE_LIST = (''0.0.0.0:443'', ''0.0.0.0:80'')'
+         || ' COMMENT = ''DICOM Explorer: unrestricted HTTPS/HTTP egress for'
+         || ' PyPI + HuggingFace model download. See script comments for the'
+         || ' scoped alternative.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON NETWORK RULE ' || fq_rule
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- External access integration
+    -- ALLOWED_AUTHENTICATION_SECRETS is intentionally omitted here. It is
+    -- set by setup.sh (or manually per README) once the HF token secret
+    -- exists in the demo schema.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || eai_name
+         || ' ALLOWED_NETWORK_RULES = (' || fq_rule || ')'
+         || ' ENABLED = TRUE'
+         || ' COMMENT = ''DICOM Explorer: notebook + Streamlit egress''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE ON INTEGRATION ' || eai_name || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    RETURN 'Account setup complete: '
+        || fq_schema || ', '
+        || demo_wh || ' (' || demo_wh_size || '), '
+        || app_pool || ' (' || app_family || '), '
+        || gpu_pool || ' (' || gpu_family || '), '
+        || eai_name;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- SHOW returns 30+ columns, which the CLI renders as unreadable column soup.
+-- RESULT_SCAN narrows it to what actually matters.
+-- -----------------------------------------------------------------------------
+SHOW WAREHOUSES LIKE '{{ warehouse }}';
+SELECT "name", "state", "size", "auto_suspend"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW COMPUTE POOLS LIKE 'DICOM_%_POOL';
+SELECT "name", "state", "instance_family", "min_nodes", "max_nodes", "auto_suspend_secs"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{{ cfg.eai_name }}';
+SELECT "name", "type", "enabled"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

@@ -1,0 +1,58 @@
+-- =============================================================================
+-- 02: External Stage
+-- Connects Snowflake to the NCI Imaging Data Commons (IDC) public S3 bucket.
+-- No credentials required - IDC is a public open-data resource.
+--
+-- This file now only creates the stage. File discovery, the series registry,
+-- and the manifest moved to sql/pipeline/ so they run as part of the
+-- incremental pipeline rather than as one-shot DDL:
+--
+--   10_pipeline_config.sql  DICOM_SOURCE_CONFIG, manifest, registry, label seed
+--   11_pipeline_procedures.sql  SP_SCAN_ALL_SOURCES builds the manifest
+--   13_initial_backfill.sql     runs the first full pass
+--
+-- WHY THERE IS NO DIRECTORY TABLE
+-- {{ cfg.source_url }} holds more than 3.7 million files. Enabling a directory
+-- table at the bucket root fails outright:
+--
+--   Total size (>=1,073,741,904 bytes) for the list of file descriptors
+--   returned from the stage exceeded limit (1,073,741,824 bytes)
+--
+-- So the stage is created WITHOUT one, and discovery uses a scoped LIST per
+-- configured prefix. Each LIST touches only a few hundred objects.
+--
+-- BUILD_SCOPED_FILE_URL does not require a directory table, so the UDFs and the
+-- Streamlit app read pixel data from this stage unchanged.
+--
+-- A CUSTOMER STAGE IS DIFFERENT. If your bucket is small enough to enumerate,
+-- a directory table is a fine alternative and gives change tracking for free.
+-- The scan does not depend on either choice - it only needs LIST to work.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- Stage: IDC public bucket, directory intentionally disabled.
+-- IF NOT EXISTS rather than OR REPLACE so re-running setup does not churn it.
+-- -----------------------------------------------------------------------------
+CREATE STAGE IF NOT EXISTS {{ cfg.source_stage }}
+    URL = '{{ cfg.source_url }}'
+    COMMENT = 'NCI Imaging Data Commons public S3 bucket. DIRECTORY is intentionally disabled - the bucket holds >3.7M files and a directory table cannot be built at the root. Discovery uses scoped LIST per prefix, configured in DICOM_SOURCE_PREFIX.';
+
+-- -----------------------------------------------------------------------------
+-- Verify: the stage resolves and is readable.
+--
+-- A single scoped LIST against one known series. This is a cheap reachability
+-- check, NOT discovery - it deliberately targets one prefix so it cannot walk
+-- the whole bucket.
+-- -----------------------------------------------------------------------------
+LIST @{{ cfg.source_stage }}/7f4806f3-5946-41cb-8684-8fd5d51f8931/;
+
+SELECT
+    COUNT(*)                                 AS FILES_VISIBLE,
+    ROUND(SUM("size") / 1024 / 1024, 1)      AS SIZE_MB
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" LIKE '%.dcm';

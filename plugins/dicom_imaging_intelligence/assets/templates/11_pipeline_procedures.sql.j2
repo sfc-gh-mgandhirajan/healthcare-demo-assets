@@ -1,0 +1,808 @@
+-- =============================================================================
+-- 11: Pipeline Procedures
+--
+-- The incremental engine. Each procedure is safe to call repeatedly and only
+-- does the work that is actually outstanding, so the same code serves both the
+-- initial backfill and the every-few-minutes task run.
+--
+--   SP_SCAN_ALL_SOURCES        discover files, detect changes and deletes
+--   SP_LOAD_METADATA           parse NEW files, quarantine failures
+--   SP_REFRESH_SERIES_REGISTRY derive the series registry from metadata
+--   SP_CONVERT_IMAGES          render base64 PNGs for embedding
+--   SP_EMBED_PENDING           GPU embed, skipping cleanly if the service is down
+--   SP_RECONCILE_DELETES       remove downstream rows for vanished files
+--
+-- BATCH_LIMIT exists to bound cost per run. Without it, a customer pointing
+-- this at a million-file bucket would have a single task run try to parse or
+-- GPU-embed all of it.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- SP_SCAN_ALL_SOURCES
+--
+-- Walks every enabled (source, prefix) pair, LISTs it, and MERGEs the result
+-- into DICOM_FILE_MANIFEST.
+--
+-- WHY THIS ONE IS PYTHON AND THE REST ARE SQL
+-- LIST is rejected inside a SQL stored procedure:
+--   Unsupported statement type 'LIST_FILES'
+-- It is permitted in an anonymous EXECUTE IMMEDIATE block (which is how
+-- 02_stages.sql used to build the manifest) and in a task body, but neither of
+-- those is callable, so the logic would have to be duplicated between the task
+-- and the backfill. A PYTHON procedure can issue LIST through session.sql, so
+-- there is exactly one definition that both the task DAG and
+-- 13_initial_backfill.sql call.
+--
+-- Listings stay in-database: LIST is followed immediately by
+-- INSERT ... SELECT FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())), so filenames are
+-- never pulled into Python memory. That matters on a large bucket. Nothing may
+-- run between those two statements or LAST_QUERY_ID() resolves to the wrong one.
+--
+-- Three things this handles that a naive rebuild does not:
+--
+--   1. CHANGE DETECTION. LIST returns md5. A file overwritten in place keeps
+--      its name and size, so without md5 it would silently go stale. On md5
+--      change the row resets to NEW and LOADED_AT clears.
+--
+--   2. ADOPTION. A file already present in DICOM_CARDIAC_METADATA is inserted
+--      as LOADED, not NEW. This is what makes the upgrade from the v1 manifest
+--      cheap: 2,848 already-parsed files are recognised rather than reparsed.
+--
+--   3. DELETES. Anything under a scanned prefix that no longer appears in the
+--      listing is marked DELETED for SP_RECONCILE_DELETES to clean up.
+--
+-- Deletion is scoped to sources that actually appear in this scan, so a source
+-- being temporarily disabled does not mass-delete its files. Note that
+-- DISABLING A PREFIX will mark its files DELETED, which is intended - the files
+-- are out of scope - but is worth knowing before editing DICOM_SOURCE_PREFIX.
+--
+-- Concurrency: the scratch table is shared, so two scans running at once would
+-- interfere. The task DAG serialises runs; avoid calling this manually while
+-- TASK_DICOM_SCAN is mid-run.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_SCAN_ALL_SOURCES()
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'run'
+COMMENT = 'Discovers stage files into DICOM_FILE_MANIFEST via scoped LIST. Detects new, changed (md5), and deleted files. Python because LIST is not allowed in a SQL procedure.'
+AS
+$$
+import json
+
+
+def _sql_str(value):
+    """Quote a Python string as a SQL literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _merge_counts(rows):
+    """Split a MERGE result into (inserted, updated).
+
+    MERGE returns several columns ("number of rows inserted", "number of rows
+    updated", ...), so taking rows[0][0] silently reports inserts only - which
+    reads as "nothing happened" on a run that actually re-touched every row.
+    Column names are matched rather than positions because the set of columns
+    depends on which WHEN branches the statement has.
+    """
+    if not rows:
+        return 0, 0
+    inserted = updated = 0
+    for key, value in rows[0].as_dict().items():
+        if not isinstance(value, int):
+            continue
+        name = key.lower()
+        if "insert" in name:
+            inserted += value
+        elif "updat" in name:
+            updated += value
+    return inserted, updated
+
+
+def _stage_url(session, stage_fqn):
+    """Resolve an EXTERNAL stage's URL, or None for an internal stage.
+
+    Only needed when a prefix is empty and there is nothing to anchor on.
+    Internal stages report URL as an empty string, which is how they are
+    detected here.
+    """
+    rows = session.sql(f"DESCRIBE STAGE {stage_fqn}").collect()
+    raw = None
+    for row in rows:
+        d = row.as_dict()
+        if d.get("property") == "URL":
+            raw = d.get("property_value")
+            break
+    if not raw:
+        return None
+
+    # DESCRIBE STAGE reports URL as a JSON array: ["s3://bucket/"]
+    try:
+        parsed = json.loads(raw)
+        url = parsed[0] if isinstance(parsed, list) and parsed else str(parsed)
+    except (ValueError, TypeError):
+        url = raw.strip('[]"')
+
+    if not url:
+        return None
+    return url if url.endswith("/") else url + "/"
+
+
+def _relative_path_expr(session, stage_fqn, prefix):
+    """SQL expression turning LIST's "name" into a stage-relative path.
+
+    LIST reports different shapes depending on stage type:
+      external:  s3://bucket/siteA/file.dcm
+      internal:  mystage/siteA/file.dcm        (stage name, lowercased)
+
+    BUILD_SCOPED_FILE_URL needs the stage-relative form ("siteA/file.dcm") in
+    both cases.
+
+    When a prefix is configured, anchoring on the prefix handles both shapes
+    without caring which kind of stage this is. That is the normal path.
+    Falling back to length arithmetic is only necessary for a whole-stage scan,
+    where there is no prefix to anchor on.
+    """
+    if prefix:
+        return f'SUBSTR("name", POSITION({_sql_str(prefix)} IN "name"))'
+
+    url = _stage_url(session, stage_fqn)
+    if url:
+        return f'SUBSTR("name", {len(url) + 1})'
+
+    # Internal stage, no prefix: LIST prepends "<stage_name>/".
+    short = stage_fqn.split(".")[-1].strip('"').lower()
+    return f'SUBSTR("name", {len(short) + 2})'
+
+
+def run(session):
+    session.sql("""
+        CREATE OR REPLACE TRANSIENT TABLE DICOM_SCAN_SCRATCH (
+            SOURCE_NAME VARCHAR,
+            FILE_NAME   VARCHAR,
+            FILE_SIZE   NUMBER(38,0),
+            FILE_MD5    VARCHAR
+        )
+    """).collect()
+
+    pairs = session.sql("""
+        SELECT c.SOURCE_NAME, c.STAGE_FQN, c.FILE_PATTERN, p.PREFIX
+        FROM DICOM_SOURCE_CONFIG c
+        JOIN DICOM_SOURCE_PREFIX p
+          ON p.SOURCE_NAME = c.SOURCE_NAME AND p.ENABLED
+        WHERE c.ENABLED
+        ORDER BY c.SOURCE_NAME, p.PREFIX
+    """).collect()
+
+    if not pairs:
+        return ("No enabled source/prefix pairs in DICOM_SOURCE_CONFIG. "
+                "Nothing scanned.")
+
+    n_listed = 0
+    n_prefix = 0
+
+    for row in pairs:
+        source = row["SOURCE_NAME"]
+        stage = row["STAGE_FQN"]
+        pattern = row["FILE_PATTERN"] or "%.dcm"
+        prefix = row["PREFIX"] or ""
+
+        path_expr = _relative_path_expr(session, stage, prefix)
+
+        # LIST then RESULT_SCAN, back to back. Do not insert any other
+        # session.sql call between these two.
+        session.sql(f"LIST @{stage}/{prefix}").collect()
+        inserted = session.sql(
+            "INSERT INTO DICOM_SCAN_SCRATCH "
+            "(SOURCE_NAME, FILE_NAME, FILE_SIZE, FILE_MD5) "
+            f"SELECT {_sql_str(source)}, "
+            f'       {path_expr}, "size", "md5" '
+            "FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) "
+            f'WHERE "name" LIKE {_sql_str(pattern)}'
+        ).collect()
+
+        n_listed += inserted[0][0] if inserted else 0
+        n_prefix += 1
+
+    # If the path rewrite went wrong the entries keep their URL scheme or stage
+    # name, and every downstream BUILD_SCOPED_FILE_URL would fail one file at a
+    # time. Cheaper to catch it here, before touching the manifest.
+    bad = session.sql(
+        "SELECT COUNT(*) AS C FROM DICOM_SCAN_SCRATCH WHERE FILE_NAME LIKE '%://%'"
+    ).collect()[0]["C"]
+    if bad:
+        return (f"FAILED: {bad} listed path(s) still contain a URL scheme, so "
+                "the stage prefix was not stripped correctly. "
+                "Manifest not modified.")
+
+    # Two sources sharing a relative path would collide: metadata, base64, and
+    # embeddings are all keyed on FILE_NAME alone. Fail loudly rather than
+    # silently overwriting one source's rows with another's.
+    collisions = session.sql("""
+        SELECT COUNT(*) AS C FROM (
+            SELECT FILE_NAME
+            FROM DICOM_SCAN_SCRATCH
+            GROUP BY FILE_NAME
+            HAVING COUNT(DISTINCT SOURCE_NAME) > 1
+        )
+    """).collect()[0]["C"]
+    if collisions:
+        return (f"FAILED: {collisions} file path(s) appear under more than one "
+                "source. Downstream tables key on FILE_NAME alone, so this "
+                "would cross-contaminate sources. Give each source a distinct "
+                "prefix. Manifest not modified.")
+
+    # GROUP BY collapses files seen under overlapping prefixes; MERGE rejects
+    # multiple source rows matching one target row.
+    merged = session.sql("""
+        MERGE INTO DICOM_FILE_MANIFEST t
+        USING (
+            SELECT
+                s.SOURCE_NAME,
+                s.FILE_NAME,
+                ANY_VALUE(s.FILE_SIZE) AS FILE_SIZE,
+                ANY_VALUE(s.FILE_MD5)  AS FILE_MD5,
+                MAX(IFF(m.FILE_NAME IS NULL, 0, 1)) AS ALREADY_PARSED
+            FROM DICOM_SCAN_SCRATCH s
+            LEFT JOIN DICOM_CARDIAC_METADATA m ON m.FILE_NAME = s.FILE_NAME
+            GROUP BY s.SOURCE_NAME, s.FILE_NAME
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME AND t.FILE_NAME = s.FILE_NAME
+        WHEN MATCHED AND t.FILE_MD5 IS DISTINCT FROM s.FILE_MD5 THEN UPDATE SET
+            t.FILE_SIZE    = s.FILE_SIZE,
+            t.FILE_MD5     = s.FILE_MD5,
+            t.STATUS       = 'NEW',
+            t.LAST_SEEN_AT = CURRENT_TIMESTAMP(),
+            t.LOADED_AT    = NULL
+        WHEN MATCHED THEN UPDATE SET
+            t.LAST_SEEN_AT = CURRENT_TIMESTAMP(),
+            t.STATUS       = IFF(t.STATUS = 'DELETED', 'NEW', t.STATUS)
+        WHEN NOT MATCHED THEN INSERT
+            (SOURCE_NAME, FILE_NAME, FILE_SIZE, FILE_MD5, STATUS,
+             FIRST_SEEN_AT, LAST_SEEN_AT, LOADED_AT)
+            VALUES (s.SOURCE_NAME, s.FILE_NAME, s.FILE_SIZE, s.FILE_MD5,
+                    IFF(s.ALREADY_PARSED = 1, 'LOADED', 'NEW'),
+                    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(),
+                    IFF(s.ALREADY_PARSED = 1, CURRENT_TIMESTAMP(), NULL))
+    """).collect()
+
+    deleted = session.sql("""
+        UPDATE DICOM_FILE_MANIFEST t
+           SET STATUS = 'DELETED'
+         WHERE t.SOURCE_NAME IN (SELECT DISTINCT SOURCE_NAME FROM DICOM_SCAN_SCRATCH)
+           AND t.STATUS <> 'DELETED'
+           AND NOT EXISTS (
+               SELECT 1 FROM DICOM_SCAN_SCRATCH s
+                WHERE s.SOURCE_NAME = t.SOURCE_NAME
+                  AND s.FILE_NAME   = t.FILE_NAME
+           )
+    """).collect()
+
+    session.sql("""
+        UPDATE DICOM_SOURCE_CONFIG c
+           SET LAST_SCAN_AT    = CURRENT_TIMESTAMP(),
+               LAST_SCAN_FILES = (
+                   SELECT COUNT(*) FROM DICOM_SCAN_SCRATCH s
+                    WHERE s.SOURCE_NAME = c.SOURCE_NAME
+               )
+         WHERE c.SOURCE_NAME IN (SELECT DISTINCT SOURCE_NAME FROM DICOM_SCAN_SCRATCH)
+    """).collect()
+
+    n_inserted, n_updated = _merge_counts(merged)
+    n_deleted = deleted[0][0] if deleted else 0
+    return (f"Scanned {n_prefix} prefix(es), listed {n_listed} file(s). "
+            f"New: {n_inserted}. Updated: {n_updated}. "
+            f"Marked deleted: {n_deleted}.")
+$$;
+
+-- -----------------------------------------------------------------------------
+-- SP_LOAD_METADATA
+--
+-- Parses NEW files into DICOM_CARDIAC_METADATA.
+--
+-- The UDF is evaluated once into a temp table, then read three times (good
+-- rows, bad rows, manifest update). Re-running the SELECT instead would re-read
+-- every DICOM file from object storage for each use.
+--
+-- SERIES_LABEL and COLLECTION_NAME resolve here rather than by joining the
+-- registry. The registry is now DERIVED from this table, so reading it here
+-- would be circular. SERIES_INSTANCE_UID comes from the file itself, which is
+-- what makes the seed lookup possible in a single pass.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_LOAD_METADATA(BATCH_LIMIT NUMBER DEFAULT 5000)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Parses NEW manifest files into DICOM_CARDIAC_METADATA. Failures go to DICOM_LOAD_ERRORS, never aborting the batch.'
+AS
+$$
+DECLARE
+    src_name    STRING;
+    esc_source  STRING;
+    n_ok        NUMBER DEFAULT 0;
+    n_err       NUMBER DEFAULT 0;
+    n_batch     NUMBER DEFAULT 0;
+    total_ok    NUMBER DEFAULT 0;
+    total_err   NUMBER DEFAULT 0;
+    src_cur CURSOR FOR
+        SELECT c.SOURCE_NAME, c.STAGE_FQN
+        FROM DICOM_SOURCE_CONFIG c
+        WHERE c.ENABLED
+          AND EXISTS (
+              SELECT 1 FROM DICOM_FILE_MANIFEST m
+               WHERE m.SOURCE_NAME = c.SOURCE_NAME AND m.STATUS = 'NEW'
+          )
+        ORDER BY c.SOURCE_NAME;
+BEGIN
+    FOR rec IN src_cur DO
+        -- Hoisted into locals: a cursor field cannot be referenced as
+        -- rec.COLUMN inside a plain SQL statement, only bound as :variable.
+        src_name   := rec.SOURCE_NAME;
+        esc_source := REPLACE(rec.SOURCE_NAME, '''', '''''');
+
+        -- BUILD_SCOPED_FILE_URL needs a literal stage name, so the stage has to
+        -- be interpolated rather than bound.
+        EXECUTE IMMEDIATE
+            'CREATE OR REPLACE TEMPORARY TABLE DICOM_EXTRACT_BATCH AS '
+         || 'SELECT m.SOURCE_NAME, m.FILE_NAME, m.FILE_SIZE, '
+         ||        'EXTRACT_DICOM_METADATA('
+         ||            'BUILD_SCOPED_FILE_URL(@' || rec.STAGE_FQN || ', m.FILE_NAME)'
+         ||        ') AS META '
+         || 'FROM DICOM_FILE_MANIFEST m '
+         || 'WHERE m.SOURCE_NAME = ''' || esc_source || ''' '
+         || '  AND m.STATUS = ''NEW'' '
+         -- NO ORDER BY. Adding one kills UDF parallelism: Snowflake serializes
+         -- Python UDF evaluation when it must sort before LIMIT, turning a
+         -- 10-second parallel scan into a 10+ minute hang.
+         || 'LIMIT ' || BATCH_LIMIT::STRING;
+
+        SELECT COUNT(*) INTO n_batch FROM DICOM_EXTRACT_BATCH;
+        IF (n_batch = 0) THEN
+            CONTINUE;
+        END IF;
+
+        -- Clear ALL derived rows for the files in this batch, not just metadata.
+        --
+        -- This matters for reprocessing. When a file's md5 changes, the scan
+        -- resets it to NEW and it comes back through here. If the old base64 and
+        -- embedding rows survived, SP_CONVERT_IMAGES and SP_EMBED_PENDING would
+        -- both skip it - their anti-joins see a row already present - and the
+        -- search index would keep serving a vector computed from the PREVIOUS
+        -- contents of that file, forever, with nothing reporting an error.
+        --
+        -- Deleting them here forces regeneration downstream.
+        DELETE FROM DICOM_EMBEDDINGS
+         WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_EXTRACT_BATCH);
+
+        DELETE FROM DICOM_BASE64_IMAGES
+         WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_EXTRACT_BATCH);
+
+        DELETE FROM DICOM_CARDIAC_METADATA
+         WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_EXTRACT_BATCH);
+
+        INSERT INTO DICOM_CARDIAC_METADATA
+        SELECT
+            e.FILE_NAME,
+            e.FILE_SIZE,
+            e.META AS RAW_METADATA,
+            e.META:PATIENTID::VARCHAR                   AS PATIENT_ID,
+            e.META:PATIENTNAME::VARCHAR                 AS PATIENT_NAME,
+            e.META:PATIENTSEX::VARCHAR                  AS PATIENT_SEX,
+            e.META:PATIENTAGE::VARCHAR                  AS PATIENT_AGE,
+            e.META:STUDYINSTANCEUID::VARCHAR            AS STUDY_INSTANCE_UID,
+            e.META:STUDYDATE::VARCHAR                   AS STUDY_DATE,
+            e.META:STUDYTIME::VARCHAR                   AS STUDY_TIME,
+            e.META:STUDYDESCRIPTION::VARCHAR            AS STUDY_DESCRIPTION,
+            e.META:SERIESINSTANCEUID::VARCHAR           AS SERIES_INSTANCE_UID,
+            e.META:SERIESNUMBER::VARCHAR                AS SERIES_NUMBER,
+            e.META:SERIESDESCRIPTION::VARCHAR           AS SERIES_DESCRIPTION,
+            e.META:SOPINSTANCEUID::VARCHAR              AS SOP_INSTANCE_UID,
+            e.META:SOPCLASSUID::VARCHAR                 AS SOP_CLASS_UID,
+            e.META:MODALITY::VARCHAR                    AS MODALITY,
+            e.META:MANUFACTURER::VARCHAR                AS MANUFACTURER,
+            e.META:INSTITUTIONNAME::VARCHAR             AS INSTITUTION_NAME,
+            e.META:BODYPARTEXAMINED::VARCHAR            AS BODY_PART_EXAMINED,
+            e.META:ROWS::NUMBER                         AS IMAGE_ROWS,
+            e.META:COLUMNS::NUMBER                      AS IMAGE_COLUMNS,
+            e.META:BITSALLOCATED::NUMBER                AS BITS_ALLOCATED,
+            e.META:BITSSTORED::NUMBER                   AS BITS_STORED,
+            e.META:PIXELSPACING::VARCHAR                AS PIXEL_SPACING,
+            e.META:SLICETHICKNESS::VARCHAR              AS SLICE_THICKNESS,
+            e.META:SLICELOCATION::VARCHAR               AS SLICE_LOCATION,
+            e.META:IMAGEPOSITIONPATIENT::VARCHAR        AS IMAGE_POSITION_PATIENT,
+            e.META:IMAGEORIENTATIONPATIENT::VARCHAR     AS IMAGE_ORIENTATION_PATIENT,
+            e.META:WINDOWCENTER::VARCHAR                AS WINDOW_CENTER,
+            e.META:WINDOWWIDTH::VARCHAR                 AS WINDOW_WIDTH,
+            e.META:INSTANCENUMBER::VARCHAR              AS INSTANCE_NUMBER,
+            e.META:ACQUISITIONNUMBER::VARCHAR           AS ACQUISITION_NUMBER,
+            e.META:PHOTOMETRICINTERPRETATION::VARCHAR   AS PHOTOMETRIC_INTERPRETATION,
+            e.META:KVP::VARCHAR                         AS KVP,
+            e.META:EXPOSURE::VARCHAR                    AS EXPOSURE,
+            e.META:CONVOLUTIONKERNEL::VARCHAR           AS CONVOLUTION_KERNEL,
+            e.META:PROTOCOLNAME::VARCHAR                AS PROTOCOL_NAME,
+            e.META:TRANSFERSYNTAXUID::VARCHAR           AS TRANSFER_SYNTAX_UID,
+            -- Curated label if seeded, else the file's own series description,
+            -- else something stable enough to group by.
+            COALESCE(
+                sd.SERIES_LABEL,
+                NULLIF(TRIM(e.META:SERIESDESCRIPTION::VARCHAR), ''),
+                NULLIF(TRIM(e.META:MODALITY::VARCHAR), '') || ' '
+                    || COALESCE(e.META:PATIENTID::VARCHAR, 'unknown'),
+                'Unlabeled series'
+            )                                           AS SERIES_LABEL,
+            COALESCE(sd.COLLECTION_NAME, e.SOURCE_NAME) AS COLLECTION_NAME
+        FROM DICOM_EXTRACT_BATCH e
+        LEFT JOIN DICOM_SERIES_LABEL_SEED sd
+               ON sd.SERIES_INSTANCE_UID = e.META:SERIESINSTANCEUID::VARCHAR
+        WHERE e.META:ERROR IS NULL
+          AND e.META:SERIESINSTANCEUID IS NOT NULL;
+        n_ok := SQLROWCOUNT;
+
+        -- Quarantine. EXTRACT_DICOM_METADATA returns {'ERROR': ...} rather than
+        -- raising, and a file with no SERIES_INSTANCE_UID cannot be placed in a
+        -- series, so both are treated as failures.
+        INSERT INTO DICOM_LOAD_ERRORS
+            (SOURCE_NAME, FILE_NAME, PIPELINE_STEP, ERROR_MESSAGE)
+        SELECT
+            e.SOURCE_NAME,
+            e.FILE_NAME,
+            'METADATA',
+            COALESCE(e.META:ERROR::VARCHAR,
+                     'Parsed but no SERIESINSTANCEUID tag present')
+        FROM DICOM_EXTRACT_BATCH e
+        WHERE e.META:ERROR IS NOT NULL
+           OR e.META:SERIESINSTANCEUID IS NULL;
+        n_err := SQLROWCOUNT;
+
+        UPDATE DICOM_FILE_MANIFEST t
+           SET STATUS = 'LOADED', LOADED_AT = CURRENT_TIMESTAMP()
+         WHERE t.SOURCE_NAME = :src_name
+           AND t.FILE_NAME IN (
+               SELECT FILE_NAME FROM DICOM_EXTRACT_BATCH
+                WHERE META:ERROR IS NULL AND META:SERIESINSTANCEUID IS NOT NULL
+           );
+
+        UPDATE DICOM_FILE_MANIFEST t
+           SET STATUS = 'ERROR'
+         WHERE t.SOURCE_NAME = :src_name
+           AND t.FILE_NAME IN (
+               SELECT FILE_NAME FROM DICOM_EXTRACT_BATCH
+                WHERE META:ERROR IS NOT NULL OR META:SERIESINSTANCEUID IS NULL
+           );
+
+        total_ok  := total_ok  + n_ok;
+        total_err := total_err + n_err;
+    END FOR;
+
+    IF (total_ok = 0 AND total_err = 0) THEN
+        RETURN 'No NEW files to parse.';
+    END IF;
+    RETURN 'Parsed ' || total_ok::STRING || ' file(s); quarantined '
+        || total_err::STRING || '.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- SP_REFRESH_SERIES_REGISTRY
+--
+-- Rebuilds DICOM_SERIES_REGISTRY from parsed metadata, keyed on the real
+-- SERIES_INSTANCE_UID tag.
+--
+-- This is what replaced the hand-authored 10-row registry. Series appear
+-- automatically as their files are parsed, which is the whole point for a
+-- customer: they do not have to enumerate their series anywhere.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_REFRESH_SERIES_REGISTRY()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Derives DICOM_SERIES_REGISTRY from DICOM_CARDIAC_METADATA, keyed on SERIES_INSTANCE_UID.'
+AS
+$$
+DECLARE
+    n_rows NUMBER;
+    n_tot  NUMBER;
+BEGIN
+    MERGE INTO DICOM_SERIES_REGISTRY t
+    USING (
+        SELECT
+            m.SERIES_INSTANCE_UID,
+            ANY_VALUE(f.SOURCE_NAME)        AS SOURCE_NAME,
+            ANY_VALUE(m.COLLECTION_NAME)    AS COLLECTION_NAME,
+            ANY_VALUE(m.SERIES_LABEL)       AS SERIES_LABEL,
+            ANY_VALUE(m.PATIENT_ID)         AS PATIENT_ID,
+            ANY_VALUE(m.STUDY_INSTANCE_UID) AS STUDY_INSTANCE_UID,
+            ANY_VALUE(m.MODALITY)           AS MODALITY,
+            ANY_VALUE(m.MANUFACTURER)       AS MANUFACTURER,
+            ANY_VALUE(m.BODY_PART_EXAMINED) AS BODY_PART_EXAMINED,
+            ANY_VALUE(m.SERIES_DESCRIPTION) AS SERIES_DESCRIPTION,
+            COUNT(*)                        AS FILE_COUNT,
+            ANY_VALUE(sd.EXPECTED_FILES)    AS EXPECTED_FILES
+        FROM DICOM_CARDIAC_METADATA m
+        LEFT JOIN DICOM_FILE_MANIFEST f
+               ON f.FILE_NAME = m.FILE_NAME
+        LEFT JOIN DICOM_SERIES_LABEL_SEED sd
+               ON sd.SERIES_INSTANCE_UID = m.SERIES_INSTANCE_UID
+        WHERE m.SERIES_INSTANCE_UID IS NOT NULL
+        GROUP BY m.SERIES_INSTANCE_UID
+    ) s
+    ON t.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+    WHEN MATCHED THEN UPDATE SET
+        t.SOURCE_NAME        = s.SOURCE_NAME,
+        t.COLLECTION_NAME    = s.COLLECTION_NAME,
+        t.SERIES_LABEL       = s.SERIES_LABEL,
+        t.PATIENT_ID         = s.PATIENT_ID,
+        t.STUDY_INSTANCE_UID = s.STUDY_INSTANCE_UID,
+        t.MODALITY           = s.MODALITY,
+        t.MANUFACTURER       = s.MANUFACTURER,
+        t.BODY_PART_EXAMINED = s.BODY_PART_EXAMINED,
+        t.SERIES_DESCRIPTION = s.SERIES_DESCRIPTION,
+        t.FILE_COUNT         = s.FILE_COUNT,
+        t.EXPECTED_FILES     = s.EXPECTED_FILES,
+        t.LAST_REFRESHED_AT  = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (SERIES_INSTANCE_UID, SOURCE_NAME, COLLECTION_NAME, SERIES_LABEL,
+         PATIENT_ID, STUDY_INSTANCE_UID, MODALITY, MANUFACTURER,
+         BODY_PART_EXAMINED, SERIES_DESCRIPTION, FILE_COUNT, EXPECTED_FILES,
+         FIRST_SEEN_AT, LAST_REFRESHED_AT)
+        VALUES (s.SERIES_INSTANCE_UID, s.SOURCE_NAME, s.COLLECTION_NAME,
+                s.SERIES_LABEL, s.PATIENT_ID, s.STUDY_INSTANCE_UID, s.MODALITY,
+                s.MANUFACTURER, s.BODY_PART_EXAMINED, s.SERIES_DESCRIPTION,
+                s.FILE_COUNT, s.EXPECTED_FILES,
+                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+    n_rows := SQLROWCOUNT;
+
+    -- A series whose files have all gone away should not linger.
+    DELETE FROM DICOM_SERIES_REGISTRY
+     WHERE SERIES_INSTANCE_UID NOT IN (
+         SELECT DISTINCT SERIES_INSTANCE_UID
+         FROM DICOM_CARDIAC_METADATA
+         WHERE SERIES_INSTANCE_UID IS NOT NULL
+     );
+
+    SELECT COUNT(*) INTO n_tot FROM DICOM_SERIES_REGISTRY;
+    RETURN 'Registry refreshed: ' || n_rows::STRING || ' row(s) merged, '
+        || n_tot::STRING || ' series total.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- SP_CONVERT_IMAGES
+--
+-- Renders base64 PNGs for metadata rows that do not have one yet.
+--
+-- Window fallbacks come from DICOM_SOURCE_CONFIG, so a chest source can fall
+-- back to a lung window instead of clipping lung parenchyma to black at 40/400.
+--
+-- DICOM_TO_BASE64_PNG yields no row for a file it cannot read, so missing
+-- outputs are found by anti-join and quarantined after the insert.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_CONVERT_IMAGES(BATCH_LIMIT NUMBER DEFAULT 2000)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Renders base64 PNGs into DICOM_BASE64_IMAGES for metadata rows lacking one. Per-source window fallbacks.'
+AS
+$$
+DECLARE
+    src_name   STRING;
+    esc_source STRING;
+    n_ok       NUMBER DEFAULT 0;
+    n_err      NUMBER DEFAULT 0;
+    total_ok   NUMBER DEFAULT 0;
+    total_err  NUMBER DEFAULT 0;
+    src_cur CURSOR FOR
+        SELECT c.SOURCE_NAME, c.STAGE_FQN, c.WINDOW_CENTER, c.WINDOW_WIDTH
+        FROM DICOM_SOURCE_CONFIG c
+        WHERE c.ENABLED
+        ORDER BY c.SOURCE_NAME;
+BEGIN
+    FOR rec IN src_cur DO
+        -- See SP_LOAD_METADATA: cursor fields must be bound as :variable when
+        -- used inside a plain SQL statement.
+        src_name   := rec.SOURCE_NAME;
+        esc_source := REPLACE(rec.SOURCE_NAME, '''', '''''');
+
+        -- Candidate files: parsed, belong to this source, no base64 row yet.
+        EXECUTE IMMEDIATE
+            'CREATE OR REPLACE TEMPORARY TABLE DICOM_CONVERT_BATCH AS '
+         || 'SELECT m.FILE_NAME, m.FILE_SIZE, m.SERIES_INSTANCE_UID, '
+         ||        'm.SERIES_LABEL, m.COLLECTION_NAME '
+         || 'FROM DICOM_CARDIAC_METADATA m '
+         || 'JOIN DICOM_FILE_MANIFEST f '
+         || '  ON f.FILE_NAME = m.FILE_NAME AND f.SOURCE_NAME = ''' || esc_source || ''' '
+         || 'LEFT JOIN DICOM_BASE64_IMAGES b ON b.FILE_NAME = m.FILE_NAME '
+         || 'WHERE b.FILE_NAME IS NULL '
+         || '  AND f.STATUS = ''LOADED'' '
+         -- NO ORDER BY. See SP_LOAD_METADATA: ORDER BY before LIMIT serializes
+         -- Python UDF evaluation and causes multi-minute hangs.
+         || 'LIMIT ' || BATCH_LIMIT::STRING;
+
+        SELECT COUNT(*) INTO n_ok FROM DICOM_CONVERT_BATCH;
+        IF (n_ok = 0) THEN
+            CONTINUE;
+        END IF;
+
+        -- ::FLOAT on both literals is required, not decorative. A bare 40 or
+        -- -600 is NUMBER(p,s), and the UDF signature is FLOAT, so without the
+        -- cast this fails with "Invalid argument types for function
+        -- 'DICOM_TO_BASE64_PNG': (VARCHAR, NUMBER(3,0), NUMBER(4,0))".
+        -- Precedence is fine for negatives: -600::FLOAT parses as -(600::FLOAT).
+        EXECUTE IMMEDIATE
+            'INSERT INTO DICOM_BASE64_IMAGES '
+         || '(FILE_NAME, FILE_SIZE, SERIES_INSTANCE_UID, LABEL, COLLECTION, IMAGE_BYTES) '
+         || 'SELECT c.FILE_NAME, c.FILE_SIZE, c.SERIES_INSTANCE_UID, '
+         ||        'c.SERIES_LABEL, c.COLLECTION_NAME, img.IMAGE_BYTES '
+         || 'FROM DICOM_CONVERT_BATCH c, '
+         ||      'TABLE(DICOM_TO_BASE64_PNG('
+         ||          'BUILD_SCOPED_FILE_URL(@' || rec.STAGE_FQN || ', c.FILE_NAME), '
+         ||          COALESCE(rec.WINDOW_CENTER, 40)::STRING  || '::FLOAT, '
+         ||          COALESCE(rec.WINDOW_WIDTH, 400)::STRING  || '::FLOAT'
+         ||      ')) img';
+        n_ok := SQLROWCOUNT;
+
+        -- Anything in the batch with no resulting row failed to render.
+        INSERT INTO DICOM_LOAD_ERRORS
+            (SOURCE_NAME, FILE_NAME, PIPELINE_STEP, ERROR_MESSAGE)
+        SELECT
+            :src_name,
+            c.FILE_NAME,
+            'BASE64',
+            'DICOM_TO_BASE64_PNG produced no row (unreadable or unsupported pixel data)'
+        FROM DICOM_CONVERT_BATCH c
+        LEFT JOIN DICOM_BASE64_IMAGES b ON b.FILE_NAME = c.FILE_NAME
+        WHERE b.FILE_NAME IS NULL;
+        n_err := SQLROWCOUNT;
+
+        total_ok  := total_ok  + n_ok;
+        total_err := total_err + n_err;
+    END FOR;
+
+    IF (total_ok = 0 AND total_err = 0) THEN
+        RETURN 'No images to convert.';
+    END IF;
+    RETURN 'Converted ' || total_ok::STRING || ' image(s); '
+        || total_err::STRING || ' failed to render.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- SP_EMBED_PENDING
+--
+-- Embeds base64 images that have no vector yet, via the MedSigLIP SPCS service.
+--
+-- Checks the service first and returns a skip message if it is not up. This is
+-- deliberate: the GPU service is suspended outside business hours to control
+-- cost, and a task firing during that window should leave the work queued
+-- rather than fail and trip SUSPEND_TASK_AFTER_NUM_FAILURES.
+--
+-- No join to the metadata table here. DICOM_BASE64_IMAGES already carries the
+-- label columns, and joining a one-to-many table would fan out the GPU call
+-- count without changing the result.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_EMBED_PENDING(BATCH_LIMIT NUMBER DEFAULT 2000)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Embeds pending images via {{ cfg.service_name }}. Skips cleanly when the service is not running so work stays queued.'
+AS
+$$
+DECLARE
+    svc_name   STRING DEFAULT '{{ cfg.service_name }}';
+    svc_state  STRING;
+    qid        STRING;
+    n_svc      NUMBER;
+    n_pending  NUMBER;
+    n_done     NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO n_pending
+    FROM DICOM_BASE64_IMAGES b
+    LEFT JOIN DICOM_EMBEDDINGS e ON e.FILE_NAME = b.FILE_NAME
+    WHERE e.FILE_NAME IS NULL;
+
+    IF (n_pending = 0) THEN
+        RETURN 'No images pending embedding.';
+    END IF;
+
+    -- SHOW SERVICES rather than SYSTEM$GET_SERVICE_STATUS: it returns no rows
+    -- instead of raising when the service was never created, which is the
+    -- normal state on a fresh account before the MedSigLIP step has run.
+    --
+    -- The query id is captured ONCE. LAST_QUERY_ID() moves with every statement,
+    -- so reading it again after the COUNT below would resolve to the COUNT and
+    -- fail with invalid identifier '"status"'.
+    EXECUTE IMMEDIATE 'SHOW SERVICES LIKE ''' || svc_name
+                   || ''' IN SCHEMA {{ db }}.{{ schema }}';
+    qid := LAST_QUERY_ID();
+
+    SELECT COUNT(*) INTO n_svc FROM TABLE(RESULT_SCAN(:qid));
+
+    IF (n_svc = 0) THEN
+        RETURN 'SKIPPED: service ' || svc_name || ' does not exist. '
+            || n_pending::STRING || ' image(s) remain queued. Run '
+            || 'dicom-search/run_medsiglip_pipeline.py to create it.';
+    END IF;
+
+    SELECT "status" INTO svc_state FROM TABLE(RESULT_SCAN(:qid)) LIMIT 1;
+
+    IF (svc_state NOT IN ('RUNNING', 'READY', 'ACTIVE')) THEN
+        RETURN 'SKIPPED: service ' || svc_name || ' is ' || svc_state
+            || '. ' || n_pending::STRING || ' image(s) remain queued; they will '
+            || 'be embedded on the next run once the GPU service is up.';
+    END IF;
+
+    EXECUTE IMMEDIATE
+        'INSERT INTO DICOM_EMBEDDINGS '
+     || '(FILE_NAME, FILE_SIZE, SERIES_INSTANCE_UID, LABEL, COLLECTION, EMBEDDING) '
+     || 'SELECT b.FILE_NAME, b.FILE_SIZE, b.SERIES_INSTANCE_UID, '
+     ||        'b.LABEL, b.COLLECTION, '
+     ||        svc_name || '!predict(b.IMAGE_BYTES):EMBEDDING::VECTOR(FLOAT, {{ cfg.embed_dim }}) '
+     || 'FROM DICOM_BASE64_IMAGES b '
+     || 'LEFT JOIN DICOM_EMBEDDINGS e ON e.FILE_NAME = b.FILE_NAME '
+     || 'WHERE e.FILE_NAME IS NULL '
+     -- NO ORDER BY. See SP_LOAD_METADATA: ORDER BY before LIMIT serializes
+     -- UDF/service-function evaluation and causes multi-minute hangs.
+     || 'LIMIT ' || BATCH_LIMIT::STRING;
+    n_done := SQLROWCOUNT;
+
+    RETURN 'Embedded ' || n_done::STRING || ' image(s). '
+        || GREATEST(n_pending - n_done, 0)::STRING || ' still pending.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- SP_RECONCILE_DELETES
+--
+-- Removes downstream rows for files marked DELETED, then drops the manifest
+-- rows themselves.
+--
+-- Split out from the scan so deletion is an explicit, auditable step. A
+-- misconfigured prefix can mark a lot of files DELETED at once, and it is
+-- better for that to be visible in DICOM_FILE_MANIFEST before anything is
+-- actually removed.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_RECONCILE_DELETES()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Purges metadata, base64, and embedding rows for files marked DELETED, then clears those manifest rows.'
+AS
+$$
+DECLARE
+    n_del  NUMBER;
+    n_meta NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO n_del FROM DICOM_FILE_MANIFEST WHERE STATUS = 'DELETED';
+    IF (n_del = 0) THEN
+        RETURN 'Nothing to reconcile.';
+    END IF;
+
+    CREATE OR REPLACE TEMPORARY TABLE DICOM_DELETED_FILES AS
+    SELECT SOURCE_NAME, FILE_NAME FROM DICOM_FILE_MANIFEST WHERE STATUS = 'DELETED';
+
+    DELETE FROM DICOM_EMBEDDINGS
+     WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_DELETED_FILES);
+
+    DELETE FROM DICOM_BASE64_IMAGES
+     WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_DELETED_FILES);
+
+    DELETE FROM DICOM_CARDIAC_METADATA
+     WHERE FILE_NAME IN (SELECT FILE_NAME FROM DICOM_DELETED_FILES);
+    n_meta := SQLROWCOUNT;
+
+    DELETE FROM DICOM_FILE_MANIFEST
+     WHERE STATUS = 'DELETED'
+       AND FILE_NAME IN (SELECT FILE_NAME FROM DICOM_DELETED_FILES);
+
+    RETURN 'Reconciled ' || n_del::STRING || ' deleted file(s); removed '
+        || n_meta::STRING || ' metadata row(s). Run '
+        || 'SP_REFRESH_SERIES_REGISTRY to drop any now-empty series.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify: all six procedures exist.
+-- -----------------------------------------------------------------------------
+SHOW PROCEDURES LIKE 'SP_%' IN SCHEMA {{ db }}.{{ schema }};
+SELECT "name", "arguments" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY "name";

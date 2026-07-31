@@ -1,0 +1,410 @@
+-- =============================================================================
+-- 10: Pipeline Configuration
+--
+-- Makes the DICOM source exchangeable. Pointing this repo at a customer's own
+-- stage is a set of rows in DICOM_SOURCE_CONFIG + DICOM_SOURCE_PREFIX, not a
+-- code change.
+--
+-- Creates:
+--   DICOM_SOURCE_CONFIG      one row per storage location + its settings
+--   DICOM_SOURCE_PREFIX      scan scopes within a source (see note below)
+--   DICOM_FILE_MANIFEST      per-file state machine (NEW/LOADED/ERROR/DELETED)
+--   DICOM_LOAD_ERRORS        quarantine for files that fail a pipeline step
+--   DICOM_SERIES_REGISTRY    derived from metadata, keyed on SERIES_INSTANCE_UID
+--   DICOM_SERIES_LABEL_SEED  optional curated display names
+--
+-- WHY PREFIXES ARE A SEPARATE TABLE
+-- A single subpath per source cannot express this demo. {{ cfg.source_url }}
+-- holds >3.7M files, so LIST at the bucket root fails outright - the same
+-- reason 02_stages.sql creates the stage without a directory table. The 10
+-- curated series live under 10 disjoint prefixes, so the scan has to walk a
+-- list of them rather than one root.
+--
+-- A customer whose bucket IS listable uses exactly one prefix row, and new
+-- series appearing under it are discovered automatically with no config change.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- Source config: one row per storage location.
+--
+-- WINDOW_CENTER / WINDOW_WIDTH are the DICOM windowing defaults applied when a
+-- file carries no WindowCenter/WindowWidth tag of its own. 40/400 is a soft
+-- tissue window. Chest or lung sources typically want -600/1500.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_SOURCE_CONFIG (
+    SOURCE_NAME      VARCHAR       NOT NULL,
+    STAGE_FQN        VARCHAR       NOT NULL,
+    FILE_PATTERN     VARCHAR       DEFAULT '%.dcm',
+    WINDOW_CENTER    FLOAT         DEFAULT 40,
+    WINDOW_WIDTH     FLOAT         DEFAULT 400,
+    ENABLED          BOOLEAN       DEFAULT TRUE,
+    DESCRIPTION      VARCHAR,
+    LAST_SCAN_AT     TIMESTAMP_LTZ,
+    LAST_SCAN_FILES  NUMBER(38,0),
+    CONSTRAINT PK_DICOM_SOURCE_CONFIG PRIMARY KEY (SOURCE_NAME)
+)
+COMMENT = 'One row per DICOM storage location. Swap sources by editing rows here, not code.';
+
+-- -----------------------------------------------------------------------------
+-- Scan scopes within a source.
+--
+-- PREFIX is relative to the stage root and must end in '/' unless empty.
+-- Empty string means "the whole stage", which is only safe when the stage is
+-- listable in one call.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_SOURCE_PREFIX (
+    SOURCE_NAME  VARCHAR NOT NULL,
+    PREFIX       VARCHAR NOT NULL,
+    ENABLED      BOOLEAN DEFAULT TRUE,
+    CONSTRAINT PK_DICOM_SOURCE_PREFIX PRIMARY KEY (SOURCE_NAME, PREFIX),
+    CONSTRAINT FK_DICOM_SOURCE_PREFIX FOREIGN KEY (SOURCE_NAME)
+        REFERENCES DICOM_SOURCE_CONFIG (SOURCE_NAME)
+)
+COMMENT = 'Scan scopes within a source. One row with PREFIX = '''' scans the whole stage; many rows scope a bucket too large to list at its root.';
+
+{% if cfg.include_demo_series %}
+-- -----------------------------------------------------------------------------
+-- Seed the bundled IDC demo source. MERGE so re-running never duplicates and
+-- never clobbers a customer's edits to window settings or ENABLED.
+--
+-- This entire block is gated on include_demo_series. Set it to false and the
+-- plugin deploys the pipeline with NO source registered; you then add your own
+-- with /dicom-imaging-intelligence:onboard-source.
+-- -----------------------------------------------------------------------------
+MERGE INTO DICOM_SOURCE_CONFIG t
+USING (
+    SELECT
+        '{{ cfg.source_name }}'                          AS SOURCE_NAME,
+        '{{ db }}.{{ schema }}.{{ cfg.source_stage }}'  AS STAGE_FQN,
+        '%.dcm'                                          AS FILE_PATTERN,
+        {{ cfg.window_center }}::FLOAT                   AS WINDOW_CENTER,
+        {{ cfg.window_width }}::FLOAT                    AS WINDOW_WIDTH,
+        TRUE                                             AS ENABLED,
+        'NCI Imaging Data Commons public bucket. 10 curated cardiac/chest CT series.' AS DESCRIPTION
+) s
+ON t.SOURCE_NAME = s.SOURCE_NAME
+WHEN NOT MATCHED THEN INSERT
+    (SOURCE_NAME, STAGE_FQN, FILE_PATTERN, WINDOW_CENTER, WINDOW_WIDTH, ENABLED, DESCRIPTION)
+    VALUES (s.SOURCE_NAME, s.STAGE_FQN, s.FILE_PATTERN, s.WINDOW_CENTER, s.WINDOW_WIDTH, s.ENABLED, s.DESCRIPTION);
+
+-- The 10 curated IDC series prefixes. These are path UUIDs, which is all the
+-- bucket layout gives us before any file is parsed; the real
+-- SERIES_INSTANCE_UID is only knowable after metadata extraction.
+MERGE INTO DICOM_SOURCE_PREFIX t
+USING (
+    SELECT '{{ cfg.source_name }}' AS SOURCE_NAME, COLUMN1 AS PREFIX
+    FROM VALUES
+        ('7e1bcefd-d097-47c0-9d54-65bd5d9674cf/'),
+        ('3b5970f6-f130-4337-9666-a9741a267268/'),
+        ('4bed8f9a-bf84-44da-ac8d-d39e15d9c978/'),
+        ('f53b78ea-92ea-479e-a89f-967bec74e848/'),
+        ('1d92626a-e39d-4cf5-8ed9-864aae909d3d/'),
+        ('7f4806f3-5946-41cb-8684-8fd5d51f8931/'),
+        ('6dfa81e0-3520-4332-aecc-0767dd1cab74/'),
+        ('f6fc9ace-5516-418d-b979-7ffaf14de22b/'),
+        ('bb721c76-8056-4780-97be-1bc61b469454/'),
+        ('de9868a4-a9d9-4652-9f0f-04e06a95d09e/')
+) s
+ON t.SOURCE_NAME = s.SOURCE_NAME AND t.PREFIX = s.PREFIX
+WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, PREFIX, ENABLED)
+    VALUES (s.SOURCE_NAME, s.PREFIX, TRUE);
+{% else %}
+-- Demo source NOT seeded (include_demo_series = false). Register your own with
+-- /dicom-imaging-intelligence:onboard-source, which inserts one
+-- DICOM_SOURCE_CONFIG row and at least one DICOM_SOURCE_PREFIX row.
+{% endif %}
+
+-- -----------------------------------------------------------------------------
+-- Migrate v1 tables, once.
+--
+-- v1 DICOM_FILE_MANIFEST was (FILE_NAME, FILE_SIZE, SERIES_UUID) and v1
+-- DICOM_SERIES_REGISTRY was keyed on SERIES_UUID. Both are incompatible with
+-- the versions below.
+--
+-- This is a guarded migration rather than CREATE OR REPLACE on purpose. Blindly
+-- replacing would wipe manifest state on EVERY setup run, so re-running the
+-- deploy to pick up a new SQL file would discard LOADED status and
+-- FIRST_SEEN_AT history and force a full rescan. Keyed on the presence of the
+-- v1 SERIES_UUID column, this fires exactly once.
+-- -----------------------------------------------------------------------------
+EXECUTE IMMEDIATE $$
+DECLARE
+    v1_manifest NUMBER;
+    v1_registry NUMBER;
+    log         STRING DEFAULT '';
+BEGIN
+    SELECT COUNT(*) INTO v1_manifest
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = '{{ schema }}'
+      AND TABLE_NAME   = 'DICOM_FILE_MANIFEST'
+      AND COLUMN_NAME  = 'SERIES_UUID';
+
+    SELECT COUNT(*) INTO v1_registry
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = '{{ schema }}'
+      AND TABLE_NAME   = 'DICOM_SERIES_REGISTRY'
+      AND COLUMN_NAME  = 'SERIES_UUID';
+
+    IF (v1_manifest > 0) THEN
+        DROP TABLE IF EXISTS DICOM_FILE_MANIFEST;
+        log := log || 'Dropped v1 DICOM_FILE_MANIFEST (path-derived SERIES_UUID). ';
+    END IF;
+
+    IF (v1_registry > 0) THEN
+        DROP TABLE IF EXISTS DICOM_SERIES_REGISTRY;
+        log := log || 'Dropped v1 DICOM_SERIES_REGISTRY (keyed on path UUID). ';
+    END IF;
+
+    IF (log = '') THEN
+        RETURN 'No v1 tables found - nothing to migrate.';
+    END IF;
+    RETURN log || 'Recreated below; SP_SCAN_ALL_SOURCES and '
+               || 'SP_REFRESH_SERIES_REGISTRY repopulate them.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- File manifest: the per-file state machine that makes loading incremental.
+--
+-- STATUS transitions:
+--   NEW      discovered by a scan, not yet parsed
+--   LOADED   metadata extracted successfully
+--   ERROR    parsing failed; see DICOM_LOAD_ERRORS
+--   DELETED  no longer present at the source
+--
+-- FILE_MD5 comes from LIST and is what makes change detection possible: a file
+-- overwritten in place keeps its name and size but gets a new md5, so it can be
+-- reprocessed rather than silently going stale.
+--
+-- SERIES_UUID is deliberately absent. Series identity now comes from the parsed
+-- SERIES_INSTANCE_UID tag, not from a path segment.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_FILE_MANIFEST (
+    SOURCE_NAME    VARCHAR       NOT NULL,
+    FILE_NAME      VARCHAR       NOT NULL,
+    FILE_SIZE      NUMBER(38,0),
+    FILE_MD5       VARCHAR,
+    STATUS         VARCHAR       DEFAULT 'NEW',
+    FIRST_SEEN_AT  TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    LAST_SEEN_AT   TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    LOADED_AT      TIMESTAMP_LTZ,
+    CONSTRAINT PK_DICOM_FILE_MANIFEST PRIMARY KEY (SOURCE_NAME, FILE_NAME)
+)
+COMMENT = 'Per-file state machine. Stands in for a directory table and drives incremental loading. FILE_NAME is stage-relative so BUILD_SCOPED_FILE_URL works unchanged.';
+
+-- -----------------------------------------------------------------------------
+-- Quarantine. A single unreadable file must never abort a batch, so failures
+-- land here and the pipeline keeps going.
+--
+-- PIPELINE_STEP is METADATA or BASE64 - the two steps that read pixel data and
+-- can fail on a per-file basis.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_LOAD_ERRORS (
+    SOURCE_NAME    VARCHAR,
+    FILE_NAME      VARCHAR,
+    PIPELINE_STEP  VARCHAR,
+    ERROR_MESSAGE  VARCHAR,
+    OCCURRED_AT    TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    RESOLVED       BOOLEAN       DEFAULT FALSE
+)
+COMMENT = 'Files that failed a pipeline step. Inspect with V_DICOM_LOAD_ERRORS_RECENT.';
+
+-- -----------------------------------------------------------------------------
+-- Series registry, now DERIVED rather than hand-authored.
+--
+-- v1 was 10 hand-written rows keyed on the IDC path UUID, which only worked
+-- because IDC happens to use the series UUID as its top-level prefix. This
+-- version is MERGEd from parsed metadata and keyed on SERIES_INSTANCE_UID, so
+-- any layout works.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_SERIES_REGISTRY (
+    SERIES_INSTANCE_UID  VARCHAR NOT NULL,
+    SOURCE_NAME          VARCHAR,
+    COLLECTION_NAME      VARCHAR,
+    SERIES_LABEL         VARCHAR,
+    PATIENT_ID           VARCHAR,
+    STUDY_INSTANCE_UID   VARCHAR,
+    MODALITY             VARCHAR,
+    MANUFACTURER         VARCHAR,
+    BODY_PART_EXAMINED   VARCHAR,
+    SERIES_DESCRIPTION   VARCHAR,
+    FILE_COUNT           NUMBER(38,0),
+    EXPECTED_FILES       NUMBER(38,0),
+    FIRST_SEEN_AT        TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    LAST_REFRESHED_AT    TIMESTAMP_LTZ,
+    CONSTRAINT PK_DICOM_SERIES_REGISTRY PRIMARY KEY (SERIES_INSTANCE_UID)
+)
+COMMENT = 'Derived from DICOM_CARDIAC_METADATA by SP_REFRESH_SERIES_REGISTRY. Keyed on the real SERIES_INSTANCE_UID tag, not a path segment.';
+
+-- -----------------------------------------------------------------------------
+-- Optional curated labels.
+--
+-- Without this, SERIES_LABEL falls back to SERIES_DESCRIPTION from the file.
+-- The demo wants human-readable names like "Cardiac CTA Diastolic 70% AMC-015",
+-- which no DICOM tag provides, so they are seeded here.
+--
+-- Left EMPTY for a customer: their series get derived labels automatically.
+--
+-- Keyed on the real SERIES_INSTANCE_UID. The path UUID -> SERIES_INSTANCE_UID
+-- mapping was verified 1:1 across all 10 series before this switch, so no
+-- curated label is lost.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_SERIES_LABEL_SEED (
+    SERIES_INSTANCE_UID  VARCHAR NOT NULL,
+    SERIES_LABEL         VARCHAR,
+    COLLECTION_NAME      VARCHAR,
+    EXPECTED_FILES       NUMBER(38,0),
+    CONSTRAINT PK_DICOM_SERIES_LABEL_SEED PRIMARY KEY (SERIES_INSTANCE_UID)
+)
+COMMENT = 'Optional curated display names, keyed on SERIES_INSTANCE_UID. Empty for customer deployments - labels then derive from SERIES_DESCRIPTION.';
+
+{% if cfg.include_demo_series %}
+MERGE INTO DICOM_SERIES_LABEL_SEED t
+USING (
+    SELECT COLUMN1 AS SERIES_INSTANCE_UID, COLUMN2 AS SERIES_LABEL,
+           COLUMN3 AS COLLECTION_NAME,     COLUMN4 AS EXPECTED_FILES
+    FROM VALUES
+        ('1.3.6.1.4.1.14519.5.2.1.4334.1501.253298261882254993527951068007', 'Cardiac CTA Diastolic 70% AMC-015',      'nsclc_radiogenomics', 372),
+        ('1.3.6.1.4.1.14519.5.2.1.305592206580970735498393578197444028276',  'Cardiac CTA Systolic 31% AP-26JK',       'varepop_apollo',      459),
+        ('1.3.6.1.4.1.14519.5.2.1.4334.1501.948583329016372282068841499619', 'Cardiac CT Systolic 38% AMC-027',        'nsclc_radiogenomics', 336),
+        ('1.3.6.1.4.1.9328.50.17.88478681431123430332359262076608659902',    'Gated Segment 0.625mm RIDER-2019259100', 'rider_lung_pet_ct',   570),
+        ('1.3.6.1.4.1.9328.50.17.16899153445127694150192755610737825576',    'Cine 30-65 BPM RIDER-2266952716',        'rider_lung_pet_ct',   280),
+        ('1.3.6.1.4.1.14519.5.2.1.99.1071.31404218411288959690753759073902', 'Cardiac 2.5 B41s A130302',               'covid_19_ny_sbu',      85),
+        ('1.3.6.1.4.1.14519.5.2.1.99.1071.15823644866360852726843027399073', 'CTA 3.0 CE A095019',                     'covid_19_ny_sbu',     130),
+        ('1.3.6.1.4.1.14519.5.2.1.7009.9004.102440903015600705598940460839', 'Chest CT Philips 202207',                'nlst',                258),
+        ('1.2.840.113654.2.55.279699052589725471777953863261139562907',      'Chest CT Siemens B30f 133417',           'nlst',                198),
+        ('1.3.6.1.4.1.14519.5.2.1.7009.9004.274855256428242732599580379709', 'Chest CT Toshiba FC10 200119',           'nlst',                160)
+) s
+ON t.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+WHEN MATCHED THEN UPDATE SET
+    t.SERIES_LABEL = s.SERIES_LABEL,
+    t.COLLECTION_NAME = s.COLLECTION_NAME,
+    t.EXPECTED_FILES = s.EXPECTED_FILES
+WHEN NOT MATCHED THEN INSERT
+    (SERIES_INSTANCE_UID, SERIES_LABEL, COLLECTION_NAME, EXPECTED_FILES)
+    VALUES (s.SERIES_INSTANCE_UID, s.SERIES_LABEL, s.COLLECTION_NAME, s.EXPECTED_FILES);
+{% endif %}
+
+-- -----------------------------------------------------------------------------
+-- Image tables, owned here rather than created ad hoc by the MedSigLIP step.
+--
+-- Previously both were CREATE OR REPLACE ... AS SELECT inside the notebook and
+-- the pipeline script, which made them full-rebuild by construction: every run
+-- discarded all rows, including embeddings that cost GPU time to produce.
+-- Declaring them here lets the procedures INSERT only what is missing.
+--
+-- EMBEDDING is VECTOR(FLOAT, {{ cfg.embed_dim }}) because google/medsiglip-448 is a {{ cfg.embed_dim }}-dim
+-- dual encoder. Changing models means changing this dimension and re-embedding.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DICOM_BASE64_IMAGES (
+    FILE_NAME            VARCHAR NOT NULL,
+    FILE_SIZE            NUMBER(38,0),
+    SERIES_INSTANCE_UID  VARCHAR,
+    LABEL                VARCHAR,
+    COLLECTION           VARCHAR,
+    IMAGE_BYTES          VARCHAR,
+    CONSTRAINT PK_DICOM_BASE64_IMAGES PRIMARY KEY (FILE_NAME)
+)
+COMMENT = 'Base64 PNG renderings at 448x448, staged for embedding. Populated incrementally by SP_CONVERT_IMAGES.';
+
+CREATE TABLE IF NOT EXISTS DICOM_EMBEDDINGS (
+    FILE_NAME            VARCHAR NOT NULL,
+    FILE_SIZE            NUMBER(38,0),
+    SERIES_INSTANCE_UID  VARCHAR,
+    LABEL                VARCHAR,
+    COLLECTION           VARCHAR,
+    EMBEDDING            VECTOR(FLOAT, {{ cfg.embed_dim }}),
+    CONSTRAINT PK_DICOM_EMBEDDINGS PRIMARY KEY (FILE_NAME)
+)
+COMMENT = 'MedSigLIP-448 image embeddings. Populated incrementally by SP_EMBED_PENDING; backs {{ cfg.search_service }}.';
+
+-- -----------------------------------------------------------------------------
+-- Migrate the derived image tables to SERIES_INSTANCE_UID, in place.
+--
+-- DICOM_BASE64_IMAGES and DICOM_EMBEDDINGS were keyed on the path-derived
+-- SERIES_UUID. DICOM_EMBEDDINGS holds GPU-computed vectors, so this ADDs and
+-- BACKFILLS the new column rather than recreating the table - rebuilding it
+-- would mean paying for GPU inference again to regenerate identical vectors.
+--
+-- Both tables may legitimately not exist yet on a fresh account: they are
+-- created by the MedSigLIP pipeline, which runs after this. Hence the
+-- existence check.
+-- -----------------------------------------------------------------------------
+EXECUTE IMMEDIATE $$
+DECLARE
+    tbl        STRING;
+    has_table  NUMBER;
+    has_old    NUMBER;
+    has_new    NUMBER;
+    updated    NUMBER;
+    log        STRING DEFAULT '';
+    tbls ARRAY DEFAULT ARRAY_CONSTRUCT('DICOM_BASE64_IMAGES', 'DICOM_EMBEDDINGS');
+BEGIN
+    FOR i IN 0 TO ARRAY_SIZE(tbls) - 1 DO
+        tbl := GET(tbls, i)::STRING;
+
+        SELECT COUNT(*) INTO has_table FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = '{{ schema }}' AND TABLE_NAME = :tbl;
+
+        IF (has_table = 0) THEN
+            log := log || tbl || ': not present yet, skipped. ';
+            CONTINUE;
+        END IF;
+
+        SELECT
+            COUNT_IF(COLUMN_NAME = 'SERIES_UUID'),
+            COUNT_IF(COLUMN_NAME = 'SERIES_INSTANCE_UID')
+        INTO has_old, has_new
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{{ schema }}' AND TABLE_NAME = :tbl;
+
+        IF (has_new = 0) THEN
+            EXECUTE IMMEDIATE 'ALTER TABLE ' || tbl
+                || ' ADD COLUMN SERIES_INSTANCE_UID VARCHAR';
+        END IF;
+
+        -- Backfill from parsed metadata. FILE_NAME is the shared key, and it is
+        -- unique in DICOM_CARDIAC_METADATA, so this cannot fan out.
+        EXECUTE IMMEDIATE 'UPDATE ' || tbl || ' t'
+            || ' SET SERIES_INSTANCE_UID = m.SERIES_INSTANCE_UID'
+            || ' FROM DICOM_CARDIAC_METADATA m'
+            || ' WHERE m.FILE_NAME = t.FILE_NAME'
+            || '   AND t.SERIES_INSTANCE_UID IS NULL';
+        updated := SQLROWCOUNT;
+
+        IF (has_old > 0) THEN
+            EXECUTE IMMEDIATE 'ALTER TABLE ' || tbl || ' DROP COLUMN SERIES_UUID';
+            log := log || tbl || ': added SERIES_INSTANCE_UID, backfilled '
+                       || updated::STRING || ' rows, dropped SERIES_UUID. ';
+        ELSE
+            log := log || tbl || ': already migrated (backfilled '
+                       || updated::STRING || ' rows). ';
+        END IF;
+    END FOR;
+
+    RETURN log || 'NOTE: dicom-search/byo_search.sql must be re-run to point '
+               || '{{ cfg.search_service }} at the new column.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT
+    c.SOURCE_NAME,
+    c.STAGE_FQN,
+    c.ENABLED,
+    c.WINDOW_CENTER,
+    c.WINDOW_WIDTH,
+    COUNT(p.PREFIX) AS SCAN_PREFIXES
+FROM DICOM_SOURCE_CONFIG c
+LEFT JOIN DICOM_SOURCE_PREFIX p ON p.SOURCE_NAME = c.SOURCE_NAME AND p.ENABLED
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY c.SOURCE_NAME;
+
+SELECT COUNT(*) AS SEEDED_LABELS FROM DICOM_SERIES_LABEL_SEED;

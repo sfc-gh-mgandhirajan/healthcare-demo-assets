@@ -1,0 +1,44 @@
+-- =============================================================================
+-- 05: Masking Policies (PHI Governance)
+-- Protects Protected Health Information (PHI) using Snowflake's native
+-- column-level masking. Only privileged roles see actual patient identifiers.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- Create the masking policy.
+--
+-- IF NOT EXISTS rather than OR REPLACE: once a masking policy is attached to a
+-- column, Snowflake refuses to replace it -
+--   "Policy PHI_MASK cannot be dropped/replaced as it is associated with one
+--    or more entities"
+-- OR REPLACE therefore works on a fresh account but fails on every re-run,
+-- which would break setup.sh idempotency.
+CREATE MASKING POLICY IF NOT EXISTS PHI_MASK AS (VAL VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('SYSADMIN', 'ACCOUNTADMIN') THEN VAL
+        ELSE '***MASKED***'
+    END;
+
+-- Apply masking policy to PHI columns.
+-- FORCE replaces any existing policy assignment on the column, so re-running
+-- this script is safe. Without FORCE, a second run errors on the assignment.
+--
+-- CAUTION: PATIENT_ID is both masked and used as a join key (see the
+-- Clinical Intelligence and Image Search tabs, which join
+-- DICOM_CARDIAC_METADATA to FACT_PROCEDURE on PATIENT_ID).
+--
+-- Under a role outside SYSADMIN/ACCOUNTADMIN, every PATIENT_ID collapses to
+-- the single literal '***MASKED***'. The join then matches every row against
+-- every row instead of failing, silently producing a cross join with inflated
+-- counts. This demo runs as SYSADMIN so the behavior is correct as written.
+--
+-- If you demo under a restricted role, either drop the mask from PATIENT_ID
+-- and mask only PATIENT_NAME, or switch to a hash-preserving policy such as
+-- SHA2(VAL) so joins still work while the value stays unreadable.
+ALTER TABLE DICOM_CARDIAC_METADATA
+    MODIFY COLUMN PATIENT_ID SET MASKING POLICY PHI_MASK FORCE;
+
+ALTER TABLE DICOM_CARDIAC_METADATA
+    MODIFY COLUMN PATIENT_NAME SET MASKING POLICY PHI_MASK FORCE;

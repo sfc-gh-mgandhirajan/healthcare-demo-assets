@@ -1,0 +1,21 @@
+# Local dependencies for dicom-search/run_medsiglip_pipeline.py
+#
+# These are CLIENT-side only. The script's heavy work (torch, transformers,
+# model download) runs REMOTELY inside a Snowflake ML Jobs container on
+# DICOM_GPU_POOL, and those dependencies are declared in the script itself as
+# JOB_PIP_REQUIREMENTS. Installing torch locally is neither needed nor useful.
+#
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -r dicom-search/requirements.txt
+#   python dicom-search/run_medsiglip_pipeline.py --connection <name>
+#
+# snowflake-ml-python provides snowflake.ml.jobs (the remote decorator),
+# snowflake.ml.model (CustomModel), and snowflake.ml.registry.
+snowflake-ml-python>=1.49.0
+
+# The [secure-local-storage] extra pulls in keyring. Without it, a connection
+# using oauth_authorization_code re-opens a browser prompt on every run because
+# the token cannot be cached.
+snowflake-connector-python[secure-local-storage]>=3.12.0
+
+snowflake-snowpark-python>=1.23.0
