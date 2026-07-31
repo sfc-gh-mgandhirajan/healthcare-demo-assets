@@ -1,0 +1,429 @@
+version: 1
+# Build manifest for the Patient Experience Command Center derived data product.
+# Each object binds a template (accelerator-owned) to the customer's approved
+# conformance tables. Rendered by assets/renderer/render.py, deployed in
+# depends_on order by the derived-build skill.
+#
+# object_type: dynamic_table | table | view | semantic_view | cortex_search | agent
+# consumes:    canonical element / relationship IDs the template resolves (documentation + readiness)
+# readiness:   contract IDs that must be APPROVED before this object can build
+#
+# NOTE: incremental — objects are added here as their templates are authored/validated.
+
+objects:
+  - object_name: DENORM_SURVEY_RESPONSE_DETAIL
+    object_type: dynamic_table
+    template: denorm_survey_response_detail.sql.j2
+    grain: "one HCAHPS survey response, with per-measure top-box flags, unit, demographics, and period buckets"
+    depends_on: []
+    consumes:
+      elements: [SR_RESPONSE_ID, SR_SURVEY_INSTRUMENT, SR_PATIENT_ID, SR_ENCOUNTER_ID, SR_UNIT_ID, SR_DISCHARGE_DATE,
+                 SR_NURSE_COMM, SR_DOCTOR_COMM, SR_RESPONSIVENESS, SR_MEDICINE_COMM, SR_DISCHARGE_INFO,
+                 SR_CARE_TRANSITION, SR_CLEANLINESS, SR_QUIETNESS, SR_OVERALL_RATING, SR_RECOMMEND,
+                 FU_UNIT_ID, FU_UNIT_NAME, FU_UNIT_TYPE, FU_SERVICE_LINE,
+                 PAT_PATIENT_ID, PAT_RACE, PAT_ETHNICITY, PAT_LANGUAGE, DEMO_ANCHOR_MONTH]
+      relationships: [SR__UNIT, SR__PATIENT]
+    readiness: [SR_RESPONSE_ID, SR_ENCOUNTER_ID, SR_UNIT_ID, SR_DISCHARGE_DATE,
+                SR_NURSE_COMM, SR_DOCTOR_COMM, SR_RESPONSIVENESS, SR_MEDICINE_COMM, SR_DISCHARGE_INFO,
+                SR_CARE_TRANSITION, SR_CLEANLINESS, SR_QUIETNESS, SR_OVERALL_RATING, SR_RECOMMEND, DEMO_ANCHOR_MONTH]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_STAR_RATING
+    object_type: dynamic_table
+    template: mdl_star_rating.sql.j2
+    grain: "one row per entity (HOUSE + each unit): CMS-weighted composite top-box + HCAHPS star"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+    consumes:
+      elements: [SM_MEASURE_CODE, SM_CMS_WEIGHT, SC_MEASURE_CODE, SC_STAR_LEVEL, SC_MIN_TOPBOX, SC_MAX_TOPBOX]
+      relationships: []
+    readiness: [SM_MEASURE_CODE, SM_CMS_WEIGHT, SC_MEASURE_CODE, SC_STAR_LEVEL, SC_MIN_TOPBOX, SC_MAX_TOPBOX]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_GRIEVANCE_DETAIL
+    object_type: dynamic_table
+    template: denorm_grievance_detail.sql.j2
+    grain: "one grievance/complaint case with aging + SLA state"
+    depends_on: []
+    consumes:
+      elements: [GRV_CASE_ID, GRV_PATIENT_ID, GRV_ENCOUNTER_ID, GRV_UNIT_ID, GRV_CASE_TYPE, GRV_CATEGORY,
+                 GRV_SEVERITY, GRV_STATUS, GRV_RECEIVED_DATE, GRV_REGULATORY_DUE_DATE, GRV_RESOLVED_DATE, DEMO_ANCHOR_MONTH]
+      relationships: []
+    requires_logical_objects: [GRIEVANCE_CASE]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_CALLBACK_DETAIL
+    object_type: dynamic_table
+    template: denorm_callback_detail.sql.j2
+    grain: "one post-discharge callback (close-the-loop funnel)"
+    depends_on: []
+    consumes:
+      elements: [CB_CALLBACK_ID, CB_ENCOUNTER_ID, CB_PATIENT_ID, CB_UNIT_ID, CB_DISCHARGE_DATE, CB_ATTEMPT_DATE,
+                 CB_OUTCOME, CB_REACHED, CB_ISSUE_IDENTIFIED, DEMO_ANCHOR_MONTH]
+      relationships: []
+    requires_logical_objects: [POST_DISCHARGE_CALLBACK]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_EQUITY_GAP
+    object_type: dynamic_table
+    template: mdl_equity_gap.sql.j2
+    grain: "one row per race cohort: nurse-comm top-box gap vs house average (>=30 responses)"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+    consumes:
+      elements: []
+      relationships: []
+    optional_logical_objects: [PATIENT_DEMOGRAPHICS]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_POINTS_LOST
+    object_type: dynamic_table
+    template: mdl_points_lost.sql.j2
+    grain: "one row per measure/domain: composite top-box YoY decomposition (waterfall)"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+    consumes:
+      elements: [SM_MEASURE_CODE, SM_DOMAIN_NAME, SM_CMS_WEIGHT]
+      relationships: []
+    readiness: [SM_MEASURE_CODE, SM_CMS_WEIGHT]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: DENORM_ENCOUNTER_JOURNEY_DETAIL
+    object_type: dynamic_table
+    template: denorm_encounter_journey_detail.sql.j2
+    grain: "one inpatient encounter: care-team process (med-rec, interpreter) + post-discharge close-the-loop"
+    depends_on: []
+    consumes:
+      elements: [ECT_ENCOUNTER_ID, ECT_PATIENT_ID, ECT_UNIT_ID, ECT_MED_REC_COMPLETED, ECT_INTERPRETER_USED,
+                 ECT_INTERPRETER_MODE, CB_CALLBACK_ID, CB_ENCOUNTER_ID, CB_DISCHARGE_DATE, CB_REACHED,
+                 CB_ISSUE_IDENTIFIED, CB_OUTCOME, DEMO_ANCHOR_MONTH]
+      relationships: []
+    requires_logical_objects: [ENCOUNTER_CARE_TEAM]
+    optional_logical_objects: [POST_DISCHARGE_CALLBACK]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_JOURNEY_STAGE_SCORE
+    object_type: dynamic_table
+    template: mdl_journey_stage_score.sql.j2
+    grain: "one row per journey stage (s1-s5): current score + prior + QoQ trend"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+    consumes:
+      elements: [OPS_TARGET_KEY, OPS_TARGET_TYPE, OPS_TARGET_VALUE, VT_VISIT_TIMING_ID, VT_AREA, VT_WAIT_MINUTES,
+                 VT_ARRIVAL_DATETIME, ED_ED_EVENT_ID, ED_WAIT_MINUTES, ED_ARRIVAL_DATETIME, DEMO_ANCHOR_MONTH]
+      relationships: []
+    optional_logical_objects: [VISIT_TIMING_EVENT, ED_ENCOUNTER_EVENT, OPS_TARGET]
+    params:
+      target_lag: "1 hour"
+
+  # --- Contact-center transcription: incremental file pipeline (stream -> task -> File Log -> INCREMENTAL DT) ---
+  # AI_TRANSCRIBE is non-deterministic, so a DT straight over DIRECTORY(@stage) would be forced to FULL
+  # refresh and re-transcribe every recording on every trigger. The three-law pattern keeps it incremental:
+  # a stream detects new files, a task appends them to a change-tracked File Log, and CALL_TRANSCRIPT reads
+  # the log so AI_TRANSCRIBE runs exactly once per new recording.
+  - object_name: CALL_RECORDING_FILE_LOG
+    object_type: table
+    template: call_recording_file_log.sql.j2
+    grain: "append-only log of ingested recording files (change-tracked; incremental seam for CALL_TRANSCRIPT)"
+    depends_on: []
+    consumes:
+      elements: [CC_RECORDING_STAGE]
+    requires_logical_objects: [CONTACT_CENTER_CALL]
+
+  - object_name: CALL_RECORDING_STAGE_STREAM
+    object_type: stream
+    template: call_recording_stage_stream.sql.j2
+    grain: "stream on the recording stage directory table — detects newly-arrived recordings"
+    depends_on: [CALL_RECORDING_FILE_LOG]
+    consumes:
+      elements: [CC_RECORDING_STAGE]
+
+  - object_name: CALL_RECORDING_INGEST_TASK
+    object_type: task
+    template: call_recording_ingest_task.sql.j2
+    grain: "task: flush new .wav files from the stage stream into CALL_RECORDING_FILE_LOG (created suspended)"
+    depends_on: [CALL_RECORDING_STAGE_STREAM]
+
+  - object_name: CALL_RECORDING_SEED
+    object_type: seed
+    template: call_recording_seed.sql.j2
+    grain: "one-time backlog seed: register pre-existing recordings into the File Log (idempotent)"
+    depends_on: [CALL_RECORDING_INGEST_TASK]
+    consumes:
+      elements: [CC_RECORDING_STAGE]
+
+  - object_name: CALL_TRANSCRIPT
+    object_type: dynamic_table
+    template: call_transcript.sql.j2
+    grain: "one row per contact-center recording (INCREMENTAL AI_TRANSCRIBE over the File Log)"
+    depends_on: [CALL_RECORDING_SEED]
+    consumes:
+      elements: [CC_RECORDING_STAGE]
+    requires_logical_objects: [CONTACT_CENTER_CALL]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: FS_PX_RISK_FEATURES
+    object_type: dynamic_table
+    template: fs_px_risk_features.sql.j2
+    grain: "one inpatient encounter: risk features + detractor label (feeds train_risk_model.ipynb)"
+    depends_on: [DENORM_ENCOUNTER_JOURNEY_DETAIL, DENORM_SURVEY_RESPONSE_DETAIL, COMMENT_ENRICHED]
+    consumes:
+      elements: [GRV_ENCOUNTER_ID, GRV_PATIENT_ID, PAT_PATIENT_ID, PAT_RACE, PAT_ETHNICITY, PAT_LANGUAGE,
+                 PAT_INTERPRETER_NEEDED]
+      relationships: []
+    optional_logical_objects: [GRIEVANCE_CASE, PATIENT_DEMOGRAPHICS]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: COMMENT_ENRICHED
+    object_type: dynamic_table
+    template: comment_enriched.sql.j2
+    grain: "one patient-voice item (survey comment / review / transcript) with sentiment + theme + journey stage"
+    depends_on: [CALL_TRANSCRIPT]
+    consumes:
+      elements: [CMT_COMMENT_ID, CMT_ENCOUNTER_ID, CMT_UNIT_ID, CMT_COMMENT_TEXT, CMT_COLLECTED_DATE,
+                 OR_REVIEW_ID, OR_REVIEW_TEXT, OR_REVIEW_DATE]
+    requires_logical_objects: [SURVEY_COMMENT]
+    optional_logical_objects: [ONLINE_REVIEW, CONTACT_CENTER_CALL]
+    params:
+      # Deterministic cost bound (basis points of 1000). 25 ~= 2.5% (~1.5k rows for demo parity).
+      # Raise to 1000 for full production enrichment. Deterministic -> keeps DT INCREMENTAL (SAMPLE would force FULL).
+      sample_bp: 25
+      target_lag: "1 hour"
+
+  - object_name: COMMENT_SEARCH
+    object_type: cortex_search
+    template: comment_search.sql.j2
+    grain: "Cortex Search service over enriched patient voice (agent citation tool)"
+    depends_on: [COMMENT_ENRICHED]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: MDL_VOICE_SENTIMENT
+    object_type: dynamic_table
+    template: mdl_voice_sentiment.sql.j2
+    grain: "one row per experience theme: net sentiment + volume (Voice-of-Patient)"
+    depends_on: [COMMENT_ENRICHED]
+    params:
+      target_lag: "1 hour"
+
+  # --- ML risk tier: headless Notebook Project Object (Workspaces NPO pattern) ---
+  # PX_NOTEBOOKS backs the NPO; the derived-build skill PUTs assets/ml/* to it before PX_TRAIN_RISK_MODEL
+  # runs. PX_TRAIN_RISK_MODEL trains the XGBoost model + writes MDL_DRIVER_IMPORTANCE, so it depends on the
+  # feature table. Run this AFTER the voice layer (COMMENT_ENRICHED) so comment-sentiment features exist.
+  - object_name: PX_NOTEBOOKS
+    object_type: stage
+    template: px_notebooks_stage.sql.j2
+    grain: "internal SSE+directory stage holding the ML notebook + env for the headless NPO"
+    depends_on: []
+
+  - object_name: PX_TRAIN_RISK_MODEL
+    object_type: notebook
+    template: train_risk_model.sql.j2
+    grain: "headless NPO: train XGBoost detractor-risk model -> Model Registry (PREDICT_PROBA+EXPLAIN) + MDL_DRIVER_IMPORTANCE"
+    depends_on: [FS_PX_RISK_FEATURES, PX_NOTEBOOKS]
+    ml_assets: [train_risk_model.ipynb, environment.yml]   # PUT to @PX_NOTEBOOKS by derived-build before CREATE NOTEBOOK PROJECT
+    params:
+      # NOTE: compute_pool + runtime are ENVIRONMENT-SPECIFIC and vary per customer. These are DEFAULTS
+      # only; the deploy-time config (config.json compute_pool/runtime) overrides them, and the
+      # derived-build skill discovers/validates an eligible pool + runtime for the target account.
+      main_file: "train_risk_model.ipynb"
+      compute_pool: "SYSTEM_COMPUTE_POOL_CPU"
+      runtime: "V2.6-CPU-PY3.12"
+
+  # Outputs PRODUCED BY the PX_TRAIN_RISK_MODEL notebook (no template to render - declared here so the
+  # manifest is a complete inventory of what the build creates). The notebook registers the model and
+  # writes the global driver-importance table; nothing is rendered/deployed for these directly.
+  - object_name: PX_DISSAT_RISK_XGB
+    object_type: model
+    produced_by: PX_TRAIN_RISK_MODEL
+    grain: "registered XGBoost model version V1 (PREDICT / PREDICT_PROBA; EXPLAIN listed but not callable for pipeline)"
+    depends_on: [PX_TRAIN_RISK_MODEL]
+
+  - object_name: MDL_DRIVER_IMPORTANCE
+    object_type: notebook_output
+    produced_by: PX_TRAIN_RISK_MODEL
+    grain: "model-derived GLOBAL driver ranking (gain importance rolled up to raw business feature)"
+    depends_on: [PX_TRAIN_RISK_MODEL]
+
+  # --- Risk scoring + action queue (incremental: score only new/changed/model-bumped encounters) ---
+  - object_name: MDL_DISSAT_RISK
+    object_type: table
+    template: mdl_dissat_risk.sql.j2
+    grain: "one encounter: detractor risk score + tier + top reasons + consent-aware channel"
+    depends_on: [FS_PX_RISK_FEATURES, PX_TRAIN_RISK_MODEL]
+    consumes:
+      elements: [PAT_PATIENT_ID, PAT_PREFERRED_CONTACT_METHOD, PAT_OUTREACH_CONSENT, PAT_SMS_CONSENT]
+
+  - object_name: MDL_DISSAT_RISK_SCORE_TASK
+    object_type: task
+    template: mdl_dissat_risk_score_task.sql.j2
+    grain: "incremental MERGE scoring task (delta only; full re-score only on model_version change)"
+    depends_on: [MDL_DISSAT_RISK]
+    consumes:
+      elements: [PAT_PATIENT_ID, PAT_PREFERRED_CONTACT_METHOD, PAT_OUTREACH_CONSENT, PAT_SMS_CONSENT]
+    params:
+      schedule: "60 MINUTE"
+      model_version: "V1"
+
+  - object_name: ACTION_EVENT_LOG
+    object_type: table
+    template: action_event_log.sql.j2
+    grain: "append-only log of outreach/service-recovery actions (seeded empty)"
+    depends_on: []
+
+  - object_name: DT_ACTION_WORKQUEUE
+    object_type: dynamic_table
+    template: dt_action_workqueue.sql.j2
+    grain: "proactive at-risk work-queue: HIGH-risk contactable encounters, recommended action + team"
+    depends_on: [MDL_DISSAT_RISK, ACTION_EVENT_LOG]
+    params:
+      target_lag: "1 hour"
+
+  # --- Serving layer: semantic view (Cortex Analyst / agent target) ---
+  - object_name: SV_PATIENT_EXPERIENCE_INTELLIGENCE
+    object_type: semantic_view
+    template: sv_patient_experience_intelligence.sql.j2
+    grain: "survey-response grain joined to encounter risk; HCAHPS metrics + risk by unit/period/demographics/tier"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL, MDL_DISSAT_RISK]
+
+  - object_name: AGT_PATIENT_EXPERIENCE
+    object_type: agent
+    template: agt_patient_experience.sql.j2
+    grain: "Cortex Agent: Analyst(SV) + Search(voice) + data_to_chart for the CXO/PX team"
+    depends_on: [SV_PATIENT_EXPERIENCE_INTELLIGENCE, COMMENT_SEARCH]
+
+  # --- AI insight cards + app-facing serving views (VW_*) ---
+  - object_name: MDL_TAB_INSIGHTS
+    object_type: dynamic_table
+    template: mdl_tab_insights.sql.j2
+    grain: "one AI insight card per journey stage (AI_COMPLETE grounded in stage score + trend)"
+    depends_on: [MDL_JOURNEY_STAGE_SCORE]
+    params:
+      target_lag: "1 hour"
+
+  - object_name: VW_HOUSE_KPIS
+    object_type: view
+    template: vw_house_kpis.sql.j2
+    grain: "one row: house composite/star/recommend/high-risk + VBP dollars at risk"
+    depends_on: [MDL_STAR_RATING, DENORM_SURVEY_RESPONSE_DETAIL, MDL_DISSAT_RISK]
+    consumes:
+      elements: [OPS_TARGET_KEY, OPS_TARGET_TYPE, OPS_TARGET_VALUE]
+
+  - object_name: VW_UNIT_SCORECARD
+    object_type: view
+    template: vw_unit_scorecard.sql.j2
+    grain: "one row per unit: star + composite + recommend + risk"
+    depends_on: [MDL_STAR_RATING, DENORM_SURVEY_RESPONSE_DETAIL, MDL_DISSAT_RISK]
+
+  - object_name: VW_JOURNEY_RIBBON
+    object_type: view
+    template: vw_journey_ribbon.sql.j2
+    grain: "5 journey stages: score + prior + QoQ + trend"
+    depends_on: [MDL_JOURNEY_STAGE_SCORE]
+
+  - object_name: VW_EQUITY_GAP
+    object_type: view
+    template: vw_equity_gap.sql.j2
+    grain: "nurse-comm top-box gap vs house by race cohort"
+    depends_on: [MDL_EQUITY_GAP]
+
+  - object_name: VW_POINTS_LOST
+    object_type: view
+    template: vw_points_lost.sql.j2
+    grain: "composite top-box YoY decomposition (waterfall)"
+    depends_on: [MDL_POINTS_LOST]
+
+  - object_name: VW_VOICE_THEMES
+    object_type: view
+    template: vw_voice_themes.sql.j2
+    grain: "net sentiment + volume by experience theme"
+    depends_on: [MDL_VOICE_SENTIMENT]
+
+  - object_name: VW_DRIVER_IMPORTANCE
+    object_type: view
+    template: vw_driver_importance.sql.j2
+    grain: "model-derived global driver ranking"
+    depends_on: [MDL_DRIVER_IMPORTANCE]
+
+  - object_name: VW_ACTION_QUEUE
+    object_type: view
+    template: vw_action_queue.sql.j2
+    grain: "proactive at-risk work-queue (flattened reasons)"
+    depends_on: [DT_ACTION_WORKQUEUE]
+
+  - object_name: VW_TAB_INSIGHTS
+    object_type: view
+    template: vw_tab_insights.sql.j2
+    grain: "executive AI insight cards per journey stage"
+    depends_on: [MDL_TAB_INSIGHTS]
+
+  # --- Stage-detail chart views (map 1:1 to mockup charts) ---
+  - object_name: VW_WAIT_BY_AREA
+    object_type: view
+    template: vw_wait_by_area.sql.j2
+    grain: "s1 cWait: avg wait vs target by access area (ED/Clinic/Imaging/Lab)"
+    depends_on: []
+    consumes:
+      elements: [VT_AREA, VT_WAIT_MINUTES, ED_WAIT_MINUTES, OPS_TARGET_KEY, OPS_TARGET_TYPE, OPS_TARGET_VALUE]
+
+  - object_name: VW_ACCESS_MOMENTUM
+    object_type: view
+    template: vw_access_momentum.sql.j2
+    grain: "s1 cNoShow: on-time rate + LWBS rate over last 5 quarters"
+    depends_on: []
+    consumes:
+      elements: [VT_ARRIVAL_DATETIME, VT_AREA, VT_WAIT_MINUTES, VT_LEFT_BEFORE_SEEN, ED_ARRIVAL_DATETIME, ED_WAIT_MINUTES, ED_LWBS, OPS_TARGET_KEY]
+
+  - object_name: VW_MEASURE_BENCHMARK
+    object_type: view
+    template: vw_measure_benchmark.sql.j2
+    grain: "s2 cComm: per-HCAHPS-measure top-box vs house target + national median"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+    consumes:
+      elements: [PT_MEASURE_CODE, PT_TARGET_TOPBOX, PT_ENTITY_LEVEL, SB_MEASURE_CODE, SB_NATIONAL_AVG_TOPBOX]
+
+  - object_name: VW_MEASURE_TREND
+    object_type: view
+    template: vw_measure_trend.sql.j2
+    grain: "s2 cCommTrend: per-HCAHPS-measure top-box over last 5 quarters"
+    depends_on: [DENORM_SURVEY_RESPONSE_DETAIL]
+
+  - object_name: VW_DISCHARGE_READINESS
+    object_type: view
+    template: vw_discharge_readiness.sql.j2
+    grain: "s4 cDischarge: close-the-loop funnel (follow-up scheduled / call reached / issue resolved)"
+    depends_on: []
+    consumes:
+      elements: [CB_ENCOUNTER_ID, CB_REACHED, CB_ISSUE_IDENTIFIED, APT_ENCOUNTER_ID, APT_APPOINTMENT_TYPE, APT_LEAD_TIME_DAYS]
+
+  - object_name: VW_GRIEVANCE_AGING
+    object_type: view
+    template: vw_grievance_aging.sql.j2
+    grain: "s5 cRecovery: open grievances by time-to-regulatory-deadline bucket"
+    depends_on: []
+    consumes:
+      elements: [GRV_STATUS, GRV_REGULATORY_DUE_DATE]
+
+  - object_name: VW_RECOVERY_SLA
+    object_type: view
+    template: vw_recovery_sla.sql.j2
+    grain: "s5 cResolution: service-recovery SLA adherence vs OPS_TARGET SLA"
+    depends_on: []
+    consumes:
+      elements: [GRV_RECEIVED_DATE, GRV_RESOLVED_DATE, GRV_REGULATORY_DUE_DATE, CB_DISCHARGE_DATE, CB_ATTEMPT_DATE, OPS_TARGET_KEY, OPS_TARGET_TYPE, OPS_TARGET_VALUE]
+
+  # ---- Phase 4 (app-deploy): read/write grants for the deployed Snowflake App ----
+  # Bounded template (target()/cfg only, no conformance bindings). Rendered + run by
+  # the app-deploy skill AFTER `snow app deploy`, with cfg.app_role overridden to the
+  # app-owner role derived from SHOW APPLICATION SERVICES. Idempotent.
+  - object_name: GRANT_APP_ACCESS
+    object_type: script
+    template: app_grants.sql.j2
+    grain: "GRANT SELECT on 15 VW_*, SELECT/INSERT/UPDATE on ACTION_EVENT_LOG, USAGE on AGT + SEARCH, SELECT/REFERENCES on SV to the app-owner role"
+    phase: app-deploy
+    depends_on: [AGT_PATIENT_EXPERIENCE, MDL_TAB_INSIGHTS]

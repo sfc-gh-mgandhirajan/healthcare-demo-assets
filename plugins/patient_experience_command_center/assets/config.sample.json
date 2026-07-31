@@ -1,0 +1,15 @@
+{
+  "target_database": "CUSTOMER_DERIVED_DB",
+  "target_schema": "PATIENT_EXPERIENCE",
+  "warehouse": "CUSTOMER_WH",
+  "target_lag": "1 hour",
+
+  "compute_pool": "CUSTOMER_ML_POOL",
+  "runtime": "V2.6-CPU-PY3.12",
+
+  "app_name": "PATIENT_EXPERIENCE_COMMAND_CENTER",
+  "app_role": "CUSTOMER_APP_ROLE",
+  "app_compute_pool": "CUSTOMER_APP_POOL",
+  "build_eai": "ALLOW_ALL_EAI",
+  "app_workspace_stage": "SNOWFLAKE_APPS"
+}

@@ -1,0 +1,47 @@
+-- AGT_PATIENT_EXPERIENCE — Cortex Agent (Snowflake Intelligence) for the Patient Experience Command
+-- Center. Tools: Cortex Analyst over the semantic view (structured HCAHPS + risk metrics), Cortex Search
+-- over enriched patient voice (verbatims), and data_to_chart for visualizations. object_type: agent.
+CREATE OR REPLACE AGENT {{ target('AGT_PATIENT_EXPERIENCE') }}
+  COMMENT = 'Patient Experience Command Center assistant for CXO / PX teams.'
+  PROFILE = '{"display_name": "Patient Experience Assistant", "color": "blue"}'
+  FROM SPECIFICATION
+  $$
+  models:
+    orchestration: auto
+
+  instructions:
+    response: "Be concise and executive-ready. Lead with the number, then the driver, then the recommended action. When citing patient voice, quote briefly and attribute the source type (survey / review / call)."
+    orchestration: "Use the Analyst tool for any quantitative question about HCAHPS metrics, top-box rates, star rating, detractor risk, units, periods, or demographics. Use the Search tool for questions about what patients said, verbatim themes, or examples. Use data_to_chart when a comparison across units, periods, or themes would help."
+    sample_questions:
+      - question: "Which units have the lowest would-recommend rate and how many high detractor-risk patients do they have?"
+      - question: "What is the nurse communication top-box rate by patient race?"
+      - question: "What are patients saying about discharge and care transitions?"
+      - question: "Which experience themes have the most negative sentiment?"
+
+  tools:
+    - tool_spec:
+        type: "cortex_analyst_text_to_sql"
+        name: "PatientExperienceAnalyst"
+        description: "Answers quantitative questions about HCAHPS experience metrics (top-box rates, recommend, overall rating), modeled detractor risk, and counts, sliced by unit, service line, period, demographics, and risk tier. Use for any 'how many', 'what is the rate', 'which unit', or trend question. Do NOT use for reading patient verbatim comments."
+    - tool_spec:
+        type: "cortex_search"
+        name: "PatientVoiceSearch"
+        description: "Searches enriched patient voice (survey comments, online reviews, call transcripts) with theme, journey stage, unit, and sentiment attributes. Use to find what patients actually said or to pull representative verbatims. Do NOT use for computing rates or counts."
+    - tool_spec:
+        type: "data_to_chart"
+        name: "data_to_chart"
+        description: "Generates charts from tabular results when a visual comparison helps."
+
+  tool_resources:
+    PatientExperienceAnalyst:
+      semantic_view: "{{ target('SV_PATIENT_EXPERIENCE_INTELLIGENCE') }}"
+      execution_environment:
+        type: warehouse
+        warehouse: "{{ warehouse }}"
+        query_timeout: 300
+    PatientVoiceSearch:
+      name: "{{ target('COMMENT_SEARCH') }}"
+      max_results: "6"
+      id_column: "SOURCE_ID"
+      title_column: "SOURCE_TYPE"
+  $$;

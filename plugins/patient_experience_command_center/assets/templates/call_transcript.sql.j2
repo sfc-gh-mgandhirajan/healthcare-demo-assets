@@ -1,0 +1,16 @@
+-- CALL_TRANSCRIPT — AI-transcribed contact-center recordings, INCREMENTAL dynamic table.
+-- object_type: dynamic_table. Reads CALL_RECORDING_FILE_LOG (a change-tracked regular table fed by the
+-- stream+task ingestion triad), so AI_TRANSCRIBE runs ONLY on newly-logged files, never re-transcribing
+-- the whole stage. AI_TRANSCRIBE is called inline (no LATERAL) and there are no non-deterministic
+-- functions in the SELECT list (no CURRENT_TIMESTAMP) — both required to keep REFRESH_MODE = INCREMENTAL.
+-- Contract-bound: stage resolved from the CC_RECORDING_STAGE element (STAGE_PATH).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('CALL_TRANSCRIPT') }}
+  TARGET_LAG   = '{{ params.target_lag }}'
+  WAREHOUSE    = {{ warehouse }}
+  REFRESH_MODE = INCREMENTAL
+AS
+SELECT
+  REGEXP_REPLACE(RELATIVE_PATH, '\\.wav$', '')                                        AS CALL_ID,
+  RELATIVE_PATH                                                                       AS RECORDING_PATH,
+  AI_TRANSCRIBE(TO_FILE('{{ stage('CC_RECORDING_STAGE') }}', RELATIVE_PATH)):text::VARCHAR AS TRANSCRIPT_TEXT
+FROM {{ target('CALL_RECORDING_FILE_LOG') }};

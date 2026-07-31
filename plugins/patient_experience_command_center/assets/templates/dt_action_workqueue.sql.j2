@@ -1,0 +1,31 @@
+-- DT_ACTION_WORKQUEUE — the proactive at-risk work-queue the Cortex Agent / CXO team acts on. HIGH-risk,
+-- contactable encounters with no open action, each mapped to a recommended action + owning team, ordered
+-- by risk. Dynamic table over the (materialized) risk table + action log - no model call here, so it is
+-- cheap; REFRESH_MODE left AUTO (anti-join to a growing log may pick FULL, which is fine at this volume).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DT_ACTION_WORKQUEUE') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE  = {{ warehouse }}
+AS
+SELECT
+  r.ENCOUNTER_ID, r.PATIENT_ID, r.UNIT_ID, r.RISK_SCORE, r.RISK_TIER,
+  r.TOP_REASONS, r.TOP_REASONS[0]::VARCHAR AS PRIMARY_REASON, r.RECOMMENDED_CHANNEL,
+  CASE r.TOP_REASONS[0]::VARCHAR
+    WHEN 'Unresolved issue flagged on post-discharge callback'          THEN 'Service recovery outreach'
+    WHEN 'Medication reconciliation not completed'                      THEN 'Medication reconciliation follow-up'
+    WHEN 'Post-discharge callback not reached'                          THEN 'Retry post-discharge callback'
+    WHEN 'Interpreter needed but not used (language-access gap)'        THEN 'Language-concordant outreach'
+    ELSE 'Proactive experience outreach'
+  END AS RECOMMENDED_ACTION,
+  CASE r.TOP_REASONS[0]::VARCHAR
+    WHEN 'Unresolved issue flagged on post-discharge callback'          THEN 'Patient Relations'
+    WHEN 'Medication reconciliation not completed'                      THEN 'Pharmacy / Care Team'
+    WHEN 'Post-discharge callback not reached'                          THEN 'Care Management'
+    WHEN 'Interpreter needed but not used (language-access gap)'        THEN 'Language Access Services'
+    ELSE 'Patient Experience'
+  END AS OWNING_TEAM
+FROM {{ target('MDL_DISSAT_RISK') }} r
+LEFT JOIN {{ target('ACTION_EVENT_LOG') }} a
+  ON a.ENCOUNTER_ID = r.ENCOUNTER_ID AND a.STATUS IN ('OPEN','IN_PROGRESS')
+WHERE r.RISK_TIER = 'HIGH'
+  AND r.RECOMMENDED_CHANNEL <> 'Do Not Contact'
+  AND a.ENCOUNTER_ID IS NULL;

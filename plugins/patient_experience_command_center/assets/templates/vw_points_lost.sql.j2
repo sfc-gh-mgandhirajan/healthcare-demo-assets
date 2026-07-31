@@ -1,0 +1,3 @@
+-- VW_POINTS_LOST — composite top-box YoY decomposition (waterfall of where points were lost/gained).
+CREATE OR REPLACE VIEW {{ target('VW_POINTS_LOST') }} AS
+SELECT * FROM {{ target('MDL_POINTS_LOST') }};

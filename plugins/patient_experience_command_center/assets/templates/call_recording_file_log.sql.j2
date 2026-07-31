@@ -1,0 +1,12 @@
+-- CALL_RECORDING_FILE_LOG — append-only log of ingested recording files (regular table w/ change tracking).
+-- The incremental seam: the stream+task write each new file here exactly once; CALL_TRANSCRIPT (INCREMENTAL DT)
+-- reads it and transcribes only new rows. Change tracking set explicitly so incremental works from row one.
+CREATE TABLE IF NOT EXISTS {{ target('CALL_RECORDING_FILE_LOG') }} (
+  RELATIVE_PATH STRING,
+  FILE_NAME     STRING,
+  FILE_SIZE     NUMBER,
+  LAST_MODIFIED TIMESTAMP_LTZ,
+  FILE_URL      STRING,
+  INGESTED_AT   TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+ALTER TABLE {{ target('CALL_RECORDING_FILE_LOG') }} SET CHANGE_TRACKING = TRUE;

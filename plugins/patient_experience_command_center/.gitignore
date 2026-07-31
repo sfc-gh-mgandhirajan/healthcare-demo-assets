@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Logs
+*.log
+snowflake.log
+
+# Node (the app bundle builds these remotely; never commit them)
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Local scratch / rendered output (never source)
+/rendered/
+/bindings/
+/preflight/
+*.rendered.sql
+
+# Internal demo-tuning script (references the internal demo CORE database; not part
+# of the customer deploy flow and not referenced by any skill/manifest)
+assets/demo_data/

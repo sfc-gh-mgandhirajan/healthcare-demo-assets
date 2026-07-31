@@ -1,0 +1,19 @@
+-- MDL_VOICE_SENTIMENT — Voice-of-Patient aggregate: net sentiment + volume by experience theme.
+-- Bounded: reads only the derived COMMENT_ENRICHED. Powers the per-stage Voice-of-Patient table.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_VOICE_SENTIMENT') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+SELECT
+  THEME,
+  ANY_VALUE(JOURNEY_STAGE)                                                   AS JOURNEY_STAGE,
+  COUNT(*)                                                                   AS MENTIONS,
+  ROUND(AVG(SENTIMENT_SCORE), 3)                                             AS AVG_SENTIMENT,
+  ROUND(100 * AVG(IFF(SENTIMENT_SCORE >=  0.3, 1, 0)), 1)                     AS PCT_POSITIVE,
+  ROUND(100 * AVG(IFF(SENTIMENT_SCORE BETWEEN -0.3 AND 0.3, 1, 0)), 1)        AS PCT_NEUTRAL,
+  ROUND(100 * AVG(IFF(SENTIMENT_SCORE <= -0.3, 1, 0)), 1)                     AS PCT_NEGATIVE,
+  ROUND(100 * (AVG(IFF(SENTIMENT_SCORE >= 0.3, 1, 0)) - AVG(IFF(SENTIMENT_SCORE <= -0.3, 1, 0))), 0) AS NET_SENTIMENT
+FROM {{ target('COMMENT_ENRICHED') }}
+WHERE THEME IS NOT NULL
+GROUP BY THEME
+ORDER BY NET_SENTIMENT;

@@ -1,0 +1,24 @@
+-- MDL_EQUITY_GAP — nurse-communication top-box gap by race vs the house average (>=30-response cells).
+-- Bounded: reads only the derived survey DENORM (CURRENT_12).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_EQUITY_GAP') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH cur AS (
+  SELECT RACE, IFF(TOPBOX_H_COMP_1, 1, 0)::float AS tb
+  FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}
+  WHERE PERIOD_BUCKET = 'CURRENT_12' AND RACE IS NOT NULL AND TOPBOX_H_COMP_1 IS NOT NULL
+),
+house AS (SELECT AVG(tb) * 100 AS house_avg FROM cur),
+byrace AS (
+  SELECT RACE, AVG(tb) * 100 AS topbox, COUNT(*) AS n
+  FROM cur GROUP BY RACE HAVING COUNT(*) >= 30
+)
+SELECT
+  r.RACE                              AS RACE,
+  ROUND(r.topbox, 1)                  AS NURSE_TOPBOX,
+  ROUND(h.house_avg, 1)               AS HOUSE_AVG,
+  ROUND(r.topbox - h.house_avg, 1)    AS GAP_PTS,
+  r.n                                 AS N_RESPONSES
+FROM byrace r CROSS JOIN house h
+ORDER BY GAP_PTS;

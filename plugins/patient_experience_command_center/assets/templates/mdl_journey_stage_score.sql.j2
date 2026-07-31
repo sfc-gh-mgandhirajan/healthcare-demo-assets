@@ -1,0 +1,75 @@
+-- MDL_JOURNEY_STAGE_SCORE — the 5-stage patient-journey ribbon (current score + QoQ trend).
+-- s2-s5 = pooled HCAHPS top-box for the stage's measures (survey DENORM, CURRENT_12 vs PRIOR_12).
+-- s1 Arrival & Access = operational on-time rate (VISIT_TIMING + ED wait <= OPS_TARGET wait target).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_JOURNEY_STAGE_SCORE') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }} WHERE CLOCK_ID = 'CORE'
+),
+resp AS (
+  SELECT PERIOD_BUCKET,
+         TOPBOX_H_COMP_1, TOPBOX_H_COMP_2, TOPBOX_H_COMP_3, TOPBOX_H_QUIET_HSP,
+         TOPBOX_H_COMP_5, TOPBOX_H_COMP_6, TOPBOX_H_COMP_7, TOPBOX_H_HSP_RATING, TOPBOX_H_RECMND
+  FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}
+  WHERE PERIOD_BUCKET IN ('CURRENT_12', 'PRIOR_12')
+),
+long AS (
+{%- set stage_measures = [
+  ('TOPBOX_H_COMP_1','s2'),('TOPBOX_H_COMP_2','s2'),
+  ('TOPBOX_H_COMP_3','s3'),('TOPBOX_H_QUIET_HSP','s3'),
+  ('TOPBOX_H_COMP_5','s4'),('TOPBOX_H_COMP_6','s4'),('TOPBOX_H_COMP_7','s4'),
+  ('TOPBOX_H_HSP_RATING','s5'),('TOPBOX_H_RECMND','s5') ] %}
+{%- for col, st in stage_measures %}
+  SELECT '{{ st }}' AS stage, PERIOD_BUCKET, IFF({{ col }}, 1, 0)::float AS tb FROM resp WHERE {{ col }} IS NOT NULL
+  {%- if not loop.last %}
+  UNION ALL
+  {%- endif %}
+{%- endfor %}
+),
+svy AS (
+  SELECT stage,
+         AVG(IFF(PERIOD_BUCKET = 'CURRENT_12', tb, NULL)) * 100 AS cur,
+         AVG(IFF(PERIOD_BUCKET = 'PRIOR_12',   tb, NULL)) * 100 AS prior
+  FROM long GROUP BY stage
+),
+wt AS (
+  SELECT {{ col('OPS_TARGET_KEY','o') }} AS area, {{ col('OPS_TARGET_VALUE','o') }} AS tgt
+  FROM {{ tbl('OPS_TARGET_KEY') }} o WHERE {{ col('OPS_TARGET_TYPE','o') }} = 'WAIT'
+),
+vis AS (
+  SELECT {{ col('VT_AREA','v') }} AS area, {{ col('VT_WAIT_MINUTES','v') }} AS wait, {{ col('VT_ARRIVAL_DATETIME','v') }} AS arr
+  FROM {{ tbl('VT_VISIT_TIMING_ID') }} v
+  UNION ALL
+  SELECT 'ED', {{ col('ED_WAIT_MINUTES','ed') }}, {{ col('ED_ARRIVAL_DATETIME','ed') }}
+  FROM {{ tbl('ED_ED_EVENT_ID') }} ed
+),
+acc AS (
+  SELECT AVG(IFF(period = 'CURRENT_12', ontime, NULL)) * 100 AS cur,
+         AVG(IFF(period = 'PRIOR_12',   ontime, NULL)) * 100 AS prior
+  FROM (
+    SELECT CASE WHEN x.arr > DATEADD('month', -12, a.anchor_month) THEN 'CURRENT_12'
+                WHEN x.arr > DATEADD('month', -24, a.anchor_month) THEN 'PRIOR_12' END AS period,
+           IFF(x.wait <= w.tgt, 1.0, 0.0) AS ontime
+    FROM vis x JOIN wt w ON x.area = w.area CROSS JOIN anchor a
+  ) WHERE period IS NOT NULL
+),
+stages AS (
+  SELECT 1 AS STAGE_ORDER, 's1' AS STAGE_KEY, 'Arrival & Access' AS STAGE_NAME, cur, prior FROM acc
+  UNION ALL SELECT 2, 's2', 'Admission & Communication', cur, prior FROM svy WHERE stage='s2'
+  UNION ALL SELECT 3, 's3', 'Care & Responsiveness',     cur, prior FROM svy WHERE stage='s3'
+  UNION ALL SELECT 4, 's4', 'Discharge & Transition',    cur, prior FROM svy WHERE stage='s4'
+  UNION ALL SELECT 5, 's5', 'Follow-up & Loyalty',       cur, prior FROM svy WHERE stage='s5'
+)
+SELECT
+  STAGE_ORDER, STAGE_KEY, STAGE_NAME,
+  ROUND(cur, 1)          AS SCORE_PCT,
+  ROUND(prior, 1)        AS PRIOR_PCT,
+  ROUND(cur - prior, 1)  AS QOQ_DELTA,
+  CASE WHEN cur - prior >  0.5 THEN 'up'
+       WHEN cur - prior < -0.5 THEN 'down'
+       ELSE 'flat' END   AS TREND
+FROM stages
+ORDER BY STAGE_ORDER;

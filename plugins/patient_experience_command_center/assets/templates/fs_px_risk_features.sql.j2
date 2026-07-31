@@ -1,0 +1,54 @@
+-- FS_PX_RISK_FEATURES — training/scoring features for the detractor/grievance-risk model.
+-- Grain: one inpatient encounter (journey-detail spine). LABEL_DETRACTOR = 1 if the encounter drew a
+-- grievance OR returned a survey whose "would recommend" is not top-box; 0 if surveyed top-box & no
+-- grievance; NULL when no signal (scoring-only rows). Contract-bound (derived DENORMs + PATIENTS + grievance).
+-- NOTE: comment-sentiment features are added once COMMENT_ENRICHED exists (voice layer backfill).
+CREATE OR REPLACE DYNAMIC TABLE {{ target('FS_PX_RISK_FEATURES') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH srv AS (
+  SELECT ENCOUNTER_ID, MAX(IFF(TOPBOX_H_RECMND, 1, 0)) AS rec_topbox, COUNT(*) AS has_survey
+  FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }} GROUP BY ENCOUNTER_ID
+),
+grv AS (
+  SELECT {{ col('GRV_ENCOUNTER_ID','g') }} AS ENCOUNTER_ID, COUNT(*) AS grievance_cnt
+  FROM {{ tbl('GRV_ENCOUNTER_ID') }} g WHERE {{ col('GRV_ENCOUNTER_ID','g') }} IS NOT NULL GROUP BY 1
+),
+pgrv AS (
+  SELECT {{ col('GRV_PATIENT_ID','g') }} AS PATIENT_ID, COUNT(*) AS patient_grievance_cnt
+  FROM {{ tbl('GRV_PATIENT_ID') }} g GROUP BY 1
+),
+cmt AS (
+  SELECT ENCOUNTER_ID, AVG(SENTIMENT_SCORE) AS avg_sent, MIN(SENTIMENT_SCORE) AS min_sent, COUNT(*) AS cmt_cnt
+  FROM {{ target('COMMENT_ENRICHED') }} WHERE ENCOUNTER_ID IS NOT NULL GROUP BY ENCOUNTER_ID
+)
+SELECT
+  j.ENCOUNTER_ID, j.PATIENT_ID, j.UNIT_ID, j.PERIOD_BUCKET,
+  j.UNIT_ID::VARCHAR                                               AS F_UNIT_ID,
+  IFF(j.MED_REC_COMPLETED, 1, 0)                                   AS F_MED_REC,
+  IFF(j.INTERPRETER_USED, 1, 0)                                    AS F_INTERPRETER_USED,
+  IFF(p.{{ c('PAT_INTERPRETER_NEEDED') }}, 1, 0)                   AS F_INTERPRETER_NEEDED,
+  IFF(j.CALLBACK_REACHED, 1, 0)                                    AS F_CALLBACK_REACHED,
+  IFF(j.CALLBACK_ISSUE_IDENTIFIED, 1, 0)                           AS F_CALLBACK_ISSUE,
+  {{ canon('PAT_RACE','p') }}                                      AS F_RACE,
+  {{ canon('PAT_ETHNICITY','p') }}                                 AS F_ETHNICITY,
+  {{ canon('PAT_LANGUAGE','p') }}                                  AS F_LANGUAGE,
+  -- De-leaked: grievances on the patient's OTHER encounters (excludes THIS encounter's grievance,
+  -- which is part of LABEL_DETRACTOR). Captures 'repeat-complainer history' without leaking the label.
+  GREATEST(COALESCE(pg.patient_grievance_cnt, 0) - COALESCE(g.grievance_cnt, 0), 0) AS F_PRIOR_GRIEVANCE_CNT,
+  COALESCE(cm.avg_sent, 0)                                         AS F_COMMENT_SENTIMENT,
+  IFF(cm.min_sent <= -0.3, 1, 0)                                   AS F_HAS_NEGATIVE_COMMENT,
+  COALESCE(cm.cmt_cnt, 0)                                          AS F_COMMENT_COUNT,
+  CASE
+    WHEN COALESCE(s.has_survey, 0) = 0 AND COALESCE(g.grievance_cnt, 0) = 0 THEN NULL
+    WHEN COALESCE(g.grievance_cnt, 0) > 0 THEN 1
+    WHEN s.rec_topbox = 0 THEN 1
+    ELSE 0
+  END AS LABEL_DETRACTOR
+FROM {{ target('DENORM_ENCOUNTER_JOURNEY_DETAIL') }} j
+LEFT JOIN srv  s  ON s.ENCOUNTER_ID  = j.ENCOUNTER_ID
+LEFT JOIN grv  g  ON g.ENCOUNTER_ID  = j.ENCOUNTER_ID
+LEFT JOIN pgrv pg ON pg.PATIENT_ID   = j.PATIENT_ID
+LEFT JOIN cmt  cm ON cm.ENCOUNTER_ID = j.ENCOUNTER_ID
+LEFT JOIN {{ tbl('PAT_PATIENT_ID') }} p ON p.{{ c('PAT_PATIENT_ID') }} = j.PATIENT_ID;

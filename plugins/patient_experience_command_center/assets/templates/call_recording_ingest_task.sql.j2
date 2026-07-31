@@ -1,0 +1,18 @@
+-- CALL_RECORDING_INGEST_TASK — flushes the stage stream into the File Log, exactly once per new file.
+-- Created SUSPENDED (default); resumed LAST, only after CALL_TRANSCRIPT is verified INCREMENTAL and
+-- transcription quality is confirmed, so scheduled AI spend never starts before the pipeline is safe.
+CREATE OR REPLACE TASK {{ target('CALL_RECORDING_INGEST_TASK') }}
+  WAREHOUSE = {{ warehouse }}
+  SCHEDULE  = '5 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('{{ target('CALL_RECORDING_STAGE_STREAM') }}')
+AS
+  INSERT INTO {{ target('CALL_RECORDING_FILE_LOG') }} (RELATIVE_PATH, FILE_NAME, FILE_SIZE, LAST_MODIFIED, FILE_URL)
+  SELECT
+    RELATIVE_PATH,
+    SPLIT_PART(RELATIVE_PATH, '/', -1),
+    SIZE,
+    LAST_MODIFIED::TIMESTAMP_LTZ,
+    FILE_URL
+  FROM {{ target('CALL_RECORDING_STAGE_STREAM') }}
+  WHERE METADATA$ACTION = 'INSERT'
+    AND RELATIVE_PATH ILIKE '%.wav';

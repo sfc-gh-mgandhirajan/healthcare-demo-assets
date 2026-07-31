@@ -1,0 +1,19 @@
+-- ACTION_EVENT_LOG — append-only log of outreach/service-recovery actions taken on at-risk encounters.
+-- object_type: table (seeded empty). The work-queue anti-joins this to hide encounters with an OPEN/
+-- IN_PROGRESS action, so the same patient is not surfaced twice. Closed actions (DONE) fall out of the
+-- suppression, letting a new episode re-surface if risk returns.
+CREATE TABLE IF NOT EXISTS {{ target('ACTION_EVENT_LOG') }} (
+  ACTION_ID     STRING DEFAULT UUID_STRING(),
+  ENCOUNTER_ID  NUMBER,
+  PATIENT_ID    NUMBER,
+  UNIT_ID       NUMBER,
+  ACTION_TYPE   VARCHAR,
+  CHANNEL       VARCHAR,
+  STATUS        VARCHAR DEFAULT 'OPEN',   -- OPEN | IN_PROGRESS | DONE
+  ASSIGNED_TEAM VARCHAR,
+  ASSIGNED_TO   VARCHAR,
+  CREATED_AT    TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  COMPLETED_AT  TIMESTAMP_NTZ,
+  OUTCOME       VARCHAR,
+  NOTES         VARCHAR
+);

@@ -1,0 +1,42 @@
+definition_version: "2"
+
+# Rendered by the app-deploy skill from config.json:
+#   {{ app_name }}            <- app_name           (the deployed app object)
+#   {{ target_database }}.{{ target_schema }}  <- target_database / target_schema
+#   {{ warehouse }}           <- warehouse          (query warehouse)
+#   {{ build_eai }}           <- build_eai          (EAI used to install npm deps at build)
+#   {{ app_compute_pool }}    <- app_compute_pool   (SPCS pool for build + service)
+#   {{ app_workspace_stage }} <- app_workspace_stage (code workspace stage, default SNOWFLAKE_APPS)
+#
+# The app object is created INSIDE the derived data-product schema. App Runtime
+# cannot inject custom runtime env vars, so the data location (PX_DATABASE /
+# PX_SCHEMA) is baked into lib/constants.ts by the app-deploy skill at deploy time.
+entities:
+  patient_experience_command_center:
+    type: snowflake-app
+    identifier:
+      name: {{ app_name }}
+      database: {{ target_database }}
+      schema: {{ target_schema }}
+    artifacts:
+      - src: ./*
+        dest: ./
+        ignore:
+          - node_modules
+          - .env*
+          - __pycache__
+          - "*.pyc"
+          - "*.tsbuildinfo"
+          - .next
+          - .git
+          - snowflake.log
+          - snowflake.yml.j2
+
+    query_warehouse: {{ warehouse }}
+    build_eai:
+      name: {{ build_eai }}
+    build_compute_pool:
+      name: {{ app_compute_pool }}
+    service_compute_pool:
+      name: {{ app_compute_pool }}
+    code_workspace: {{ target_database }}.{{ target_schema }}.{{ app_workspace_stage }}

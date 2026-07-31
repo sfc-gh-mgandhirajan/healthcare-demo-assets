@@ -1,0 +1,21 @@
+-- VW_DISCHARGE_READINESS — s4 cDischarge: close-the-loop funnel (7-day follow-up scheduled ->
+-- post-discharge call reached -> issue resolved at callback) vs illustrative readiness targets.
+CREATE OR REPLACE VIEW {{ target('VW_DISCHARGE_READINESS') }} AS
+WITH cb AS (
+  SELECT {{ col('CB_ENCOUNTER_ID','c') }} AS ENC,
+         MAX(IFF({{ col('CB_REACHED','c') }}, 1, 0)) AS REACHED,
+         MAX(IFF({{ col('CB_ISSUE_IDENTIFIED','c') }}, 1, 0)) AS ISSUE
+  FROM {{ tbl('CB_ENCOUNTER_ID') }} c GROUP BY 1
+),
+apt AS (
+  SELECT {{ col('APT_ENCOUNTER_ID','a') }} AS ENC,
+         MAX(IFF({{ col('APT_APPOINTMENT_TYPE','a') }} = 'Follow-up'
+                 AND {{ col('APT_LEAD_TIME_DAYS','a') }} <= 7, 1, 0)) AS FU7
+  FROM {{ tbl('APT_ENCOUNTER_ID') }} a GROUP BY 1
+)
+SELECT 1 AS STEP_ORDER, '7-day follow-up scheduled' AS STEP, ROUND(AVG(FU7)*100,1) AS RATE_PCT, 75 AS TARGET_PCT FROM apt
+UNION ALL
+SELECT 2, 'Post-discharge call reached', ROUND(AVG(REACHED)*100,1), 80 FROM cb
+UNION ALL
+SELECT 3, 'Issue resolved at callback', ROUND(AVG(IFF(REACHED=1 AND ISSUE=0,1,0))*100,1), 70 FROM cb
+ORDER BY STEP_ORDER;

@@ -1,0 +1,5 @@
+-- VW_TAB_INSIGHTS — executive AI insight cards per journey stage (for the insights tab).
+CREATE OR REPLACE VIEW {{ target('VW_TAB_INSIGHTS') }} AS
+SELECT STAGE_ORDER, STAGE_NAME, SCORE_PCT, QOQ_DELTA, TREND, INSIGHT::STRING AS INSIGHT
+FROM {{ target('MDL_TAB_INSIGHTS') }}
+ORDER BY STAGE_ORDER;

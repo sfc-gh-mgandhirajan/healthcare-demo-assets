@@ -1,0 +1,10 @@
+-- CALL_RECORDING_SEED — one-time backlog seed. A stream only captures files added AFTER it is created,
+-- so recordings already on the stage must be registered into the File Log once. Idempotent (NOT IN guard)
+-- so re-running the build is safe. Uses the bare RELATIVE_PATH from DIRECTORY() (what TO_FILE expects).
+ALTER STAGE {{ stage('CC_RECORDING_STAGE')[1:] }} REFRESH;
+
+INSERT INTO {{ target('CALL_RECORDING_FILE_LOG') }} (RELATIVE_PATH, FILE_NAME, FILE_SIZE, LAST_MODIFIED, FILE_URL)
+SELECT RELATIVE_PATH, SPLIT_PART(RELATIVE_PATH, '/', -1), SIZE, LAST_MODIFIED::TIMESTAMP_LTZ, FILE_URL
+FROM DIRECTORY({{ stage('CC_RECORDING_STAGE') }})
+WHERE RELATIVE_PATH ILIKE '%.wav'
+  AND RELATIVE_PATH NOT IN (SELECT RELATIVE_PATH FROM {{ target('CALL_RECORDING_FILE_LOG') }});

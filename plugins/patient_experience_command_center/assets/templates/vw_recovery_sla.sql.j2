@@ -1,0 +1,27 @@
+-- VW_RECOVERY_SLA — s5 cResolution: service-recovery SLA adherence vs OPS_TARGET SLA targets.
+CREATE OR REPLACE VIEW {{ target('VW_RECOVERY_SLA') }} AS
+WITH grv AS (
+  SELECT {{ col('GRV_RECEIVED_DATE','g') }} AS RCV, {{ col('GRV_RESOLVED_DATE','g') }} AS RES,
+         {{ col('GRV_REGULATORY_DUE_DATE','g') }} AS DUE
+  FROM {{ tbl('GRV_STATUS') }} g
+),
+cbk AS (
+  SELECT {{ col('CB_DISCHARGE_DATE','c') }} AS DIS, {{ col('CB_ATTEMPT_DATE','c') }} AS ATT
+  FROM {{ tbl('CB_REACHED') }} c
+),
+sla AS (
+  SELECT {{ col('OPS_TARGET_KEY','o') }} AS K, {{ col('OPS_TARGET_VALUE','o') }} AS V
+  FROM {{ tbl('OPS_TARGET_KEY') }} o WHERE {{ col('OPS_TARGET_TYPE','o') }} = 'SLA'
+)
+SELECT 1 AS SLA_ORDER, 'Grievances closed in window' AS SLA_METRIC,
+  (SELECT ROUND(AVG(IFF(RES <= DUE, 1, 0))*100, 1) FROM grv WHERE RES IS NOT NULL) AS ADHERENCE_PCT,
+  (SELECT V FROM sla WHERE K = 'GRIEVANCE_CLOSED_IN_WINDOW') AS TARGET_PCT
+UNION ALL
+SELECT 2, 'Complaints resolved <=7d',
+  (SELECT ROUND(AVG(IFF(DATEDIFF('day', RCV, RES) <= 7, 1, 0))*100, 1) FROM grv WHERE RES IS NOT NULL),
+  (SELECT V FROM sla WHERE K = 'COMPLAINT_RESOLVED_7D')
+UNION ALL
+SELECT 3, 'Recovery contact <=48h',
+  (SELECT ROUND(AVG(IFF(DATEDIFF('day', DIS, ATT) <= 2, 1, 0))*100, 1) FROM cbk WHERE ATT IS NOT NULL),
+  (SELECT V FROM sla WHERE K = 'RECOVERY_CONTACT_48H')
+ORDER BY SLA_ORDER;

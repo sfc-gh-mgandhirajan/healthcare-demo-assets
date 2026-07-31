@@ -1,0 +1,59 @@
+-- MDL_STAR_RATING — CMS-weighted composite top-box and HCAHPS star, house-wide + per unit.
+-- Contract-bound: reads the derived DENORM (top-box flags) + SURVEY_MEASURE weights + STAR_CUTPOINT bands.
+-- Composite = SUM(measure_topbox_pct * CMS_WEIGHT) / SUM(CMS_WEIGHT) over the 10 measures (CURRENT_12).
+-- Star = STAR_CUTPOINT 'SUMMARY' band the composite falls in; PTS_TO_NEXT_STAR = gap to the next band's floor.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_STAR_RATING') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH resp AS (
+  SELECT * FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }} WHERE PERIOD_BUCKET = 'CURRENT_12'
+),
+long AS (
+{%- set measures = [
+  ('H_COMP_1','TOPBOX_H_COMP_1'),('H_COMP_2','TOPBOX_H_COMP_2'),('H_COMP_3','TOPBOX_H_COMP_3'),
+  ('H_COMP_5','TOPBOX_H_COMP_5'),('H_COMP_6','TOPBOX_H_COMP_6'),('H_COMP_7','TOPBOX_H_COMP_7'),
+  ('H_CLEAN_HSP','TOPBOX_H_CLEAN_HSP'),('H_QUIET_HSP','TOPBOX_H_QUIET_HSP'),
+  ('H_HSP_RATING','TOPBOX_H_HSP_RATING'),('H_RECMND','TOPBOX_H_RECMND') ] %}
+{%- for mc, col in measures %}
+  SELECT '{{ mc }}' AS MEASURE_CODE, UNIT_ID, IFF({{ col }}, 1, 0)::float AS tb FROM resp WHERE {{ col }} IS NOT NULL
+  {%- if not loop.last %}
+  UNION ALL
+  {%- endif %}
+{%- endfor %}
+),
+mrate AS (   -- per-measure top-box % at house + unit grain
+  SELECT MEASURE_CODE,
+         IFF(GROUPING(UNIT_ID) = 1, 'HOUSE', 'UNIT') AS ENTITY_LEVEL,
+         IFF(GROUPING(UNIT_ID) = 1, 'ALL', UNIT_ID::VARCHAR) AS ENTITY_ID,
+         AVG(tb) * 100 AS topbox_pct, COUNT(*) AS n
+  FROM long
+  GROUP BY GROUPING SETS ((MEASURE_CODE), (MEASURE_CODE, UNIT_ID))
+),
+w AS (
+  SELECT {{ col('SM_MEASURE_CODE','m') }} AS MEASURE_CODE, {{ col('SM_CMS_WEIGHT','m') }} AS WT
+  FROM {{ tbl('SM_MEASURE_CODE') }} m
+),
+comp AS (   -- CMS-weighted composite per entity
+  SELECT r.ENTITY_LEVEL, r.ENTITY_ID,
+         ROUND(SUM(r.topbox_pct * w.WT) / NULLIF(SUM(w.WT), 0), 2) AS COMPOSITE_TOPBOX,
+         SUM(r.n) AS N_RESPONSES
+  FROM mrate r JOIN w ON r.MEASURE_CODE = w.MEASURE_CODE
+  GROUP BY 1, 2
+),
+sumcut AS (   -- SUMMARY star bands
+  SELECT {{ col('SC_STAR_LEVEL','sc') }} AS STAR_LEVEL,
+         {{ col('SC_MIN_TOPBOX','sc') }}  AS MIN_TB,
+         {{ col('SC_MAX_TOPBOX','sc') }}  AS MAX_TB
+  FROM {{ tbl('SC_MEASURE_CODE') }} sc
+  WHERE {{ col('SC_MEASURE_CODE','sc') }} = 'SUMMARY'
+)
+SELECT
+  c.ENTITY_LEVEL, c.ENTITY_ID, c.COMPOSITE_TOPBOX, c.N_RESPONSES,
+  b.STAR_LEVEL,
+  ROUND(nb.MIN_TB - c.COMPOSITE_TOPBOX, 2) AS PTS_TO_NEXT_STAR
+FROM comp c
+JOIN sumcut b
+  ON c.COMPOSITE_TOPBOX >= b.MIN_TB
+ AND (c.COMPOSITE_TOPBOX < b.MAX_TB OR b.MAX_TB >= 100)
+LEFT JOIN sumcut nb ON nb.STAR_LEVEL = b.STAR_LEVEL + 1;

@@ -1,0 +1,27 @@
+-- DENORM_CALLBACK_DETAIL — one row per post-discharge callback (close-the-loop funnel).
+-- Contract-bound: reads POST_DISCHARGE_CALLBACK; period bucketed vs the demo-clock anchor.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('DENORM_CALLBACK_DETAIL') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH anchor AS (
+  SELECT {{ c('DEMO_ANCHOR_MONTH') }} AS anchor_month
+  FROM {{ tbl('DEMO_ANCHOR_MONTH') }} WHERE CLOCK_ID = 'CORE'
+)
+SELECT
+  {{ col('CB_CALLBACK_ID','cb') }}       AS CALLBACK_ID,
+  {{ col('CB_ENCOUNTER_ID','cb') }}      AS ENCOUNTER_ID,
+  {{ col('CB_PATIENT_ID','cb') }}        AS PATIENT_ID,
+  {{ col('CB_UNIT_ID','cb') }}           AS UNIT_ID,
+  {{ col('CB_DISCHARGE_DATE','cb') }}    AS DISCHARGE_DATE,
+  {{ col('CB_ATTEMPT_DATE','cb') }}      AS ATTEMPT_DATE,
+  {{ canon('CB_OUTCOME','cb') }}         AS OUTCOME,
+  {{ col('CB_REACHED','cb') }}           AS REACHED,
+  {{ col('CB_ISSUE_IDENTIFIED','cb') }}  AS ISSUE_IDENTIFIED,
+  CASE
+    WHEN {{ col('CB_DISCHARGE_DATE','cb') }} >  DATEADD('month', -12, a.anchor_month) THEN 'CURRENT_12'
+    WHEN {{ col('CB_DISCHARGE_DATE','cb') }} >  DATEADD('month', -24, a.anchor_month) THEN 'PRIOR_12'
+    ELSE 'OLDER'
+  END AS PERIOD_BUCKET
+FROM {{ tbl('CB_CALLBACK_ID') }} cb
+CROSS JOIN anchor a;

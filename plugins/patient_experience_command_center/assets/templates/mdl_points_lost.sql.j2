@@ -1,0 +1,49 @@
+-- MDL_POINTS_LOST — composite top-box YoY decomposition by measure/domain (the waterfall).
+-- Contract-bound: reads the derived survey DENORM (CURRENT_12 vs PRIOR_12) + SURVEY_MEASURE (weight, domain).
+-- WEIGHTED_CONTRIB_PTS = (cur - prior) * CMS_WEIGHT / SUM(CMS_WEIGHT) -> each measure's share of the composite move.
+CREATE OR REPLACE DYNAMIC TABLE {{ target('MDL_POINTS_LOST') }}
+  TARGET_LAG = '{{ params.target_lag }}'
+  WAREHOUSE = {{ warehouse }}
+AS
+WITH resp AS (
+  SELECT PERIOD_BUCKET,
+         TOPBOX_H_COMP_1, TOPBOX_H_COMP_2, TOPBOX_H_COMP_3, TOPBOX_H_COMP_5, TOPBOX_H_COMP_6,
+         TOPBOX_H_COMP_7, TOPBOX_H_CLEAN_HSP, TOPBOX_H_QUIET_HSP, TOPBOX_H_HSP_RATING, TOPBOX_H_RECMND
+  FROM {{ target('DENORM_SURVEY_RESPONSE_DETAIL') }}
+  WHERE PERIOD_BUCKET IN ('CURRENT_12', 'PRIOR_12')
+),
+long AS (
+{%- set measures = [
+  ('H_COMP_1','TOPBOX_H_COMP_1'),('H_COMP_2','TOPBOX_H_COMP_2'),('H_COMP_3','TOPBOX_H_COMP_3'),
+  ('H_COMP_5','TOPBOX_H_COMP_5'),('H_COMP_6','TOPBOX_H_COMP_6'),('H_COMP_7','TOPBOX_H_COMP_7'),
+  ('H_CLEAN_HSP','TOPBOX_H_CLEAN_HSP'),('H_QUIET_HSP','TOPBOX_H_QUIET_HSP'),
+  ('H_HSP_RATING','TOPBOX_H_HSP_RATING'),('H_RECMND','TOPBOX_H_RECMND') ] %}
+{%- for mc, col in measures %}
+  SELECT '{{ mc }}' AS MEASURE_CODE, PERIOD_BUCKET, IFF({{ col }}, 1, 0)::float AS tb FROM resp WHERE {{ col }} IS NOT NULL
+  {%- if not loop.last %}
+  UNION ALL
+  {%- endif %}
+{%- endfor %}
+),
+rate AS (SELECT MEASURE_CODE, PERIOD_BUCKET, AVG(tb) * 100 AS topbox FROM long GROUP BY 1, 2),
+piv AS (
+  SELECT MEASURE_CODE,
+         MAX(IFF(PERIOD_BUCKET = 'CURRENT_12', topbox, NULL)) AS cur,
+         MAX(IFF(PERIOD_BUCKET = 'PRIOR_12',   topbox, NULL)) AS prior
+  FROM rate GROUP BY 1
+),
+w AS (
+  SELECT {{ col('SM_MEASURE_CODE','m') }} AS MEASURE_CODE,
+         {{ col('SM_DOMAIN_NAME','m') }}  AS DOMAIN_NAME,
+         {{ col('SM_CMS_WEIGHT','m') }}   AS WT
+  FROM {{ tbl('SM_MEASURE_CODE') }} m
+),
+tot AS (SELECT SUM(WT) AS sw FROM w)
+SELECT
+  p.MEASURE_CODE, w.DOMAIN_NAME,
+  ROUND(p.cur, 1)                                  AS CUR_TOPBOX,
+  ROUND(p.prior, 1)                                AS PRIOR_TOPBOX,
+  ROUND(p.cur - p.prior, 1)                        AS DELTA_PTS,
+  ROUND((p.cur - p.prior) * w.WT / NULLIF(t.sw,0), 2) AS WEIGHTED_CONTRIB_PTS
+FROM piv p JOIN w ON p.MEASURE_CODE = w.MEASURE_CODE CROSS JOIN tot t
+ORDER BY WEIGHTED_CONTRIB_PTS;

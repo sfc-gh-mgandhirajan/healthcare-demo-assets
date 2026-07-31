@@ -1,0 +1,25 @@
+-- PX_TRAIN_RISK_MODEL — headless Notebook Project Object (Snowflake Workspaces NPO pattern).
+-- The documented production path for scheduling/running notebooks: files land on a stage, an NPO captures
+-- them (CREATE NOTEBOOK PROJECT ... FROM '@stage'), and EXECUTE NOTEBOOK PROJECT runs the notebook
+-- non-interactively on Container Runtime (snowflake-ml-python / xgboost / scikit-learn preinstalled, so no
+-- environment.yml resolution needed). The notebook trains the XGBoost detractor/grievance-risk model,
+-- registers it to the Model Registry (enabling in-SQL MODEL!PREDICT_PROBA + MODEL!EXPLAIN SHAP), and writes
+-- the model-derived MDL_DRIVER_IMPORTANCE table.
+--
+-- Prerequisite (owned by the derived-build skill, run before this artifact):
+--   1. Deploy PX_NOTEBOOKS (px_notebooks_stage.sql.j2).
+--   2. PUT assets/ml/train_risk_model.ipynb + assets/ml/environment.yml -> @{{ target('PX_NOTEBOOKS') }}.
+CREATE OR REPLACE NOTEBOOK PROJECT {{ target('PX_TRAIN_RISK_MODEL') }}
+  FROM '@{{ target('PX_NOTEBOOKS') }}'
+  COMMENT = 'PX detractor/grievance risk XGBoost training (headless NPO)';
+
+-- Environment-specific compute is CONFIG-DRIVEN (portable across customers): compute pool, runtime, and
+-- warehouse resolve from the deploy-time config (config.json), falling back to the manifest params only as
+-- defaults. The derived-build skill discovers/validates an eligible compute pool + runtime for the target
+-- account and writes them into config before this renders -- never assume a fixed pool name.
+EXECUTE NOTEBOOK PROJECT {{ target('PX_TRAIN_RISK_MODEL') }}
+  MAIN_FILE       = '{{ params.main_file }}'
+  COMPUTE_POOL    = '{{ cfg.get('compute_pool', params.compute_pool) }}'
+  QUERY_WAREHOUSE = '{{ warehouse }}'
+  RUNTIME         = '{{ cfg.get('runtime', params.runtime) }}'
+  ARGUMENTS       = '{{ cfg.target_database }} {{ cfg.target_schema }}';
