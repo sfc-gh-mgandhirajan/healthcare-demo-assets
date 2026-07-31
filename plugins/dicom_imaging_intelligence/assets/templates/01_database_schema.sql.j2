@@ -1,0 +1,16 @@
+-- =============================================================================
+-- 01: Database & Schema Setup
+-- Snowflake DICOM Explorer - Cardiac Imaging Intelligence Platform
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+
+CREATE DATABASE IF NOT EXISTS {{ db }}
+    COMMENT = 'Snowflake DICOM Explorer - Cardiac Imaging Intelligence Platform. Demonstrates end-to-end unstructured DICOM processing on Snowflake.';
+
+CREATE SCHEMA IF NOT EXISTS {{ db }}.{{ schema }}
+    COMMENT = 'Primary schema for DICOM metadata, UDFs, AI enrichments, and governance objects.';
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};

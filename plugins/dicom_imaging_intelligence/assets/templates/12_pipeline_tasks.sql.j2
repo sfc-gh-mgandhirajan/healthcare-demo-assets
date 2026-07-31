@@ -1,0 +1,250 @@
+-- =============================================================================
+-- 12: Pipeline Tasks
+--
+-- Schedules the incremental pipeline and keeps the GPU service on a
+-- business-hours window.
+--
+-- EVERY TASK IS CREATED SUSPENDED. Nothing here bills until you explicitly
+-- resume, which is what SP_RESUME_PIPELINE does. That is deliberate: a deploy
+-- should never silently start spending money.
+--
+-- DAG shape:
+--
+--   TASK_DICOM_SCAN (serverless XSMALL, every 5 min)
+--     |
+--     +-- TASK_DICOM_METADATA   (serverless MEDIUM)
+--           |
+--           +-- TASK_DICOM_REGISTRY  (serverless XSMALL)
+--           +-- TASK_DICOM_BASE64    (serverless MEDIUM)
+--                 |
+--                 +-- TASK_DICOM_EMBED (serverless XSMALL)
+--
+--   TASK_GPU_RESUME   (cron {{ cfg.gpu_resume_cron }})
+--   TASK_GPU_SUSPEND  (cron {{ cfg.gpu_suspend_cron }})
+--
+-- WHY THE ROOT IS SERVERLESS
+-- A scan is a LIST plus a MERGE. Waking a Medium warehouse every 5 minutes to
+-- do that, then paying the 60-second minimum, costs far more than the scan
+-- itself. Serverless tasks size themselves and bill per second.
+--
+-- WHY EVERY TASK IS SERVERLESS
+-- The children originally carried WHEN guards so they would not wake a
+-- warehouse just to no-op. Snowflake rejects that:
+--   Invalid expression for task condition
+-- A task WHEN clause only accepts stream-based conditions
+-- (SYSTEM$STREAM_HAS_DATA), not an arbitrary count subquery. A stream would not
+-- help either, because these procedures never consume one, so the stream would
+-- report data forever and gate nothing.
+--
+-- Serverless removes the reason the gate existed. A warehouse-backed task pays
+-- a 60-second minimum every time it resumes, so a Medium warehouse woken every
+-- 5 minutes to do nothing runs at roughly a 20% duty cycle. A serverless task
+-- bills per second, and these procedures early-return in about a second when
+-- there is no work.
+--
+-- Sizes differ by workload: the metadata and base64 steps drive Python UDFs
+-- over binary files and want real parallelism, so they start at MEDIUM. The
+-- scan, registry, and embed steps are coordination only - embedding work
+-- happens inside the SPCS service, not the warehouse - so they start at XSMALL.
+--
+-- NOTE ON THE 5-MINUTE SCHEDULE
+-- The bundled IDC source is STATIC public data - it will never change, so
+-- polling it every 5 minutes finds nothing forever. The interval is set for a
+-- customer with live ingest. For the demo, either leave these suspended and
+-- call the procedures by hand, or widen the schedule. Scan cost scales with
+-- object count under the prefix, so on a large bucket keep prefixes narrow.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- Root: discover files.
+--
+-- SUSPEND_TASK_AFTER_NUM_FAILURES stops a persistently failing scan from
+-- retrying every 5 minutes indefinitely.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_DICOM_SCAN
+    SCHEDULE = '{{ cfg.scan_schedule }}'
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+    COMMENT = 'Root. Scoped LIST per configured prefix into DICOM_FILE_MANIFEST.'
+AS
+    CALL SP_SCAN_ALL_SOURCES();
+
+-- -----------------------------------------------------------------------------
+-- Parse newly discovered files.
+--
+-- BATCH_LIMIT bounds one run. A million-file initial load becomes many bounded
+-- runs instead of one that times out.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_DICOM_METADATA
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
+    COMMENT = 'Extracts DICOM tags for NEW files. Failures are quarantined, not fatal.'
+    AFTER TASK_DICOM_SCAN
+AS
+    CALL SP_LOAD_METADATA(5000);
+
+-- -----------------------------------------------------------------------------
+-- Refresh the derived series registry.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_DICOM_REGISTRY
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    COMMENT = 'Rebuilds DICOM_SERIES_REGISTRY from parsed metadata.'
+    AFTER TASK_DICOM_METADATA
+AS
+    CALL SP_REFRESH_SERIES_REGISTRY();
+
+-- -----------------------------------------------------------------------------
+-- Render base64 PNGs for embedding.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_DICOM_BASE64
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
+    COMMENT = 'Renders 448x448 base64 PNGs with per-source window fallbacks.'
+    AFTER TASK_DICOM_METADATA
+AS
+    CALL SP_CONVERT_IMAGES(2000);
+
+-- -----------------------------------------------------------------------------
+-- GPU embedding.
+--
+-- SP_EMBED_PENDING checks the service itself and returns a skip message when it
+-- is suspended, so a run inside the nightly GPU-off window leaves work queued
+-- rather than failing and counting toward SUSPEND_TASK_AFTER_NUM_FAILURES.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_DICOM_EMBED
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    COMMENT = 'Embeds pending images via {{ cfg.service_name }}. Skips cleanly if the GPU service is down.'
+    AFTER TASK_DICOM_BASE64
+AS
+    CALL SP_EMBED_PENDING(2000);
+
+-- -----------------------------------------------------------------------------
+-- GPU business-hours window. Schedules come from config:
+--   resume  {{ cfg.gpu_resume_cron }}
+--   suspend {{ cfg.gpu_suspend_cron }}
+--
+-- Resume weekday mornings; suspend every evening including weekends, so a
+-- manual resume on a Saturday still gets cleaned up rather than running until
+-- Monday.
+--
+-- Suspending the SERVICE releases the GPU node. The compute pool then hits its
+-- own AUTO_SUSPEND_SECS (600) and scales to zero on its own.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE TASK TASK_GPU_RESUME
+    SCHEDULE = 'USING CRON {{ cfg.gpu_resume_cron }}'
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    COMMENT = 'Resumes {{ cfg.service_name }} at 07:00 CT on weekdays.'
+AS
+    ALTER SERVICE IF EXISTS {{ cfg.service_name }} RESUME;
+
+CREATE OR REPLACE TASK TASK_GPU_SUSPEND
+    SCHEDULE = 'USING CRON {{ cfg.gpu_suspend_cron }}'
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    COMMENT = 'Suspends {{ cfg.service_name }} at 19:00 CT daily to stop GPU billing.'
+AS
+    ALTER SERVICE IF EXISTS {{ cfg.service_name }} SUSPEND;
+
+-- -----------------------------------------------------------------------------
+-- Resume / suspend helpers.
+--
+-- Order matters. Snowflake requires a DAG's children to be resumed before its
+-- root, and the root suspended before its children. Getting this backwards
+-- either fails or leaves a partially live DAG, so it is encoded here rather
+-- than left to whoever is running the deploy.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE SP_RESUME_PIPELINE()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Resumes the pipeline DAG (children first, then root) and the GPU window tasks.'
+AS
+$$
+BEGIN
+    ALTER TASK IF EXISTS TASK_DICOM_EMBED    RESUME;
+    ALTER TASK IF EXISTS TASK_DICOM_BASE64   RESUME;
+    ALTER TASK IF EXISTS TASK_DICOM_REGISTRY RESUME;
+    ALTER TASK IF EXISTS TASK_DICOM_METADATA RESUME;
+    ALTER TASK IF EXISTS TASK_GPU_RESUME     RESUME;
+    ALTER TASK IF EXISTS TASK_GPU_SUSPEND    RESUME;
+    -- Root last: resuming it starts the schedule.
+    ALTER TASK IF EXISTS TASK_DICOM_SCAN     RESUME;
+    RETURN 'Pipeline resumed. Scan runs every 5 minutes; GPU service is on a '
+        || '07:00-19:00 CT weekday window. Check V_DICOM_PIPELINE_STATUS.';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE SP_SUSPEND_PIPELINE()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Suspends the pipeline DAG (root first) and the GPU window tasks.'
+AS
+$$
+BEGIN
+    -- Root first: stop new runs being scheduled before touching children.
+    ALTER TASK IF EXISTS TASK_DICOM_SCAN     SUSPEND;
+    ALTER TASK IF EXISTS TASK_DICOM_METADATA SUSPEND;
+    ALTER TASK IF EXISTS TASK_DICOM_REGISTRY SUSPEND;
+    ALTER TASK IF EXISTS TASK_DICOM_BASE64   SUSPEND;
+    ALTER TASK IF EXISTS TASK_DICOM_EMBED    SUSPEND;
+    ALTER TASK IF EXISTS TASK_GPU_RESUME     SUSPEND;
+    ALTER TASK IF EXISTS TASK_GPU_SUSPEND    SUSPEND;
+    RETURN 'Pipeline suspended. Nothing is scheduled. The GPU service is left '
+        || 'in whatever state it is currently in - suspend it separately if needed.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Monitoring
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW V_DICOM_PIPELINE_STATUS
+COMMENT = 'Outstanding work per source at each pipeline stage.'
+AS
+SELECT
+    c.SOURCE_NAME,
+    c.ENABLED,
+    c.LAST_SCAN_AT,
+    COUNT(m.FILE_NAME)                                      AS FILES_KNOWN,
+    COUNT_IF(m.STATUS = 'NEW')                              AS PENDING_METADATA,
+    COUNT_IF(m.STATUS = 'ERROR')                            AS QUARANTINED,
+    COUNT_IF(m.STATUS = 'DELETED')                          AS AWAITING_RECONCILE,
+    COUNT_IF(m.STATUS = 'LOADED' AND b.FILE_NAME IS NULL)   AS PENDING_BASE64,
+    COUNT_IF(b.FILE_NAME IS NOT NULL AND e.FILE_NAME IS NULL) AS PENDING_EMBEDDING
+FROM DICOM_SOURCE_CONFIG c
+LEFT JOIN DICOM_FILE_MANIFEST m ON m.SOURCE_NAME = c.SOURCE_NAME
+LEFT JOIN DICOM_BASE64_IMAGES b ON b.FILE_NAME   = m.FILE_NAME
+LEFT JOIN DICOM_EMBEDDINGS    e ON e.FILE_NAME   = m.FILE_NAME
+GROUP BY c.SOURCE_NAME, c.ENABLED, c.LAST_SCAN_AT;
+
+CREATE OR REPLACE VIEW V_DICOM_LOAD_ERRORS_RECENT
+COMMENT = 'Unresolved quarantined files, newest first.'
+AS
+SELECT
+    SOURCE_NAME,
+    PIPELINE_STEP,
+    FILE_NAME,
+    ERROR_MESSAGE,
+    OCCURRED_AT
+FROM DICOM_LOAD_ERRORS
+WHERE NOT RESOLVED
+ORDER BY OCCURRED_AT DESC;
+
+-- -----------------------------------------------------------------------------
+-- Verify: everything exists and everything is suspended.
+--
+-- "predecessors" comes back as an ARRAY, so it needs ARRAY_SIZE rather than a
+-- string comparison.
+-- -----------------------------------------------------------------------------
+SHOW TASKS IN SCHEMA {{ db }}.{{ schema }};
+SELECT
+    "name",
+    "state",
+    COALESCE(NULLIF("schedule", ''), '(child task)')       AS SCHEDULE,
+    IFF(ARRAY_SIZE("predecessors") = 0,
+        '(root)',
+        ARRAY_TO_STRING("predecessors", ', '))             AS PREDECESSORS
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+ORDER BY "name";
+
+SELECT * FROM V_DICOM_PIPELINE_STATUS;

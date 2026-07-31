@@ -1,0 +1,22 @@
+{
+  "name": "dicom-imaging-intelligence",
+  "displayName": "DICOM Imaging Intelligence",
+  "description": "Deploy an incremental DICOM ingestion pipeline and imaging-search app on your own stage or object storage. Config-driven sources, md5 change detection, error quarantine, MedSigLIP vision-language image search, and a Cortex Agent over imaging plus clinical data. Ships with a 10-series public IDC demo source you can disable.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Snowflake HCLS Solutions"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "hcls",
+    "medical-imaging",
+    "dicom",
+    "cortex-agent",
+    "cortex-search",
+    "cortex-analyst",
+    "medsiglip",
+    "incremental-ingestion",
+    "spcs"
+  ],
+  "skills": "./skills"
+}

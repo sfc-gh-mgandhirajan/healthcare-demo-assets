@@ -1,0 +1,193 @@
+version: 1
+# Build manifest for the DICOM Imaging Intelligence plugin.
+#
+# Rendered by assets/renderer/render.py against a per-customer config.json, then
+# executed by the skills in the order below.
+#
+# Keys per object:
+#   object_name  the rendered filename (<object_name>.sql)
+#   template     the Jinja source in assets/templates/
+#   phase        account | core | pipeline | image-search | validate | teardown
+#   role         the Snowflake role that must run it
+#   depends_on   ordering (this DAG is linear, so the numbering already encodes it)
+#   enabled_if   optional config flag; when false the object is skipped entirely
+#
+# ORDERING IS ENCODED IN THE FILENAMES, deliberately. Unlike the pharmacy
+# accelerator (whose DAG genuinely branches), this pipeline is linear, and the
+# numbers were validated in that order in the reference implementation. maude
+# does the same.
+
+objects:
+  # --- phase: account (ACCOUNTADMIN) ---------------------------------------
+  # Split from everything else because compute pools, network rules, and
+  # external access integrations cannot be created by SYSADMIN. This is the one
+  # phase a customer may have to hand to a platform admin.
+  - object_name: 00_ACCOUNT_SETUP
+    object_type: script
+    template: 00_account_setup.sql.j2
+    phase: account
+    role: ACCOUNTADMIN
+    grain: "warehouse, app + GPU compute pools, network rule, EAI, db/schema with ownership handed to owner_role"
+    depends_on: []
+
+  # --- phase: core (owner_role) --------------------------------------------
+  - object_name: 01_DATABASE_SCHEMA
+    object_type: script
+    template: 01_database_schema.sql.j2
+    phase: core
+    role: owner_role
+    grain: "database + schema (idempotent; 00 already created them)"
+    depends_on: [00_ACCOUNT_SETUP]
+
+  - object_name: 02_SOURCE_STAGE
+    object_type: script
+    template: 02_stages.sql.j2
+    phase: core
+    role: owner_role
+    grain: "external stage to the public IDC bucket, directory table deliberately disabled"
+    depends_on: [01_DATABASE_SCHEMA]
+    enabled_if: include_demo_series
+
+  - object_name: 03_UDFS
+    object_type: script
+    template: 03_udfs.sql.j2
+    phase: core
+    role: owner_role
+    grain: "EXTRACT_DICOM_METADATA, RENDER_DICOM_SLICE, DICOM_TO_BASE64_PNG"
+    depends_on: [01_DATABASE_SCHEMA]
+
+  - object_name: 04_METADATA_TABLE
+    object_type: script
+    template: 04_tables.sql.j2
+    phase: core
+    role: owner_role
+    grain: "DICOM_CARDIAC_METADATA (41 columns)"
+    depends_on: [01_DATABASE_SCHEMA]
+
+  - object_name: 05_MASKING_POLICIES
+    object_type: script
+    template: 05_masking_policies.sql.j2
+    phase: core
+    role: owner_role
+    grain: "PHI_MASK + assignment to DICOM_CARDIAC_METADATA.PATIENT_ID / PATIENT_NAME"
+    depends_on: [04_METADATA_TABLE]
+
+  - object_name: 06_TEXT_SEARCH
+    object_type: script
+    template: 06_cortex_search.sql.j2
+    phase: core
+    role: owner_role
+    grain: "Cortex Search over study/series descriptions"
+    depends_on: [04_METADATA_TABLE]
+
+  - object_name: 08_CLINICAL_DEMO
+    object_type: script
+    template: 08_clinical_data_model.sql.j2
+    phase: core
+    role: owner_role
+    grain: "synthetic TAVR star schema: 4 dims + 4 facts, self-contained incl. its own PHI masking"
+    depends_on: [05_MASKING_POLICIES]
+    enabled_if: include_demo_clinical
+
+  - object_name: 09_AGENT
+    object_type: script
+    template: 09_agent_definition.sql.j2
+    phase: core
+    role: owner_role
+    # The agent spec names SEARCH_DICOM_IMAGES, which byo_search.sql creates in a
+    # later phase. CREATE AGENT does not validate tool targets at creation time,
+    # so this order is safe; the image-search tool simply returns nothing until
+    # the image-search phase has run.
+    grain: "Cortex Agent with metadata-search + image-search tools"
+    depends_on: [06_TEXT_SEARCH]
+
+  # --- phase: pipeline (owner_role) ----------------------------------------
+  - object_name: 10_PIPELINE_CONFIG
+    object_type: script
+    template: 10_pipeline_config.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "source config + prefixes, manifest, quarantine, derived registry, label seed, image tables"
+    depends_on: [04_METADATA_TABLE]
+
+  - object_name: 11_PIPELINE_PROCEDURES
+    object_type: script
+    template: 11_pipeline_procedures.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "SP_SCAN_ALL_SOURCES (Python; LIST is banned in SQL procs) + 5 SQL procedures"
+    depends_on: [10_PIPELINE_CONFIG, 03_UDFS]
+
+  - object_name: 12_PIPELINE_TASKS
+    object_type: script
+    template: 12_pipeline_tasks.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "serverless task DAG + GPU business-hours window + monitoring views. Created SUSPENDED."
+    depends_on: [11_PIPELINE_PROCEDURES]
+
+  - object_name: 13_INITIAL_BACKFILL
+    object_type: script
+    template: 13_initial_backfill.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "one synchronous pass through the same procedures the DAG calls"
+    depends_on: [12_PIPELINE_TASKS]
+
+  # --- phase: image-search (owner_role) ------------------------------------
+  # Runs AFTER the MedSigLIP model + SPCS service exist, because the search
+  # service reads DICOM_EMBEDDINGS and the procedure calls the service function.
+  - object_name: BYO_SEARCH
+    object_type: script
+    template: byo_search.sql.j2
+    phase: image-search
+    role: owner_role
+    grain: "Cortex Search service with BYO vectors + SEARCH_DICOM_IMAGES procedure"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: app -----------------------------------------------------------
+  # These two do NOT render to .sql - they are the deploy manifest and the
+  # app's own config, and must keep their real filenames (see out_file). The
+  # app-deploy skill copies assets/app/ to a scratch dir and drops these in.
+  #
+  # app_config.json is what makes the app account-portable: it records the
+  # target database/schema so the app never has to infer them from session
+  # context. Note it deliberately does NOT record the stage - the app reads
+  # that from DICOM_SOURCE_CONFIG, which reflects whatever sources are actually
+  # registered rather than a value frozen at deploy time.
+  - object_name: APP_SNOWFLAKE_YML
+    object_type: config
+    template: app_snowflake_yml.j2
+    out_file: snowflake.yml
+    phase: app
+    role: owner_role
+    grain: "snow streamlit deploy manifest (container runtime, app pool, EAI)"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  - object_name: APP_CONFIG
+    object_type: config
+    template: app_config_json.j2
+    out_file: app_config.json
+    phase: app
+    role: owner_role
+    grain: "target database/schema/agent baked into the app bundle"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: validate ------------------------------------------------------
+  - object_name: CHECKS
+    object_type: script
+    template: checks.sql.j2
+    phase: validate
+    role: owner_role
+    grain: "PASS/FAIL/WARN row per invariant"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: teardown ------------------------------------------------------
+  # Deliberately its own phase so no deploy path can reach it.
+  - object_name: TEARDOWN
+    object_type: script
+    template: teardown.sql.j2
+    phase: teardown
+    role: ACCOUNTADMIN
+    grain: "drops db, both pools, EAI, network rule. Inert until confirmed = TRUE."
+    depends_on: []

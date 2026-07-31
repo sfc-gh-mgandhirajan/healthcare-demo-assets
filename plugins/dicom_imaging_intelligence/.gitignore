@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Logs
+*.log
+snowflake.log
+
+# Node (the app bundle builds these remotely; never commit them)
+node_modules/
+.next/
+
+# Streamlit deploy output
+output/
+
+# Local scratch / rendered output (never source)
+/rendered/
+*.rendered.sql
+
+# Per-customer config and secrets: NEVER commit these.
+# config.sample.json is the shipped template; config.json is yours.
+config.json
+.env
+.env.local
+.streamlit/secrets.toml

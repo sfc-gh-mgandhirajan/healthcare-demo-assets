@@ -1,0 +1,142 @@
+-- =============================================================================
+-- Cortex Search Service: DICOM Image Search (BYO Vectors - MedSigLIP)
+-- =============================================================================
+-- Creates a Cortex Search service over the MedSigLIP embeddings using the
+-- bring-your-own-vectors feature, plus the stored procedure that the agent
+-- and the Streamlit app call.
+--
+-- VECTOR INDEXES (EMBEDDING) tells Cortex Search to index our pre-computed
+-- {{ cfg.embed_dim }}-dim MedSigLIP vectors rather than generating its own. At search time a
+-- query vector is passed via multi_index_query. The LABEL column also gets a
+-- text index, so hybrid text + vector queries are possible.
+--
+-- Source table: {{ db }}.{{ schema }}.DICOM_EMBEDDINGS (2,848 DICOM slices)
+-- Vector dim:   {{ cfg.embed_dim }} (MedSigLIP-448 dual encoder)
+-- Primary key:  FILE_NAME (unique per DICOM file)
+--
+-- Prerequisites:
+--   - dicom-search/medsiglip_log_model.ipynb has been run, so
+--     DICOM_EMBEDDINGS exists and {{ cfg.service_name }} is deployed
+--   - The SPCS service must be RUNNING for SEARCH_DICOM_IMAGES to work.
+--     The search index itself persists independently of the service.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE SCHEMA {{ db }}.{{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- Step 1: Cortex Search service with a BYO vector index
+-- =============================================================================
+
+CREATE OR REPLACE CORTEX SEARCH SERVICE {{ db }}.{{ schema }}.{{ cfg.search_service }}
+  VECTOR INDEXES (EMBEDDING)
+  PRIMARY KEY (FILE_NAME)
+  WAREHOUSE = {{ warehouse }}
+  TARGET_LAG = '1 day'
+AS (
+  SELECT
+    FILE_NAME,
+    FILE_SIZE,
+    SERIES_INSTANCE_UID,
+    LABEL,
+    COLLECTION,
+    EMBEDDING
+  FROM {{ db }}.{{ schema }}.DICOM_EMBEDDINGS
+);
+
+-- =============================================================================
+-- Step 2: SEARCH_DICOM_IMAGES - the single definition of this procedure
+-- =============================================================================
+-- Flow:
+--   1. Encode the query text into a {{ cfg.embed_dim }}-dim vector via the MedSigLIP SPCS
+--      service (embed_text endpoint)
+--   2. Pass that vector to Cortex Search multi_index_query
+--   3. Return the top K matching DICOM images with metadata
+--
+-- The service reference is FULLY QUALIFIED. A stored procedure does not
+-- reliably inherit the session schema, so an unqualified
+-- {{ cfg.service_name }}!embed_text(...) resolves inconsistently depending on how
+-- the procedure is invoked.
+--
+-- This procedure is referenced by sql/core/09_agent_definition.sql. Do not
+-- redefine it there.
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE {{ db }}.{{ schema }}.SEARCH_DICOM_IMAGES(
+    QUERY_TEXT VARCHAR,
+    TOP_K INT DEFAULT 10
+)
+RETURNS VARIANT
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'snowflake')
+HANDLER = 'run'
+AS
+$$
+import json
+from snowflake.core import Root
+
+DB = "{{ db }}"
+SCHEMA = "{{ schema }}"
+SERVICE = "{{ cfg.service_name }}"
+SEARCH_SVC = "{{ cfg.search_service }}"
+
+
+def run(session, query_text, top_k):
+    # Encode the query text via the MedSigLIP SPCS service.
+    # Fully qualified - a stored procedure does not reliably inherit a
+    # session schema.
+    safe_query = query_text.replace("'", "''")
+    rows = session.sql(
+        f"SELECT {DB}.{SCHEMA}.{SERVICE}!embed_text('{safe_query}'):EMBEDDING AS vec"
+    ).collect()
+    query_vector = json.loads(rows[0]["VEC"])
+
+    # Vector search against the BYO index.
+    svc = (
+        Root(session)
+        .databases[DB]
+        .schemas[SCHEMA]
+        .cortex_search_services[SEARCH_SVC]
+    )
+
+    resp = svc.search(
+        multi_index_query={"EMBEDDING": [{"vector": query_vector}]},
+        columns=["FILE_NAME", "SERIES_INSTANCE_UID", "LABEL", "COLLECTION"],
+        limit=top_k,
+    )
+    return resp.results
+$$;
+
+-- =============================================================================
+-- Step 3: Validation - run these MANUALLY once the service is RUNNING
+-- =============================================================================
+-- These are commented out deliberately. They fail whenever the GPU pool is
+-- cold or the SPCS service is suspended, which would make this file exit
+-- non-zero during an automated deploy even though the DDL above succeeded.
+--
+-- Check the service first:
+--   SELECT SYSTEM$GET_SERVICE_STATUS('{{ db }}.{{ schema }}.{{ cfg.service_name }}');
+--   SHOW CORTEX SEARCH SERVICES LIKE '{{ cfg.search_service }}' IN SCHEMA {{ db }}.{{ schema }};
+--
+-- Then:
+--   CALL {{ db }}.{{ schema }}.SEARCH_DICOM_IMAGES('cardiac CT angiography with calcified aortic valve', 9);
+--   CALL {{ db }}.{{ schema }}.SEARCH_DICOM_IMAGES('chest CT lung parenchyma', 9);
+--   CALL {{ db }}.{{ schema }}.SEARCH_DICOM_IMAGES('ECG-gated cardiac CT diastolic phase', 9);
+--
+-- Relevance sanity check - a cardiac query should rank cardiac CTA series
+-- above the NLST chest screening series. If ranking looks arbitrary, suspect
+-- the embed_text padding mode in the notebook before anything else:
+--
+--   WITH q AS (
+--       SELECT {{ db }}.{{ schema }}.{{ cfg.service_name }}!embed_text(
+--           'cardiac CT angiography with calcified aortic valve'
+--       ):EMBEDDING::VECTOR(FLOAT, {{ cfg.embed_dim }}) AS QVEC
+--   )
+--   SELECT e.LABEL, e.COLLECTION,
+--          ROUND(MAX(VECTOR_COSINE_SIMILARITY(e.EMBEDDING, q.QVEC)), 4) AS BEST_SIM
+--   FROM {{ db }}.{{ schema }}.DICOM_EMBEDDINGS e, q
+--   GROUP BY e.LABEL, e.COLLECTION
+--   ORDER BY BEST_SIM DESC;
+-- =============================================================================

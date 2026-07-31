@@ -1,0 +1,163 @@
+-- =============================================================================
+-- Snowflake DICOM Explorer - Teardown
+--
+-- Removes everything this repo creates. The fastest way to stop compute-pool
+-- and GPU billing after an evaluation.
+--
+-- DELIBERATELY UNNUMBERED. setup.sh only globs [0-9]*.sql, so this file can
+-- never be picked up by a deployment. Run it by hand:
+--
+--   snow sql -f sql/admin/teardown.sql -c <connection> \
+--       --role ACCOUNTADMIN --enable-templating NONE
+--
+-- SAFETY: this is a no-op until you set `confirmed` to TRUE in the DECLARE
+-- block below. Nothing is dropped on a stray execution.
+--
+-- Order matters:
+--   1. Suspend tasks              - stop new work before removing its targets
+--   2. Stop all services on pools - a pool with live services cannot be dropped
+--   3. Drop the EAI               - it references the secret inside the database
+--   4. Drop the database          - cascades tables, UDFs, SPs, stages, secret,
+--                                   policies, search services, agent, model,
+--                                   Streamlit app, network rule
+--   5. Drop the compute pools
+--
+-- {{ warehouse }} is NOT dropped by default. It is a common shared warehouse name
+-- and dropping it can break unrelated work. Opt in with `drop_warehouse`.
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    -- ---------------------------------------------------------------------
+    -- Set this to TRUE to actually tear down. Left FALSE, the script reports
+    -- what it would do and changes nothing.
+    -- ---------------------------------------------------------------------
+    confirmed       BOOLEAN DEFAULT FALSE;
+
+    -- Opt-in extras: off by default because they may be shared.
+    drop_warehouse  BOOLEAN DEFAULT FALSE;
+    drop_workspace  BOOLEAN DEFAULT FALSE;
+
+    -- Must match the names in 00_account_setup.sql.
+    demo_db         STRING DEFAULT '{{ db }}';
+    demo_schema     STRING DEFAULT '{{ schema }}';
+    demo_wh         STRING DEFAULT '{{ warehouse }}';
+    app_pool        STRING DEFAULT '{{ cfg.app_pool }}';
+    gpu_pool        STRING DEFAULT '{{ cfg.gpu_pool }}';
+    eai_name        STRING DEFAULT '{{ cfg.eai_name }}';
+    workspace_name  STRING DEFAULT '{{ cfg.workspace_name }}';
+
+    fq_schema       STRING;
+    stmt            STRING;
+    log             STRING DEFAULT '';
+
+    -- Tasks are suspended before the database goes away so nothing is mid-run.
+    -- Suspend order is leaf-last: the root stops scheduling first.
+    task_names ARRAY DEFAULT ARRAY_CONSTRUCT(
+        'TASK_DICOM_SCAN',
+        'TASK_DICOM_METADATA',
+        'TASK_DICOM_REGISTRY',
+        'TASK_DICOM_BASE64',
+        'TASK_DICOM_EMBED',
+        'TASK_GPU_RESUME',
+        'TASK_GPU_SUSPEND'
+    );
+BEGIN
+    fq_schema := demo_db || '.' || demo_schema;
+
+    IF (NOT confirmed) THEN
+        RETURN 'ABORTED - nothing was dropped.
+
+This script is inert by design. To tear down, edit sql/admin/teardown.sql and
+set:
+
+    confirmed BOOLEAN DEFAULT TRUE;
+
+It would then drop:
+  - tasks, procedures, UDFs, tables, stages, secret, masking policies,
+    Cortex Search services, the agent, the model, and the Streamlit app
+    (all via DROP DATABASE ' || demo_db || ')
+  - external access integration ' || eai_name || '
+  - compute pools ' || app_pool || ' and ' || gpu_pool || '
+
+It would NOT drop warehouse ' || demo_wh || ' or workspace ' || workspace_name || '
+unless drop_warehouse / drop_workspace are also set to TRUE.';
+    END IF;
+
+    -- 1. Suspend tasks. IF EXISTS so a partial deployment tears down cleanly.
+    FOR i IN 0 TO ARRAY_SIZE(task_names) - 1 DO
+        BEGIN
+            stmt := 'ALTER TASK IF EXISTS ' || fq_schema || '.'
+                 || GET(task_names, i)::STRING || ' SUSPEND';
+            EXECUTE IMMEDIATE stmt;
+        EXCEPTION
+            -- A missing schema raises rather than being covered by IF EXISTS.
+            WHEN OTHER THEN NULL;
+        END;
+    END FOR;
+    log := log || 'Tasks suspended.\n';
+
+    -- 2. Stop services on both pools. A pool with live services cannot be
+    --    dropped, and this also kills the Streamlit and GPU containers.
+    BEGIN
+        EXECUTE IMMEDIATE 'ALTER COMPUTE POOL IF EXISTS ' || app_pool || ' STOP ALL';
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+    BEGIN
+        EXECUTE IMMEDIATE 'ALTER COMPUTE POOL IF EXISTS ' || gpu_pool || ' STOP ALL';
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+    log := log || 'Services stopped on both compute pools.\n';
+
+    -- 3. Drop the EAI first: it holds a reference to the secret in the
+    --    database, and dropping the database out from under it is messier.
+    EXECUTE IMMEDIATE 'DROP EXTERNAL ACCESS INTEGRATION IF EXISTS ' || eai_name;
+    log := log || 'Dropped EAI ' || eai_name || '.\n';
+
+    -- 4. The database. Cascades everything schema-level, including the network
+    --    rule, the secret, and the model registry entry.
+    EXECUTE IMMEDIATE 'DROP DATABASE IF EXISTS ' || demo_db;
+    log := log || 'Dropped database ' || demo_db || '.\n';
+
+    -- 5. Compute pools, now that nothing runs on them.
+    EXECUTE IMMEDIATE 'DROP COMPUTE POOL IF EXISTS ' || app_pool;
+    EXECUTE IMMEDIATE 'DROP COMPUTE POOL IF EXISTS ' || gpu_pool;
+    log := log || 'Dropped compute pools ' || app_pool || ' and ' || gpu_pool || '.\n';
+
+    -- Opt-in extras.
+    IF (drop_workspace) THEN
+        BEGIN
+            EXECUTE IMMEDIATE 'DROP WORKSPACE IF EXISTS ' || workspace_name;
+            log := log || 'Dropped workspace ' || workspace_name || '.\n';
+        EXCEPTION WHEN OTHER THEN
+            log := log || 'Could not drop workspace ' || workspace_name
+                       || ' (may not exist).\n';
+        END;
+    ELSE
+        log := log || 'Kept workspace ' || workspace_name || ' (drop_workspace = FALSE).\n';
+    END IF;
+
+    IF (drop_warehouse) THEN
+        EXECUTE IMMEDIATE 'DROP WAREHOUSE IF EXISTS ' || demo_wh;
+        log := log || 'Dropped warehouse ' || demo_wh || '.\n';
+    ELSE
+        log := log || 'Kept warehouse ' || demo_wh || ' (drop_warehouse = FALSE).\n';
+    END IF;
+
+    RETURN 'TEARDOWN COMPLETE\n\n' || log;
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify. Each of these should come back empty after a confirmed teardown.
+-- -----------------------------------------------------------------------------
+SHOW DATABASES LIKE '{{ db }}';
+SELECT COUNT(*) AS DATABASES_REMAINING FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW COMPUTE POOLS LIKE 'DICOM_%POOL';
+SELECT COUNT(*) AS POOLS_REMAINING FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{{ cfg.eai_name }}';
+SELECT COUNT(*) AS EAIS_REMAINING FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

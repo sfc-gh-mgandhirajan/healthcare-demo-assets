@@ -1,0 +1,26 @@
+definition_version: 2
+
+# Rendered by the app-deploy skill from config.json. The entity KEY
+# (dicom_explorer_sf) is fixed and is what `snow streamlit deploy` is called
+# with; the Snowflake object NAME comes from config.
+#
+# The app object is created inside the target schema, so it sits next to the
+# tables it reads.
+entities:
+  dicom_explorer_sf:
+    type: streamlit
+    identifier:
+      name: {{ cfg.app_name }}
+      database: {{ db }}
+      schema: {{ schema }}
+    query_warehouse: {{ warehouse }}
+    compute_pool: {{ cfg.app_pool }}
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    external_access_integrations:
+      - {{ cfg.eai_name }}
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
+      - pyproject.toml
+      - app_config.json
+      - .streamlit/config.toml

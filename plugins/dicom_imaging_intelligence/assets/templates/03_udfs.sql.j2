@@ -1,0 +1,231 @@
+-- =============================================================================
+-- 03: Python UDFs
+-- These UDFs read binary DICOM files directly from an external stage,
+-- demonstrating Snowflake's native unstructured data processing.
+-- No external ETL tools, no data movement, no infrastructure to manage.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- -----------------------------------------------------------------------------
+-- UDF 1: EXTRACT_DICOM_METADATA
+-- Reads a binary DICOM file from stage, parses all metadata tags via pydicom,
+-- and returns a VARIANT (JSON) with ~100+ clinical and technical attributes.
+-- Skips pixel data and sequence types for efficiency.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION EXTRACT_DICOM_METADATA(FILE_PATH STRING)
+RETURNS VARIANT
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom')
+HANDLER = 'extract_metadata'
+AS $$
+import pydicom
+import io
+from snowflake.snowpark.files import SnowflakeFile
+
+def extract_metadata(file_path):
+    try:
+        with SnowflakeFile.open(file_path, 'rb') as f:
+            dcm_bytes = f.read()
+        ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
+
+        result = {}
+        for elem in ds:
+            if elem.VR in ('OW', 'OB', 'OF', 'OD', 'UN'):
+                continue
+            if elem.VR == 'SQ':
+                continue
+            keyword = elem.keyword if elem.keyword else f"TAG_{elem.tag.group:04X}_{elem.tag.element:04X}"
+            if not keyword:
+                continue
+            try:
+                result[keyword.upper()] = str(elem.value)
+            except:
+                pass
+
+        if hasattr(ds, 'file_meta'):
+            for elem in ds.file_meta:
+                keyword = elem.keyword if elem.keyword else f"META_{elem.tag.group:04X}_{elem.tag.element:04X}"
+                if not keyword:
+                    continue
+                try:
+                    result[keyword.upper()] = str(elem.value)
+                except:
+                    pass
+
+        return result
+    except Exception as e:
+        return {'ERROR': str(e)}
+$$;
+
+
+-- -----------------------------------------------------------------------------
+-- UDF 2: RENDER_DICOM_SLICE
+-- Reads a binary DICOM file, applies Hounsfield unit rescaling (slope/intercept),
+-- applies DICOM windowing (window center/width), and returns a base64-encoded PNG.
+-- This enables real-time medical image rendering directly from Snowflake.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION RENDER_DICOM_SLICE(
+    FILE_PATH STRING,
+    WINDOW_CENTER FLOAT,
+    WINDOW_WIDTH FLOAT
+)
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom', 'Pillow', 'numpy')
+HANDLER = 'render_slice'
+AS $$
+import pydicom
+import numpy as np
+from PIL import Image
+import io
+import base64
+from snowflake.snowpark.files import SnowflakeFile
+
+def render_slice(file_path, window_center, window_width):
+    try:
+        with SnowflakeFile.open(file_path, 'rb') as f:
+            dcm_bytes = f.read()
+        ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
+        pixel_array = ds.pixel_array.astype(np.float64)
+
+        slope = float(getattr(ds, 'RescaleSlope', 1))
+        intercept = float(getattr(ds, 'RescaleIntercept', 0))
+        pixel_array = pixel_array * slope + intercept
+
+        wc = float(window_center)
+        ww = float(window_width)
+        lower = wc - ww / 2.0
+        upper = wc + ww / 2.0
+        pixel_array = np.clip(pixel_array, lower, upper)
+        pixel_array = ((pixel_array - lower) / (upper - lower) * 255.0).astype(np.uint8)
+
+        img = Image.fromarray(pixel_array, mode='L')
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        return f'ERROR:{str(e)}'
+$$;
+
+
+-- -----------------------------------------------------------------------------
+-- UDTF 3: DICOM_TO_BASE64_PNG
+-- Converts a DICOM file into a 448x448 RGB base64 PNG for MedSigLIP embedding.
+-- The warehouse parallelizes this across all files automatically.
+--
+-- Pixel handling deliberately matches RENDER_DICOM_SLICE above:
+--   1. Apply rescale slope/intercept to get Hounsfield units
+--   2. Clip to the DICOM window
+--   3. Map with a FIXED (x - lower) / (upper - lower) transform
+--
+-- Step 3 must not be a per-slice min/max stretch. A per-slice stretch gives
+-- every slice its own contrast curve, so identical anatomy embeds differently
+-- depending on what else is in the slice, and the embedded image stops
+-- matching what RENDER_DICOM_SLICE shows in the app. Both of those silently
+-- degrade retrieval quality rather than raising an error.
+--
+-- When a file carries no window tags, the caller-supplied FALLBACK_WC /
+-- FALLBACK_WW are used. SP_CONVERT_IMAGES passes these from
+-- DICOM_SOURCE_CONFIG, so a chest/lung source can fall back to a lung window
+-- (-600 / 1500) while a cardiac source keeps soft tissue (40 / 400). Windowing
+-- a lung study at 40/400 clips nearly all lung parenchyma to black, which
+-- degrades retrieval silently rather than raising an error.
+--
+-- Errors are swallowed per-file and yield no row, so one unreadable DICOM
+-- cannot abort a full-corpus CTAS. SP_CONVERT_IMAGES detects the missing rows
+-- by anti-join and records them in DICOM_LOAD_ERRORS.
+-- -----------------------------------------------------------------------------
+-- The signature gained window arguments. Snowflake identifies functions by
+-- name AND signature, so CREATE OR REPLACE on the 3-arg version leaves any
+-- 1-arg version in place as an overload. Drop it explicitly: a caller still
+-- resolving to the old one would silently ignore per-source windowing.
+DROP FUNCTION IF EXISTS DICOM_TO_BASE64_PNG(VARCHAR);
+
+CREATE OR REPLACE FUNCTION DICOM_TO_BASE64_PNG(
+    FILE_PATH   VARCHAR,
+    FALLBACK_WC FLOAT,
+    FALLBACK_WW FLOAT
+)
+RETURNS TABLE (IMAGE_BYTES VARCHAR)
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom', 'Pillow', 'numpy')
+HANDLER = 'DicomToBase64'
+AS $$
+import io
+import base64
+import numpy as np
+
+
+class DicomToBase64:
+    # Hard defaults, used only if the caller passes nothing usable either.
+    DEFAULT_WC = 40.0
+    DEFAULT_WW = 400.0
+    TARGET_SIZE = (448, 448)
+
+    def process(self, file_path: str, fallback_wc: float, fallback_ww: float):
+        import pydicom
+        from PIL import Image
+        from snowflake.snowpark.files import SnowflakeFile
+
+        # Caller-supplied fallback comes from DICOM_SOURCE_CONFIG, so a chest
+        # source can use a lung window (-600/1500) while cardiac keeps 40/400.
+        # A file's OWN window tags still win; this is the fallback for files
+        # that carry none.
+        try:
+            fb_wc = float(fallback_wc)
+            fb_ww = float(fallback_ww)
+            if fb_ww <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            fb_wc, fb_ww = self.DEFAULT_WC, self.DEFAULT_WW
+
+        try:
+            with SnowflakeFile.open(file_path, 'rb') as f:
+                dcm_bytes = f.read()
+            ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
+            pixel_array = ds.pixel_array.astype(np.float64)
+
+            # 1. Rescale to Hounsfield units before windowing.
+            slope = float(getattr(ds, 'RescaleSlope', 1) or 1)
+            intercept = float(getattr(ds, 'RescaleIntercept', 0) or 0)
+            pixel_array = pixel_array * slope + intercept
+
+            # 2. Resolve the window. WindowCenter/Width may be multi-valued.
+            wc = getattr(ds, 'WindowCenter', None)
+            ww = getattr(ds, 'WindowWidth', None)
+            if hasattr(wc, '__iter__') and not isinstance(wc, (str, bytes)):
+                wc = wc[0]
+            if hasattr(ww, '__iter__') and not isinstance(ww, (str, bytes)):
+                ww = ww[0]
+            try:
+                wc = float(wc)
+                ww = float(ww)
+            except (TypeError, ValueError):
+                wc, ww = fb_wc, fb_ww
+            if ww <= 0:
+                wc, ww = fb_wc, fb_ww
+
+            lower = wc - ww / 2.0
+            upper = wc + ww / 2.0
+
+            # 3. Fixed mapping - NOT a per-slice min/max stretch.
+            pixel_array = np.clip(pixel_array, lower, upper)
+            pixel_array = ((pixel_array - lower) / (upper - lower) * 255.0).astype(np.uint8)
+
+            img = Image.fromarray(pixel_array, mode='L').convert('RGB')
+            img = img.resize(self.TARGET_SIZE)
+
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            yield (base64.b64encode(buf.getvalue()).decode('utf-8'),)
+        except Exception:
+            # Skip unreadable files rather than failing the whole scan.
+            # Yielding no row is what SP_CONVERT_IMAGES detects via anti-join
+            # to populate DICOM_LOAD_ERRORS.
+            return
+$$;
