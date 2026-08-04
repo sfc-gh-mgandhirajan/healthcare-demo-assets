@@ -1,0 +1,24 @@
+{
+  "name": "tre-builder",
+  "displayName": "TRE Builder",
+  "description": "TRE Builder — stand up a compliant Trusted Research Environment (TRE) on Snowflake with one governed, phased deploy. Vacuum-deployable into an isolated database, seeded from a brand-neutral synthetic SAMPLE_OMOP dataset, enforcing the Five Safes (Safe People/Projects/Settings/Data/Outputs) via policy-as-code and a native output airlock. Each phase deploys, proves its controls (positive + negative tests), then advances; clean teardown. Targets SATRE conformance. Phase 1: RBAC, edition gate, SAMPLE_OMOP, Five Safes policy pack, output airlock, in-perimeter Cortex agent.",
+  "version": "0.2.2",
+  "author": {
+    "name": "Snowflake HCLS Solutions",
+    "email": "noreply@snowflake.com"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "hcls",
+    "tre",
+    "trusted-research-environment",
+    "omop",
+    "five-safes",
+    "satre",
+    "cortex-agent",
+    "governance",
+    "clean-room"
+  ],
+  "skills": "./skills",
+  "agents": "./agents"
+}

@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node (roadmap SPCS apps)
+node_modules/
+dist/
+
+# Local secrets / tokens — never commit
+*.token
+*.pem
+.env
+secrets/
+
+# Large local data working files (bundled SAMPLE_OMOP parquet is tracked explicitly)
+*.tmp
+scratch/
