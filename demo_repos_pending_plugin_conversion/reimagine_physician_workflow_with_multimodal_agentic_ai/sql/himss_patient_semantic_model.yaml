@@ -1,0 +1,581 @@
+name: HIMSS_PATIENT_SEMANTIC_VIEW
+description: >
+  Semantic model for physician workflow demo covering patient demographics,
+  cardiac conditions, medications, vitals, and encounters.
+  Designed for cardiology clinical decision support queries.
+
+tables:
+  - name: PATIENTS
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: PATIENTS_IT
+    description: Patient demographics and insurance information
+    primary_key:
+      columns:
+        - PATIENT_ID
+    dimensions:
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Unique patient identifier
+      - name: FIRST_NAME
+        expr: FIRST_NAME
+        data_type: VARCHAR
+        description: Patient first name
+      - name: LAST_NAME
+        expr: LAST_NAME
+        data_type: VARCHAR
+        description: Patient last name
+      - name: GENDER
+        expr: GENDER
+        data_type: VARCHAR
+        description: "Patient gender: M or F"
+      - name: RACE
+        expr: RACE
+        data_type: VARCHAR
+        description: Patient race
+      - name: INSURANCE_PROVIDER
+        expr: INSURANCE_PROVIDER
+        data_type: VARCHAR
+        description: Insurance provider name
+      - name: PRIMARY_PHYSICIAN
+        expr: PRIMARY_PHYSICIAN
+        data_type: VARCHAR
+        description: Assigned primary physician
+      - name: BLOOD_TYPE
+        expr: BLOOD_TYPE
+        data_type: VARCHAR
+        description: Patient blood type
+      - name: CITY
+        expr: CITY
+        data_type: VARCHAR
+        description: City of residence
+      - name: STATE
+        expr: STATE
+        data_type: VARCHAR
+        description: State of residence
+    time_dimensions:
+      - name: DATE_OF_BIRTH
+        expr: DATE_OF_BIRTH
+        data_type: DATE
+        description: Patient date of birth
+    metrics:
+      - name: PATIENT_COUNT
+        expr: COUNT(PATIENT_ID)
+        description: Total number of patients
+      - name: AVG_BMI
+        expr: AVG(BMI)
+        description: Average body mass index
+      - name: AVG_HEIGHT_CM
+        expr: AVG(HEIGHT_CM)
+        description: Average height in centimeters
+      - name: AVG_WEIGHT_KG
+        expr: AVG(WEIGHT_KG)
+        description: Average weight in kilograms
+
+  - name: CONDITIONS
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: CONDITIONS_IT
+    description: Patient medical conditions and diagnoses with ICD-10 codes
+    primary_key:
+      columns:
+        - CONDITION_ID
+    dimensions:
+      - name: CONDITION_ID
+        expr: CONDITION_ID
+        data_type: VARCHAR
+        description: Unique condition record identifier
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Patient identifier foreign key
+      - name: CONDITION_CODE
+        expr: CONDITION_CODE
+        data_type: VARCHAR
+        description: ICD-10 diagnosis code
+      - name: CONDITION_NAME
+        expr: CONDITION_NAME
+        data_type: VARCHAR
+        description: Full name of the medical condition
+      - name: CONDITION_STATUS
+        expr: STATUS
+        data_type: VARCHAR
+        description: "Condition status: active, chronic, or resolved"
+      - name: SEVERITY
+        expr: SEVERITY
+        data_type: VARCHAR
+        description: "Condition severity: mild, moderate, or severe"
+      - name: TREATING_PHYSICIAN
+        expr: TREATING_PHYSICIAN
+        data_type: VARCHAR
+        description: Physician managing this condition
+    time_dimensions:
+      - name: ONSET_DATE
+        expr: ONSET_DATE
+        data_type: DATE
+        description: Date the condition was first diagnosed
+      - name: RESOLUTION_DATE
+        expr: RESOLUTION_DATE
+        data_type: DATE
+        description: Date the condition was resolved or NULL if ongoing
+    metrics:
+      - name: CONDITION_COUNT
+        expr: COUNT(CONDITION_ID)
+        description: Total number of conditions
+      - name: ACTIVE_CONDITION_COUNT
+        expr: COUNT_IF(STATUS = 'active')
+        description: Number of active conditions
+      - name: CHRONIC_CONDITION_COUNT
+        expr: COUNT_IF(STATUS = 'chronic')
+        description: Number of chronic conditions
+  - name: MEDICATIONS
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: MEDICATIONS_IT
+    description: Patient medication prescriptions including dosage and status
+    primary_key:
+      columns:
+        - MEDICATION_ID
+    dimensions:
+      - name: MEDICATION_ID
+        expr: MEDICATION_ID
+        data_type: VARCHAR
+        description: Unique medication record identifier
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Patient identifier foreign key
+      - name: MEDICATION_NAME
+        expr: MEDICATION_NAME
+        data_type: VARCHAR
+        description: Name of the medication
+      - name: DOSAGE
+        expr: DOSAGE
+        data_type: VARCHAR
+        description: Medication dosage
+      - name: FREQUENCY
+        expr: FREQUENCY
+        data_type: VARCHAR
+        description: How often the medication is taken
+      - name: ROUTE
+        expr: ROUTE
+        data_type: VARCHAR
+        description: "Administration route: Oral, IV, Sublingual"
+      - name: MEDICATION_STATUS
+        expr: STATUS
+        data_type: VARCHAR
+        description: "Medication status: active or discontinued"
+      - name: MEDICATION_CLASS
+        expr: MEDICATION_CLASS
+        data_type: VARCHAR
+        description: "Therapeutic class: Beta Blocker, Statin, ACE Inhibitor, Antiplatelet, etc."
+    time_dimensions:
+      - name: START_DATE
+        expr: START_DATE
+        data_type: DATE
+        description: Date the medication was started
+    metrics:
+      - name: MEDICATION_COUNT
+        expr: COUNT(MEDICATION_ID)
+        description: Total number of medications
+      - name: ACTIVE_MEDICATION_COUNT
+        expr: COUNT_IF(STATUS = 'active')
+        description: Number of active medications
+  - name: VITALS
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: VITALS_IT
+    description: Patient vital sign measurements over time
+    primary_key:
+      columns:
+        - VITAL_ID
+    dimensions:
+      - name: VITAL_ID
+        expr: VITAL_ID
+        data_type: VARCHAR
+        description: Unique vital sign record identifier
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Patient identifier foreign key
+      - name: NOTES
+        expr: NOTES
+        data_type: VARCHAR
+        description: Clinical notes about the vital sign reading
+    time_dimensions:
+      - name: RECORDED_DATE
+        expr: RECORDED_DATE
+        data_type: TIMESTAMP_NTZ
+        description: Date and time the vital signs were recorded
+    facts:
+      - name: HEART_RATE
+        expr: HEART_RATE
+        data_type: NUMBER
+        description: Heart rate in beats per minute
+      - name: SYSTOLIC_BP
+        expr: SYSTOLIC_BP
+        data_type: NUMBER
+        description: Systolic blood pressure in mmHg
+      - name: DIASTOLIC_BP
+        expr: DIASTOLIC_BP
+        data_type: NUMBER
+        description: Diastolic blood pressure in mmHg
+      - name: RESPIRATORY_RATE
+        expr: RESPIRATORY_RATE
+        data_type: NUMBER
+        description: Respiratory rate in breaths per minute
+      - name: TEMPERATURE_F
+        expr: TEMPERATURE_F
+        data_type: FLOAT
+        description: Body temperature in Fahrenheit
+      - name: SPO2
+        expr: SPO2
+        data_type: NUMBER
+        description: Oxygen saturation percentage
+    metrics:
+      - name: AVG_HEART_RATE
+        expr: AVG(HEART_RATE)
+        description: Average heart rate in beats per minute
+      - name: AVG_SYSTOLIC_BP
+        expr: AVG(SYSTOLIC_BP)
+        description: Average systolic blood pressure in mmHg
+      - name: AVG_DIASTOLIC_BP
+        expr: AVG(DIASTOLIC_BP)
+        description: Average diastolic blood pressure in mmHg
+      - name: AVG_SPO2
+        expr: AVG(SPO2)
+        description: Average oxygen saturation percentage
+      - name: MAX_HEART_RATE
+        expr: MAX(HEART_RATE)
+        description: Maximum recorded heart rate
+      - name: MIN_SPO2
+        expr: MIN(SPO2)
+        description: Minimum recorded oxygen saturation
+  - name: ENCOUNTERS
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: ENCOUNTERS_IT
+    description: Patient clinical encounters including ER visits, inpatient stays, and outpatient visits
+    primary_key:
+      columns:
+        - ENCOUNTER_ID
+    dimensions:
+      - name: ENCOUNTER_ID
+        expr: ENCOUNTER_ID
+        data_type: VARCHAR
+        description: Unique encounter identifier
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Patient identifier foreign key
+      - name: ENCOUNTER_TYPE
+        expr: ENCOUNTER_TYPE
+        data_type: VARCHAR
+        description: "Type of encounter: Emergency, Inpatient, Inpatient Discharge, Outpatient"
+      - name: DEPARTMENT
+        expr: DEPARTMENT
+        data_type: VARCHAR
+        description: Hospital department
+      - name: PROVIDER_NAME
+        expr: PROVIDER_NAME
+        data_type: VARCHAR
+        description: Provider who saw the patient
+      - name: CHIEF_COMPLAINT
+        expr: CHIEF_COMPLAINT
+        data_type: VARCHAR
+        description: Patient primary complaint at presentation
+      - name: DIAGNOSIS_CODE
+        expr: DIAGNOSIS_CODE
+        data_type: VARCHAR
+        description: ICD-10 diagnosis code for this encounter
+      - name: DIAGNOSIS_NAME
+        expr: DIAGNOSIS_NAME
+        data_type: VARCHAR
+        description: Diagnosis name for this encounter
+      - name: ENCOUNTER_NOTES
+        expr: NOTES
+        data_type: VARCHAR
+        description: Clinical notes from the encounter
+    time_dimensions:
+      - name: ENCOUNTER_DATE
+        expr: ENCOUNTER_DATE
+        data_type: DATE
+        description: Date of the encounter
+    metrics:
+      - name: ENCOUNTER_COUNT
+        expr: COUNT(ENCOUNTER_ID)
+        description: Total number of encounters
+      - name: EMERGENCY_COUNT
+        expr: COUNT_IF(ENCOUNTER_TYPE = 'Emergency')
+        description: Number of emergency encounters
+  - name: MEDICAL_IMAGES
+    base_table:
+      database: DEMO_DB
+      schema: HIMSS_DEMO
+      table: MEDICAL_IMAGES_IT
+    description: Medical images including ECGs, chest X-rays, and echocardiograms linked to patients and encounters
+    primary_key:
+      columns:
+        - IMAGE_ID
+    dimensions:
+      - name: IMAGE_ID
+        expr: IMAGE_ID
+        data_type: VARCHAR
+        description: Unique medical image identifier (e.g. IMG-7001)
+      - name: PATIENT_ID
+        expr: PATIENT_ID
+        data_type: VARCHAR
+        description: Patient identifier foreign key
+      - name: MODALITY
+        expr: MODALITY
+        data_type: VARCHAR
+        description: "Imaging modality: ECG, Chest X-Ray, Echocardiogram"
+      - name: BODY_PART
+        expr: BODY_PART
+        data_type: VARCHAR
+        description: "Body part imaged: Heart, Chest"
+      - name: IMAGE_FILE
+        expr: IMAGE_FILE
+        data_type: VARCHAR
+        description: Relative path to the image file for display
+      - name: STAGE_PATH
+        expr: STAGE_PATH
+        data_type: VARCHAR
+        description: Snowflake stage path to the actual image file for MedGemma processing
+      - name: IMAGE_DESCRIPTION
+        expr: DESCRIPTION
+        data_type: VARCHAR
+        description: Description of the medical image
+      - name: ORDERING_PHYSICIAN
+        expr: ORDERING_PHYSICIAN
+        data_type: VARCHAR
+        description: Physician who ordered the imaging study
+      - name: CLINICAL_INDICATION
+        expr: CLINICAL_INDICATION
+        data_type: VARCHAR
+        description: Clinical reason the image was ordered
+      - name: IMAGE_STATUS
+        expr: STATUS
+        data_type: VARCHAR
+        description: "Image review status: reviewed, pending"
+      - name: FINDINGS
+        expr: FINDINGS
+        data_type: VARCHAR
+        description: Radiologist or cardiologist findings from the image
+      - name: ENCOUNTER_ID
+        expr: ENCOUNTER_ID
+        data_type: VARCHAR
+        description: Encounter identifier foreign key linking to the clinical encounter
+    time_dimensions:
+      - name: IMAGE_DATE
+        expr: IMAGE_DATE
+        data_type: TIMESTAMP_NTZ
+        description: Date and time the image was captured
+    metrics:
+      - name: IMAGE_COUNT
+        expr: COUNT(IMAGE_ID)
+        description: Total number of medical images
+      - name: ECG_COUNT
+        expr: COUNT_IF(MODALITY = 'ECG')
+        description: Number of ECG images
+      - name: XRAY_COUNT
+        expr: COUNT_IF(MODALITY = 'Chest X-Ray')
+        description: Number of chest X-ray images
+
+relationships:
+  - name: conditions_to_patients
+    left_table: CONDITIONS
+    right_table: PATIENTS
+    relationship_columns:
+      - left_column: PATIENT_ID
+        right_column: PATIENT_ID
+  - name: medications_to_patients
+    left_table: MEDICATIONS
+    right_table: PATIENTS
+    relationship_columns:
+      - left_column: PATIENT_ID
+        right_column: PATIENT_ID
+  - name: vitals_to_patients
+    left_table: VITALS
+    right_table: PATIENTS
+    relationship_columns:
+      - left_column: PATIENT_ID
+        right_column: PATIENT_ID
+  - name: encounters_to_patients
+    left_table: ENCOUNTERS
+    right_table: PATIENTS
+    relationship_columns:
+      - left_column: PATIENT_ID
+        right_column: PATIENT_ID
+  - name: medical_images_to_patients
+    left_table: MEDICAL_IMAGES
+    right_table: PATIENTS
+    relationship_columns:
+      - left_column: PATIENT_ID
+        right_column: PATIENT_ID
+  - name: medical_images_to_encounters
+    left_table: MEDICAL_IMAGES
+    right_table: ENCOUNTERS
+    relationship_columns:
+      - left_column: ENCOUNTER_ID
+        right_column: ENCOUNTER_ID
+
+verified_queries:
+  - name: patient_count
+    question: "How many patients are there?"
+    sql: "SELECT COUNT(*) AS patient_count FROM DEMO_DB.HIMSS_DEMO.PATIENTS_IT"
+
+  - name: patients_with_conditions
+    question: "Show me all patients with their conditions"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME, p.GENDER, c.CONDITION_NAME, c.STATUS, c.SEVERITY
+      FROM DEMO_DB.HIMSS_DEMO.PATIENTS_IT p
+      JOIN DEMO_DB.HIMSS_DEMO.CONDITIONS_IT c ON p.PATIENT_ID = c.PATIENT_ID
+      ORDER BY p.LAST_NAME, c.STATUS
+
+  - name: maria_santos_medications
+    question: "What medications is Maria Santos currently taking?"
+    sql: >
+      SELECT m.MEDICATION_NAME, m.DOSAGE, m.FREQUENCY, m.MEDICATION_CLASS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICATIONS_IT m
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON m.PATIENT_ID = p.PATIENT_ID
+      WHERE p.FIRST_NAME = 'Maria' AND p.LAST_NAME = 'Santos' AND m.STATUS = 'active'
+
+
+  - name: latest_heart_rate
+    question: "What is the latest heart rate for each patient?"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME, v.HEART_RATE, v.SYSTOLIC_BP, v.DIASTOLIC_BP, v.RECORDED_DATE
+      FROM DEMO_DB.HIMSS_DEMO.VITALS_IT v
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON v.PATIENT_ID = p.PATIENT_ID
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY v.PATIENT_ID ORDER BY v.RECORDED_DATE DESC) = 1
+
+  - name: mi_patients
+    question: "List all patients with history of myocardial infarction"
+    sql: >
+      SELECT DISTINCT p.FIRST_NAME, p.LAST_NAME, c.CONDITION_NAME, c.ONSET_DATE, c.STATUS
+      FROM DEMO_DB.HIMSS_DEMO.PATIENTS_IT p
+      JOIN DEMO_DB.HIMSS_DEMO.CONDITIONS_IT c ON p.PATIENT_ID = c.PATIENT_ID
+      WHERE c.CONDITION_CODE LIKE 'I21%' OR c.CONDITION_CODE = 'I25.2'
+
+  - name: most_recent_ecg
+    question: "Find the most recent ECG for James Wilson"
+    sql: >
+      SELECT mi.IMAGE_ID, mi.MODALITY, mi.IMAGE_DATE, mi.DESCRIPTION, mi.FINDINGS, mi.STAGE_PATH
+      FROM DEMO_DB.HIMSS_DEMO.MEDICAL_IMAGES_IT mi
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON mi.PATIENT_ID = p.PATIENT_ID
+      WHERE p.FIRST_NAME = 'James' AND p.LAST_NAME = 'Wilson' AND mi.MODALITY = 'ECG'
+      ORDER BY mi.IMAGE_DATE DESC
+      LIMIT 1
+
+  - name: patient_medical_images
+    question: "Show all medical images for a patient"
+    sql: >
+      SELECT mi.IMAGE_ID, mi.MODALITY, mi.BODY_PART, mi.IMAGE_DATE, mi.DESCRIPTION, mi.STATUS, mi.FINDINGS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICAL_IMAGES_IT mi
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON mi.PATIENT_ID = p.PATIENT_ID
+      ORDER BY mi.IMAGE_DATE DESC
+
+  - name: most_recent_image_by_modality
+    question: "Find the most recent chest X-ray image ID for James Wilson"
+    sql: >
+      SELECT mi.IMAGE_ID, mi.MODALITY, mi.IMAGE_DATE, mi.DESCRIPTION, mi.FINDINGS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICAL_IMAGES_IT mi
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON mi.PATIENT_ID = p.PATIENT_ID
+      WHERE p.FIRST_NAME = 'James' AND p.LAST_NAME = 'Wilson' AND mi.MODALITY = 'Chest X-Ray'
+      ORDER BY mi.IMAGE_DATE DESC
+      LIMIT 1
+
+  - name: clinical_summary_conditions
+    question: "Give me a clinical summary of active conditions for a patient"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME, p.DATE_OF_BIRTH, p.GENDER, p.BLOOD_TYPE,
+             c.CONDITION_NAME, c.CONDITION_CODE, c.STATUS, c.SEVERITY, c.ONSET_DATE, c.TREATING_PHYSICIAN
+      FROM DEMO_DB.HIMSS_DEMO.PATIENTS_IT p
+      JOIN DEMO_DB.HIMSS_DEMO.CONDITIONS_IT c ON p.PATIENT_ID = c.PATIENT_ID
+      ORDER BY c.STATUS, c.ONSET_DATE DESC
+
+  - name: clinical_summary_medications
+    question: "List all active medications for a patient with dosage information"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME,
+             m.MEDICATION_NAME, m.DOSAGE, m.FREQUENCY, m.ROUTE, m.MEDICATION_CLASS, m.START_DATE
+      FROM DEMO_DB.HIMSS_DEMO.MEDICATIONS_IT m
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON m.PATIENT_ID = p.PATIENT_ID
+      WHERE m.STATUS = 'active'
+      ORDER BY m.MEDICATION_CLASS, m.MEDICATION_NAME
+
+  - name: latest_vitals_for_patient
+    question: "Show the most recent vitals for a patient"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME,
+             v.RECORDED_DATE, v.HEART_RATE, v.SYSTOLIC_BP, v.DIASTOLIC_BP,
+             v.RESPIRATORY_RATE, v.TEMPERATURE_F, v.SPO2, v.NOTES
+      FROM DEMO_DB.HIMSS_DEMO.VITALS_IT v
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON v.PATIENT_ID = p.PATIENT_ID
+      ORDER BY v.RECORDED_DATE DESC
+      LIMIT 1
+
+  - name: patient_encounter_history
+    question: "Show encounter history for a patient"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME,
+             e.ENCOUNTER_DATE, e.ENCOUNTER_TYPE, e.DEPARTMENT, e.PROVIDER_NAME,
+             e.CHIEF_COMPLAINT, e.DIAGNOSIS_NAME, e.NOTES
+      FROM DEMO_DB.HIMSS_DEMO.ENCOUNTERS_IT e
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON e.PATIENT_ID = p.PATIENT_ID
+      ORDER BY e.ENCOUNTER_DATE DESC
+
+  - name: vitals_trend
+    question: "Show vitals trend over time for a patient"
+    sql: >
+      SELECT p.FIRST_NAME, p.LAST_NAME,
+             v.RECORDED_DATE, v.HEART_RATE, v.SYSTOLIC_BP, v.DIASTOLIC_BP, v.SPO2, v.NOTES
+      FROM DEMO_DB.HIMSS_DEMO.VITALS_IT v
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON v.PATIENT_ID = p.PATIENT_ID
+      ORDER BY v.RECORDED_DATE ASC
+
+  - name: active_medications_for_patient_by_id
+    question: "What medications is this patient currently taking?"
+    sql: >
+      SELECT m.MEDICATION_NAME, m.DOSAGE, m.FREQUENCY, m.ROUTE, m.MEDICATION_CLASS, m.START_DATE, m.STATUS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICATIONS_IT m
+      WHERE m.PATIENT_ID = 'P-1002' AND m.STATUS = 'active'
+      ORDER BY m.MEDICATION_CLASS, m.MEDICATION_NAME
+
+  - name: medication_review_for_patient
+    question: "Review all active medications for potential interactions and flag any concerns given the patient's conditions"
+    sql: >
+      SELECT m.MEDICATION_NAME, m.DOSAGE, m.FREQUENCY, m.ROUTE, m.MEDICATION_CLASS, m.STATUS,
+             c.CONDITION_NAME, c.SEVERITY, c.STATUS AS CONDITION_STATUS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICATIONS_IT m
+      JOIN DEMO_DB.HIMSS_DEMO.CONDITIONS_IT c ON m.PATIENT_ID = c.PATIENT_ID
+      WHERE m.PATIENT_ID = 'P-1002' AND m.STATUS = 'active' AND c.STATUS IN ('active', 'chronic')
+      ORDER BY m.MEDICATION_CLASS
+
+  - name: patient_medications_and_conditions
+    question: "Look into the medications that this patient is taking and let me know if any revisions are required"
+    sql: >
+      SELECT m.MEDICATION_NAME, m.DOSAGE, m.FREQUENCY, m.ROUTE, m.MEDICATION_CLASS, m.STATUS AS MEDICATION_STATUS,
+             c.CONDITION_NAME, c.SEVERITY, c.STATUS AS CONDITION_STATUS
+      FROM DEMO_DB.HIMSS_DEMO.MEDICATIONS_IT m
+      JOIN DEMO_DB.HIMSS_DEMO.CONDITIONS_IT c ON m.PATIENT_ID = c.PATIENT_ID
+      WHERE m.PATIENT_ID = 'P-1002' AND m.STATUS = 'active' AND c.STATUS IN ('active', 'chronic')
+      ORDER BY m.MEDICATION_CLASS
+
+  - name: most_recent_ecg_for_patient
+    question: "Find the most recent ECG for a patient"
+    sql: >
+      SELECT mi.IMAGE_ID, mi.MODALITY, mi.IMAGE_DATE, mi.DESCRIPTION, mi.FINDINGS, mi.STAGE_PATH, mi.CLINICAL_INDICATION
+      FROM DEMO_DB.HIMSS_DEMO.MEDICAL_IMAGES_IT mi
+      JOIN DEMO_DB.HIMSS_DEMO.PATIENTS_IT p ON mi.PATIENT_ID = p.PATIENT_ID
+      WHERE mi.MODALITY = 'ECG'
+      ORDER BY mi.IMAGE_DATE DESC
+      LIMIT 1
+

@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy-950: #070b14;
+  --color-navy-900: #0a0f1a;
+  --color-navy-800: #0f1729;
+  --color-navy-700: #151e33;
+  --color-navy-600: #1a2640;
+  --color-navy-500: #243352;
+  --color-navy-400: #334566;
+  --color-navy-300: #4a5e82;
+
+  --color-cyan-400: #00d4ff;
+  --color-cyan-500: #00bce6;
+  --color-cyan-600: #0099cc;
+  --color-cyan-700: #007aa3;
+
+  --color-card: #111827;
+  --color-card-hover: #1a2332;
+  --color-card-border: #1e293b;
+  --color-card-border-hover: #2d3b50;
+
+  --color-medical-green: #10b981;
+  --color-medical-red: #ef4444;
+  --color-medical-amber: #f59e0b;
+  --color-medical-blue: #3b82f6;
+
+  --color-text-primary: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  --color-text-accent: #00d4ff;
+}
+
+@layer base {
+  body {
+    @apply bg-navy-900 text-text-primary antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+.prose table {
+  @apply w-full border-collapse text-sm;
+}
+.prose th {
+  @apply bg-navy-700 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-text-secondary border-b border-card-border;
+}
+.prose td {
+  @apply px-3 py-2 border-b border-card-border text-text-primary;
+}
+.prose tr:hover td {
+  @apply bg-navy-800;
+}
+
+.prose p {
+  @apply text-text-primary;
+}
+.prose strong {
+  @apply text-cyan-400;
+}
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  @apply text-text-primary;
+}
+.prose code {
+  @apply bg-navy-700 text-cyan-400 px-1 py-0.5 rounded text-xs;
+}
+.prose ul, .prose ol {
+  @apply text-text-primary;
+}
+.prose li::marker {
+  @apply text-cyan-400;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.typing-dot {
+  animation: pulse-dot 1.4s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes ecg-line {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.ecg-scan-line {
+  animation: ecg-line 2s linear infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 5px rgba(0, 212, 255, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.4); }
+}
+.glow-card {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-navy-500 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-navy-400;
+}
