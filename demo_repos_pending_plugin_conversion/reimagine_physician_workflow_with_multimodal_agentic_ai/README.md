@@ -47,6 +47,7 @@ A **modular, EHR-integrable** clinical decision support solution built on Snowfl
 ├── sql/
 │   ├── deploy_medgemma.sql       # Step 2: MedGemma deployment prerequisites (compute pool, EAI, secrets)
 │   ├── setup_data.sql            # Step 3: DDL for tables, data, MedGemma stored procedure
+│   ├── create_agent.sql          # Step 5: Cortex Agent DDL (tools, instructions, tool_resources)
 │   └── himss_patient_semantic_model.yaml  # Semantic View definition (6 tables, 17 VQRs)
 └── README.md
 ```
@@ -184,10 +185,26 @@ SELECT SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML(
 
 ### Step 5: Create the Cortex Agent
 
-Create the agent via Snowsight UI or DDL:
-- **Agent name**: `HIMSS_PHYSICIAN_AGENT` in `SNOWFLAKE_INTELLIGENCE.AGENTS`
-- **Model**: `auto`
-- **Tools**: `PATIENT_ANALYST` (semantic view), `MEDGEMMA_MEDICAL_INTERPRETER` (stored procedure)
+```sql
+-- Run sql/create_agent.sql (identifiers are set by configure.py)
+```
+
+This creates `HIMSS_PHYSICIAN_AGENT` in `SNOWFLAKE_INTELLIGENCE.AGENTS` with:
+- **Model**: `auto` — Snowflake selects an available orchestration model
+- **Tools**: `PATIENT_ANALYST` (Cortex Analyst over the semantic view), `MEDGEMMA_MEDICAL_INTERPRETER` (stored procedure → MedGemma on SPCS)
+- **Instructions**: clinical response style, and routing rules that resolve an `IMAGE_ID` via Analyst before calling MedGemma
+
+Both tools pin an `execution_environment` warehouse. This is required — without it the
+agent fails with `399504 ("missing an execution environment")` when called by any client
+that has no default warehouse, including SPCS services and apps using an owner's-rights
+service role.
+
+The script ends with a `DESCRIBE AGENT` to verify, plus commented-out `GRANT USAGE`
+statements — the role behind your PAT needs USAGE on the agent and on the MedGemma
+procedure.
+
+You can also build the agent in the Snowsight UI (**AI & ML » Agents**) if you prefer,
+but the script is the reproducible path.
 
 ### Step 6: Frontend App
 

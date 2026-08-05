@@ -78,6 +78,30 @@ def configure(db, schema, account, warehouse, interactive_wh, image_stage,
         ])
         changes.append(f"  sql/deploy_medgemma.sql  (MY_DB={db}, MY_SCHEMA={schema})")
 
+    agent_path = os.path.join(REPO_ROOT, "sql", "create_agent.sql")
+    if os.path.exists(agent_path):
+        agent_fqn = f"{agent_db}.{agent_schema}.{agent_name}"
+        regex_replace_in_file(agent_path, [
+            # Agent identifier (CREATE, DESCRIBE, DATA_AGENT_RUN, GRANT USAGE)
+            (r"CREATE DATABASE IF NOT EXISTS \S+;", f"CREATE DATABASE IF NOT EXISTS {agent_db};"),
+            (r"CREATE SCHEMA IF NOT EXISTS \S+;", f"CREATE SCHEMA IF NOT EXISTS {agent_db}.{agent_schema};"),
+            (r"CREATE OR REPLACE AGENT \S+", f"CREATE OR REPLACE AGENT {agent_fqn}"),
+            (r"DESCRIBE AGENT \S+;", f"DESCRIBE AGENT {agent_fqn};"),
+            (r"GRANT USAGE ON DATABASE \S+ TO", f"GRANT USAGE ON DATABASE {agent_db} TO"),
+            (r"GRANT USAGE ON SCHEMA \S+ TO", f"GRANT USAGE ON SCHEMA {agent_db}.{agent_schema} TO"),
+            (r"GRANT USAGE ON AGENT \S+ TO", f"GRANT USAGE ON AGENT {agent_fqn} TO"),
+            (r"'[^'\n]*\.[^'\n]*\.[^'\n]*',", f"'{agent_fqn}',"),
+            # Orchestration model -- anchored to the models block so it does not
+            # also match `orchestration: |` inside the instructions block.
+            (r"models:\n    orchestration: \S+", f"models:\n    orchestration: {agent_model}"),
+            # Tool resources
+            (r'semantic_view: "[^"]*"', f'semantic_view: "{db}.{schema}.HIMSS_PATIENT_SEMANTIC_VIEW"'),
+            (r'identifier: "[^"]*"', f'identifier: "{db}.{schema}.MEDGEMMA_MEDICAL_INTERPRETER"'),
+            (r'warehouse: "[^"]*"', f'warehouse: "{interactive_wh}"'),
+            (r"GRANT USAGE ON PROCEDURE \S+\(", f"GRANT USAGE ON PROCEDURE {db}.{schema}.MEDGEMMA_MEDICAL_INTERPRETER("),
+        ])
+        changes.append(f"  sql/create_agent.sql  (agent={agent_fqn}, model={agent_model}, semantic_view={db}.{schema}.HIMSS_PATIENT_SEMANTIC_VIEW, warehouse={interactive_wh})")
+
     env_path = os.path.join(REPO_ROOT, "himss-physician-app", ".env.example")
     if os.path.exists(env_path):
         regex_replace_in_file(env_path, [
@@ -136,6 +160,8 @@ def main():
         print(f"  2. Edit .env.local — add your Snowflake PAT")
         print(f"  3. Run sql/deploy_medgemma.sql in Snowflake")
         print(f"  4. Run sql/setup_data.sql in Snowflake")
+        print(f"  5. Create the semantic view (see README Step 4)")
+        print(f"  6. Run sql/create_agent.sql in Snowflake")
     else:
         print("No files needed updating.")
 
