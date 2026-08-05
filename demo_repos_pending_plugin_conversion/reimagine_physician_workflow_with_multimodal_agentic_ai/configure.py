@@ -8,7 +8,7 @@ Usage:
         --warehouse MY_WH --interactive-wh MY_INTERACTIVE_WH \
         --image-stage MY_DB.MY_SCHEMA.ECG_STAGE \
         --agent-db SNOWFLAKE_INTELLIGENCE --agent-schema AGENTS --agent-name MY_AGENT \
-        --agent-model claude-4-sonnet
+        --agent-model auto
 """
 import argparse
 import os
@@ -26,7 +26,7 @@ DEFAULTS = {
     "agent_db": "SNOWFLAKE_INTELLIGENCE",
     "agent_schema": "AGENTS",
     "agent_name": "HIMSS_PHYSICIAN_AGENT",
-    "agent_model": "claude-4-sonnet",
+    "agent_model": "auto",
 }
 
 

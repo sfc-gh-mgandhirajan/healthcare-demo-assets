@@ -19,7 +19,7 @@ A **modular, EHR-integrable** clinical decision support solution built on Snowfl
                        │ Standard REST API (SSE Streaming)
                        ▼
         ┌──────────────────────────────┐
-        │  Cortex Agent (claude-4-sonnet)  │
+        │  Cortex Agent (auto)             │
         │  POST /api/v2/databases/.../agents/:run  │
         └──────┬───────────────┬───────┘
                │               │
@@ -65,7 +65,7 @@ A **modular, EHR-integrable** clinical decision support solution built on Snowfl
 | `<DB>.<SCHEMA>.MEDICAL_IMAGES_IT` | Interactive Table | Image metadata |
 | `<DB>.<SCHEMA>.HIMSS_PATIENT_SEMANTIC_VIEW` | Semantic View | Text-to-SQL (17 verified queries) |
 | `<DB>.<SCHEMA>.MEDGEMMA_MEDICAL_INTERPRETER` | Stored Procedure | MedGemma 4B inference proxy |
-| `SNOWFLAKE_INTELLIGENCE.AGENTS.HIMSS_PHYSICIAN_AGENT` | Cortex Agent | Orchestrator (claude-4-sonnet) |
+| `SNOWFLAKE_INTELLIGENCE.AGENTS.HIMSS_PHYSICIAN_AGENT` | Cortex Agent | Orchestrator (auto) |
 
 ## Prerequisites
 
@@ -186,7 +186,7 @@ SELECT SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML(
 
 Create the agent via Snowsight UI or DDL:
 - **Agent name**: `HIMSS_PHYSICIAN_AGENT` in `SNOWFLAKE_INTELLIGENCE.AGENTS`
-- **Model**: `claude-4-sonnet`
+- **Model**: `auto`
 - **Tools**: `PATIENT_ANALYST` (semantic view), `MEDGEMMA_MEDICAL_INTERPRETER` (stored procedure)
 
 ### Step 6: Frontend App
@@ -207,7 +207,7 @@ VITE_SNOWFLAKE_WAREHOUSE=<your interactive warehouse>
 VITE_AGENT_DATABASE=<agent database>          # default: SNOWFLAKE_INTELLIGENCE
 VITE_AGENT_SCHEMA=<agent schema>              # default: AGENTS
 VITE_AGENT_NAME=<agent name>                  # default: HIMSS_PHYSICIAN_AGENT
-VITE_AGENT_MODEL=<agent model>                # default: claude-4-sonnet
+VITE_AGENT_MODEL=<agent model>                # default: auto
 ```
 
 Then:
@@ -231,7 +231,7 @@ The app runs at `http://localhost:5173`. The Vite dev server proxies `/api` requ
 | `VITE_AGENT_DATABASE` | Cortex Agent database | `SNOWFLAKE_INTELLIGENCE` |
 | `VITE_AGENT_SCHEMA` | Cortex Agent schema | `AGENTS` |
 | `VITE_AGENT_NAME` | Cortex Agent name | `HIMSS_PHYSICIAN_AGENT` |
-| `VITE_AGENT_MODEL` | Cortex Agent model | `claude-4-sonnet` |
+| `VITE_AGENT_MODEL` | Cortex Agent model | `auto` |
 
 ### SQL Session Variables (setup_data.sql)
 
@@ -275,7 +275,7 @@ curl -X POST "https://<account>.snowflakecomputing.com/api/v2/databases/<AGENT_D
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{
-    "model": "claude-4-sonnet",
+    "model": "auto",
     "messages": [{
       "role": "user",
       "content": [{"type": "text", "text": "What medications is patient P-1001 on and are there any interactions?"}]

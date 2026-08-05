@@ -4,7 +4,7 @@ import type { ChatMessage, SqlResult, ToolCall, ImageInterpretation } from "../t
 const AGENT_DB = import.meta.env.VITE_AGENT_DATABASE as string || "SNOWFLAKE_INTELLIGENCE";
 const AGENT_SCHEMA = import.meta.env.VITE_AGENT_SCHEMA as string || "AGENTS";
 const AGENT_NAME = import.meta.env.VITE_AGENT_NAME as string || "HIMSS_PHYSICIAN_AGENT";
-const AGENT_MODEL = import.meta.env.VITE_AGENT_MODEL as string || "claude-4-sonnet";
+const AGENT_MODEL = import.meta.env.VITE_AGENT_MODEL as string || "auto";
 const AGENT_API_URL = `/api/v2/databases/${AGENT_DB}/schemas/${AGENT_SCHEMA}/agents/${AGENT_NAME}:run`;
 
 interface UseAgentChatReturn {
