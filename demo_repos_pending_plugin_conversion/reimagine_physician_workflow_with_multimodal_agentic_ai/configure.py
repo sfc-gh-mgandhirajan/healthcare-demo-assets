@@ -102,6 +102,22 @@ def configure(db, schema, account, warehouse, interactive_wh, image_stage,
         ])
         changes.append(f"  sql/create_agent.sql  (agent={agent_fqn}, model={agent_model}, semantic_view={db}.{schema}.HIMSS_PATIENT_SEMANTIC_VIEW, warehouse={interactive_wh})")
 
+    teardown_path = os.path.join(REPO_ROOT, "sql", "teardown.sql")
+    if os.path.exists(teardown_path):
+        agent_fqn = f"{agent_db}.{agent_schema}.{agent_name}"
+        # The MedGemma database is the first part of the fully-qualified image stage.
+        medgemma_db = image_stage.split(".")[0]
+        regex_replace_in_file(teardown_path, [
+            (r"DROP AGENT IF EXISTS \S+;", f"DROP AGENT IF EXISTS {agent_fqn};"),
+            (r"DROP SERVICE IF EXISTS \S+\.PUBLIC\.", f"DROP SERVICE IF EXISTS {medgemma_db}.PUBLIC."),
+            (r"DROP SCHEMA IF EXISTS \S+ CASCADE;", f"DROP SCHEMA IF EXISTS {db}.{schema} CASCADE;"),
+            (r"DROP DATABASE IF EXISTS \S+;", f"DROP DATABASE IF EXISTS {medgemma_db};"),
+            (r"SHOW AGENTS LIKE '[^']*'", f"SHOW AGENTS LIKE '{agent_name}'"),
+            (r"SHOW SCHEMAS LIKE '[^']*' IN DATABASE \S+;", f"SHOW SCHEMAS LIKE '{schema}' IN DATABASE {db};"),
+            (r"SHOW DATABASES LIKE '[^'\n]*';", f"SHOW DATABASES LIKE '{medgemma_db}';"),
+        ])
+        changes.append(f"  sql/teardown.sql  (agent={agent_fqn}, schema={db}.{schema}, medgemma_db={medgemma_db})")
+
     env_path = os.path.join(REPO_ROOT, "himss-physician-app", ".env.example")
     if os.path.exists(env_path):
         regex_replace_in_file(env_path, [
