@@ -110,6 +110,7 @@ def configure(db, schema, account, warehouse, interactive_wh, image_stage,
         regex_replace_in_file(teardown_path, [
             (r"DROP AGENT IF EXISTS \S+;", f"DROP AGENT IF EXISTS {agent_fqn};"),
             (r"DROP SERVICE IF EXISTS \S+\.PUBLIC\.", f"DROP SERVICE IF EXISTS {medgemma_db}.PUBLIC."),
+            (r"ALTER SERVICE \S+\.PUBLIC\.", f"ALTER SERVICE {medgemma_db}.PUBLIC."),
             (r"DROP SCHEMA IF EXISTS \S+ CASCADE;", f"DROP SCHEMA IF EXISTS {db}.{schema} CASCADE;"),
             (r"DROP DATABASE IF EXISTS \S+;", f"DROP DATABASE IF EXISTS {medgemma_db};"),
             (r"SHOW AGENTS LIKE '[^']*'", f"SHOW AGENTS LIKE '{agent_name}'"),
