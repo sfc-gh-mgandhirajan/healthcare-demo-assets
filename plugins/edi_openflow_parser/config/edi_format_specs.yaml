@@ -1,0 +1,22 @@
+# X12 Format Specifications
+# This is the master config for the X12 EDI parser plugin.
+# To add a new X12 transaction type: run /edi:extend or manually add an entry to x12_known_types.yaml.
+
+format:
+  name: "ASC X12"
+  description: "American National Standards Institute X12 Electronic Data Interchange"
+  delimiter_detection: "ISA-based"
+  segment_terminator_position: 105
+  element_separator_position: 3
+  sub_element_position: 104
+  envelope_segments: ["ISA", "GS", "ST", "SE", "GE", "IEA"]
+  industries: ["healthcare", "finance", "insurance", "logistics"]
+
+# Default deployment targets
+defaults:
+  database: "X12_EDI_AI"
+  warehouse: "APP_WH"
+  openflow_runtime_size: "MEDIUM"
+  gold_ai_model: "claude-sonnet-4-6"
+  landing_column_type: "VARCHAR"
+  dynamic_table_lag: "10 minutes"

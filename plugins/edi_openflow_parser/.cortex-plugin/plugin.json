@@ -1,0 +1,38 @@
+{
+  "name": "edi-openflow-parser",
+  "displayName": "X12 EDI Parser",
+  "description": "EDI parsing framework for Snowflake. Guides customers through extending an Openflow-based EDI pipeline for any transaction format (X12 834/835/837/270-277 pre-built, extensible to any EDI type). Includes AI-assisted field map generation, typed landing tables, Gold Dynamic Tables with Cortex AI enrichment, and a Python UDF lite path for environments without Openflow.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Snowflake HCLS Solutions",
+    "email": "noreply@snowflake.com"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "hcls",
+    "payer",
+    "provider",
+    "edi",
+    "x12",
+    "837",
+    "835",
+    "834",
+    "openflow",
+    "claims"
+  ],
+  "repository": "https://github.com/Snowflake-Solutions/health-sciences-coco-skills-incubator",
+  "skills": "./skills",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/enforce-contract.sh"
+          }
+        ],
+        "matcher": "snowflake_sql_execute|Bash"
+      }
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "mode": "strict",
+  "description": "Execution guardrails for the EDI Openflow Parser plugin",
+
+  "infrastructure": {
+    "parser_source": "src/x12_processors/",
+    "required_database": "X12_EDI_AI",
+    "required_schemas": ["CLAIMS", "ENROLLMENTS", "REMITTANCES", "GOLD"],
+    "openflow_runtime_size": "MEDIUM"
+  },
+
+  "pipeline_order": [
+    "GATE_CONNECTION",
+    "GATE_REPO",
+    "GATE_FORMAT_SPEC",
+    "PHASE_FIELD_MAP",
+    "PHASE_LANDING_DDL",
+    "PHASE_GOLD_DT",
+    "PHASE_TESTS"
+  ],
+
+  "deploy_order": [
+    "GATE_RUNTIME",
+    "PHASE_NAR_BUILD",
+    "PHASE_FLOW_WIRE",
+    "PHASE_NETWORK"
+  ],
+
+  "prohibited_patterns": [
+    {
+      "pattern": "CREATE TABLE.*outside prescribed schemas",
+      "reason": "Landing tables must follow the typed schema pattern in config/edi_format_specs.yaml"
+    },
+    {
+      "pattern": "Direct field_maps.py modification without config update",
+      "reason": "All format definitions flow from edi_format_specs.yaml → generated code"
+    },
+    {
+      "pattern": "Manual NAR packaging (zip/jar)",
+      "reason": "Always use hatch-datavolo-nar for NAR builds"
+    },
+    {
+      "pattern": "PutSnowpipeStreaming2",
+      "reason": "Use PutSnowpipeStreaming v1 (Record Reader + Table target) for this architecture"
+    },
+    {
+      "pattern": "Network policy changes without confirmation",
+      "reason": "SPCS IP changes require explicit user approval — can lock out accounts"
+    }
+  ],
+
+  "quality_gates": {
+    "G1": "Snowflake connection verified, target database exists or user approves creation",
+    "G2": "User has local clone/fork of backbone repo or creates one",
+    "G3": "Transaction format spec is parseable (from config, user description, or implementation guide)",
+    "G4": "Generated field map validates against sample data (if provided)",
+    "G5": "Landing table DDL compiles successfully (only_compile=true)"
+  },
+
+  "output_modes": {
+    "write": "Default. Writes generated files directly to user's workspace.",
+    "dry_run": "Output-only. Presents code blocks for user to apply manually. Activated by user preference or when no repo is detected."
+  }
+}
