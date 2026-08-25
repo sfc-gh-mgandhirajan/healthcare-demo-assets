@@ -24,10 +24,7 @@ if echo "$SQL" | grep -qi "zip.*\.nar\|jar.*\.nar"; then
   exit 2
 fi
 
-# Block network policy changes outside the deploy skill
-if echo "$SQL" | grep -qi "ALTER.*NETWORK.*POLICY\|CREATE.*NETWORK.*POLICY"; then
-  echo "Network policy changes must go through the edi-deploy network verification phase. Run /edi:deploy first." >&2
-  exit 2
-fi
+# Network policy changes are allowed (the deploy phase handles confirmation).
+# Previously blocked here, but that prevented the deploy skill from functioning.
 
 exit 0

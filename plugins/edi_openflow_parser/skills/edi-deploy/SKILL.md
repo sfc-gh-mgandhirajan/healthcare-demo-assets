@@ -19,13 +19,21 @@ Which deployment path would you like?
 A) Openflow (Primary) — Streaming ingestion via NiFi NAR processor
    - Best for: production, high-volume, continuous streaming
    - Requires: Openflow runtime (Medium+), S3/SFTP source
-   
-B) Python UDF Lite — Stored procedure-based parsing in Snowflake
-   - Best for: PoC, batch processing, no Openflow dependency
-   - Requires: Stage with EDI files, compute warehouse
+
+B) Batch (planned) — Python stored procedure + task
+   - Status: Not yet implemented. Coming in a future release.
 ```
 
 ## Openflow Path
+
+### Phase 0: Infrastructure DDL
+Before wiring Openflow, ensure the target database and landing tables exist.
+Execute the SQL scripts in order:
+1. `sql/00_prerequisites.sql` — creates database and warehouse
+2. `sql/01_landing_tables.sql` — creates typed landing tables per transaction type
+3. `sql/02_gold_layer.sql` — creates Gold Dynamic Tables with AI enrichment
+
+Run these via `snowflake_sql_execute`. If tables already exist (IF NOT EXISTS), this is a no-op.
 
 ### Gate: Runtime Verification (`gates/gate-runtime.md`)
 - Verify Openflow deployment exists
@@ -48,18 +56,9 @@ B) Python UDF Lite — Stored procedure-based parsing in Snowflake
 - Verify they're in the account's network policy allow-list
 - If not: show the ALTER NETWORK POLICY statement, require explicit confirmation
 
-## Python UDF Lite Path
-
-### Phase: UDF Deployment (`phases/phase-udf-lite.md`)
-- Deploy `parse_edi()` stored procedure (same logic as NAR, pure Python)
-- Create RAW_EDI staging table + internal stage
-- Create Snowpipe for auto-ingest (or manual COPY INTO)
-- Create scheduled TASK to parse raw → typed tables
-- Wire permissions
-
 ## Post-Deployment
 
-After either path completes:
+After deployment completes:
 1. Run a smoke test (small file → verify landing table populated)
 2. Update `.deployment/manifest.json` with deployment metadata
 3. Suggest: "Run /edi:status to monitor pipeline health"

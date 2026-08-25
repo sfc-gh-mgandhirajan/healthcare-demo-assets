@@ -120,6 +120,7 @@ class ParseX12ToJSON(FlowFileTransform):
         current_raw = []
         tx_type = ""
         boundary_seg = None
+        loop_ctx = ""
 
         for seg_text in segments:
             seg_text = seg_text.strip()
@@ -149,6 +150,7 @@ class ParseX12ToJSON(FlowFileTransform):
                 boundary_seg = FIELD_MAPS.get(tx_type, {}).get("record_boundary_segment")
                 current_record = None
                 current_raw = []
+                loop_ctx = ""
 
             elif seg_id == "SE":
                 if current_record is not None:
@@ -162,6 +164,11 @@ class ParseX12ToJSON(FlowFileTransform):
                 boundary_seg = None
 
             elif tx_base is not None:
+                # Track the enclosing NM1 entity code so N3/N4 address segments
+                # are attributed to the correct loop.
+                if seg_id == "NM1" and len(elements) > 1:
+                    loop_ctx = elements[1].strip()
+
                 # Reset subscriber/patient scope on SBR to prevent
                 # cross-contamination in multi-subscriber 837s.
                 # SBR starts a new subscriber loop — finalize any open claim
@@ -186,11 +193,11 @@ class ParseX12ToJSON(FlowFileTransform):
                 if current_record is not None:
                     if include_raw:
                         current_raw.append(seg_text)
-                    self._map_segment(current_record, tx_type, seg_id, elements, sub_sep)
+                    self._map_segment(current_record, tx_type, seg_id, elements, sub_sep, loop_ctx)
                 else:
                     if include_raw:
                         current_raw.append(seg_text)
-                    self._map_segment(tx_base, tx_type, seg_id, elements, sub_sep)
+                    self._map_segment(tx_base, tx_type, seg_id, elements, sub_sep, loop_ctx)
 
         return records
 
@@ -251,12 +258,19 @@ class ParseX12ToJSON(FlowFileTransform):
             "version_release_industry_code": self._el(elements, 8),
         }
 
-    def _map_segment(self, record, tx_type, seg_id, elements, sub_sep):
+    def _map_segment(self, record, tx_type, seg_id, elements, sub_sep, loop_ctx=""):
         field_map = FIELD_MAPS.get(tx_type, {}).get("fields", {})
 
         qualifier = ""
-        if seg_id in ("NM1", "REF", "AMT", "DTM", "DTP", "N3", "N4") and len(elements) > 1:
+        if seg_id in ("NM1", "REF", "AMT", "DTM", "DTP") and len(elements) > 1:
             qualifier = elements[1].strip()
+        elif seg_id in ("N3", "N4"):
+            # N3-01/N4-01 are the address line and city, NOT qualifiers. The
+            # owning entity is the preceding NM1 (e.g. NM1*85 billing provider,
+            # NM1*IL subscriber), so key off that loop context instead. Without
+            # this a bare N3/N4 map entry matches every address loop in the
+            # interchange and the repeat handler concatenates them.
+            qualifier = loop_ctx
 
         lookup_keys = []
         if qualifier:
@@ -274,14 +288,12 @@ class ParseX12ToJSON(FlowFileTransform):
                 idx = int(idx_str)
                 val = self._el(elements, idx)
                 if val:
-                    # Preserve composite sub-elements intact (e.g., "ABK:J0600").
-                    # Downstream (Gold layer) extracts the value portion.
                     if field_name in record:
-                        existing = record[field_name]
-                        if isinstance(existing, list):
-                            existing.append(val)
+                        # Date/time fields: last-wins (TRY_TO_DATE can't parse semicolons)
+                        if field_name.endswith(("_date", "_time", "_dob")):
+                            record[field_name] = val
                         else:
-                            record[field_name] = existing + ";" + val
+                            record[field_name] = record[field_name] + ";" + val
                     else:
                         record[field_name] = val
 
