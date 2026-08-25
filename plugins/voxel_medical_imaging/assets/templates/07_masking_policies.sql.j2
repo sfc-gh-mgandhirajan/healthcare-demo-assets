@@ -1,0 +1,272 @@
+-- =============================================================================
+-- 07: Masking policies (phase 1)
+--
+-- Column-level masking on the typed identifier columns of DICOM_INSTANCE.
+--
+-- =============================================================================
+-- THIS IS DELIBERATELY INCOMPLETE, AND THE GAP IS ASSERTED IN CHECKS
+--
+-- Phase 1 masks typed columns. It does NOT mask RAW_METADATA. So this returns
+-- cleartext to any role holding SELECT:
+--
+--     SELECT RAW_METADATA:"00100010" FROM DICOM_INSTANCE;   -- PatientName
+--
+-- That is exactly the finding a security reviewer produces in one query, and
+-- shipping it silently would be worse than not masking at all -- it creates the
+-- appearance of a control that does not hold. So:
+--
+--   * CHECKS emits a WARN row naming this gap explicitly, every run.
+--   * The deid phase closes it properly, with a masking policy ON THE VARIANT
+--     (policy body calls a UDF doing nested OBJECT_INSERT) plus a governed tag
+--     allowlist that DROPS non-SAFE tags at ingest rather than storing them and
+--     masking after.
+--
+-- The allowlist is the real fix. Masking a VARIANT that contains PHI is
+-- defence in depth; not storing the PHI in the first place is the control.
+--
+-- =============================================================================
+-- WHY PATIENT_ID IS HASHED AND NOT NULLED
+--
+-- PATIENT_ID is a join key. Analysts need to count studies per patient and
+-- follow a patient across series without seeing who the patient is. Returning
+-- NULL collapses every patient into one bucket and silently produces wrong
+-- aggregate answers -- a masking policy that corrupts analysis gets turned off.
+--
+-- SHA2 with a per-deployment salt keeps the join working while making the value
+-- non-identifying.
+--
+-- Everything else (name, birth date, accession, physician, institution, device
+-- serial) has no analytic use in the clear and is replaced with a constant.
+-- =============================================================================
+-- WHERE THE SALT LIVES, AND WHY IT MOVED
+--
+-- This file used to inline the salt as a literal in the policy body:
+--
+--     SHA2(val || '<deployment_tag>::voxel-phi-salt', 256)
+--
+-- The stated reason was that a policy body is not readable by anyone who can
+-- query the schema, whereas a table might be. That reasoning is sound as far as
+-- it goes, and it missed the larger exposure: BOTH HALVES OF THAT SALT WERE IN
+-- SOURCE CONTROL. 'voxel-phi-salt' was hardcoded here and the deployment_tag
+-- default ships in config.sample.json. So for anyone holding the repository the
+-- salt was known, and "non-reversible" was false.
+--
+-- It matters because identifier keyspaces are tiny. An 8-digit MRN is 10^8
+-- candidates: with a known salt that is a complete lookup table in about a
+-- second on a GPU. A published salt turns a pseudonym back into an MRN.
+--
+-- So the salt is now generated at DEPLOY time from UUID_STRING() into DEID_SALT
+-- and read through a UDF. This is the pattern the deid phase already used for
+-- PSEUDO_UID; it is applied here too rather than being reinvented.
+--
+-- VERIFIED on this account, and worth knowing because it is not obvious: a role
+-- with SELECT on the table but NO grant on DEID_SALT and NO usage on PSEUDO_ID
+-- still reads the masked column correctly, while a direct SELECT on DEID_SALT
+-- fails with "does not exist or not authorized". Masking policy bodies resolve
+-- their references with the POLICY OWNER's rights. So the salt is unreadable by
+-- the roles being masked, unreadable from the policy body, and absent from git.
+--
+-- Test that with USE SECONDARY ROLES NONE. An interactive Snowflake session
+-- often has secondary roles active, and they will authorize the read through an
+-- inherited role and hand you a false negative.
+--
+-- Consequence to accept: rotating a salt invalidates every previously issued
+-- pseudonym. That is the intended property, not a defect.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- -----------------------------------------------------------------------------
+-- The salt. Generated here, never rendered from config, never in the repo.
+--
+-- Owned by {{ owner_role }} and deliberately granted to NOBODY. The deid phase
+-- creates this same table with IF NOT EXISTS and seeds a separate 'uid' row, so
+-- the two phases coexist in either deploy order.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DEID_SALT (
+    SALT_NAME  VARCHAR NOT NULL,
+    SALT_VALUE VARCHAR NOT NULL,
+    CREATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_DEID_SALT PRIMARY KEY (SALT_NAME)
+)
+COMMENT = 'Voxel: pseudonymization salts. Owner-readable only. Rotating a salt breaks all previously issued pseudonyms by design.';
+
+-- Conditional so a re-deploy does not silently re-salt and invalidate every
+-- pseudonym already handed out.
+INSERT INTO DEID_SALT (SALT_NAME, SALT_VALUE)
+SELECT 'phi_id', SHA2(UUID_STRING() || CURRENT_TIMESTAMP()::VARCHAR, 256)
+WHERE NOT EXISTS (SELECT 1 FROM DEID_SALT WHERE SALT_NAME = 'phi_id');
+
+-- The indirection that keeps the salt out of the policy body. A masking policy
+-- body must be scalar; a scalar subquery inside a UDF is accepted, which is why
+-- this is a function and not an inline SELECT.
+CREATE OR REPLACE FUNCTION PSEUDO_ID(ORIGINAL VARCHAR)
+RETURNS VARCHAR
+COMMENT = 'Voxel: salted SHA2-256 one-way pseudonym for a typed identifier column. Salt is read from DEID_SALT with the policy owner''s rights.'
+AS
+$$
+    SHA2(ORIGINAL || (SELECT SALT_VALUE
+                      FROM {{ db }}.{{ schema }}.DEID_SALT
+                      WHERE SALT_NAME = 'phi_id'), 256)
+$$;
+
+-- -----------------------------------------------------------------------------
+-- PHI_ID_MASK has to be REPLACED, not IF NOT EXISTS, because its body changed.
+-- Snowflake refuses to replace a policy while it is attached, so detach first.
+--
+-- Conditional, driven off POLICY_REFERENCES, because UNSET on a column with no
+-- policy is itself an error and would break the very first deploy. This is also
+-- why IF NOT EXISTS was the wrong construct to begin with: it made the salt fix
+-- a silent no-op on every existing deployment.
+-- -----------------------------------------------------------------------------
+EXECUTE IMMEDIATE
+$$
+BEGIN
+    LET cur CURSOR FOR
+        SELECT REF_COLUMN_NAME AS C
+        FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+                REF_ENTITY_NAME   => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+                REF_ENTITY_DOMAIN => 'TABLE'))
+        WHERE POLICY_NAME = 'PHI_ID_MASK';
+    FOR r IN cur DO
+        EXECUTE IMMEDIATE
+            'ALTER TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE MODIFY COLUMN '
+            || r.C || ' UNSET MASKING POLICY';
+    END FOR;
+    RETURN 'PHI_ID_MASK detached where present; safe to replace.';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- CREATE MASKING POLICY IF NOT EXISTS for the two policies whose bodies are
+-- unchanged. Policy ASSIGNMENT below uses FORCE, which is the idempotent part.
+-- -----------------------------------------------------------------------------
+
+-- Reader roles that may see identifiers in the clear. Kept as a single list in
+-- one place: adding a role here is the entire change needed to grant identified
+-- access, and it is auditable as a policy diff.
+CREATE MASKING POLICY IF NOT EXISTS PHI_TEXT_MASK AS (val VARCHAR)
+RETURNS VARCHAR ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('{{ owner_role }}', 'ACCOUNTADMIN') THEN val
+    ELSE '***MASKED***'
+  END
+COMMENT = 'Voxel: replaces free-text PHI with a constant for non-identified roles.';
+
+CREATE OR REPLACE MASKING POLICY PHI_ID_MASK AS (val VARCHAR)
+RETURNS VARCHAR ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('{{ owner_role }}', 'ACCOUNTADMIN') THEN val
+    -- Deterministic and salted, so it preserves joinability and distinct-count
+    -- semantics that a NULL would destroy. One-way only for as long as the salt
+    -- stays secret, which is why the salt is not in this body and not in git.
+    ELSE {{ db }}.{{ schema }}.PSEUDO_ID(val)
+  END
+COMMENT = 'Voxel: pseudonymizes identifiers while preserving joins and distinct counts. Salt held in DEID_SALT, never inlined.';
+
+
+CREATE MASKING POLICY IF NOT EXISTS PHI_DATE_MASK AS (val VARCHAR)
+RETURNS VARCHAR ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('{{ owner_role }}', 'ACCOUNTADMIN') THEN val
+    -- Keep the year, drop month and day. Year alone supports age-band and
+    -- cohort analysis; full date is an HIPAA identifier.
+    ELSE LEFT(val, 4) || '0101'
+  END
+COMMENT = 'Voxel: truncates DICOM DA values to year granularity for non-identified roles.';
+
+-- -----------------------------------------------------------------------------
+-- Assignment. FORCE so a re-deploy over an already-policied column succeeds
+-- instead of failing with "column already has a masking policy".
+-- -----------------------------------------------------------------------------
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN PATIENT_ID
+  SET MASKING POLICY PHI_ID_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN PATIENT_NAME
+  SET MASKING POLICY PHI_TEXT_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN PATIENT_BIRTH_DATE
+  SET MASKING POLICY PHI_DATE_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN ACCESSION_NUMBER
+  SET MASKING POLICY PHI_ID_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN REFERRING_PHYSICIAN_NAME
+  SET MASKING POLICY PHI_TEXT_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN INSTITUTION_NAME
+  SET MASKING POLICY PHI_TEXT_MASK FORCE;
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN DEVICE_SERIAL_NUMBER
+  SET MASKING POLICY PHI_ID_MASK FORCE;
+
+-- PATIENT_SEX and PATIENT_AGE are deliberately NOT masked. Both are routinely
+-- required for clinical cohort analysis and neither is a direct identifier on
+-- its own. They ARE quasi-identifiers in combination with a small population, so
+-- the deid phase classifies them QUASI_IDENTIFIER and the aggregation-policy
+-- question belongs there, not here.
+
+-- -----------------------------------------------------------------------------
+-- Verify
+--
+-- Reports which columns actually carry a policy, read from the account's own
+-- metadata rather than assumed from the DDL above. POLICY_REFERENCES is the
+-- authoritative answer to "is this column protected right now".
+-- -----------------------------------------------------------------------------
+SELECT
+    POLICY_NAME,
+    REF_ENTITY_NAME  AS TABLE_NAME,
+    REF_COLUMN_NAME  AS COLUMN_NAME,
+    POLICY_STATUS
+FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+        REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+        REF_ENTITY_DOMAIN => 'TABLE'))
+ORDER BY COLUMN_NAME;
+
+-- The gap, stated in the deploy output so it is seen at least once.
+SELECT 'WARN' AS STATUS,
+       'RAW_METADATA VARIANT is NOT masked in phase 1. SELECT RAW_METADATA:"00100010" '
+       || 'returns PatientName in cleartext. Closed by the deid phase (VARIANT masking '
+       || 'policy + governed tag allowlist). Asserted in CHECKS.' AS DETAIL;
+
+-- -----------------------------------------------------------------------------
+-- Assert the salt is NOT recoverable from metadata.
+--
+-- The failure this guards against is a future edit inlining the salt back into
+-- the policy body for convenience. That change would deploy cleanly, mask
+-- correctly, and pass every behavioural check -- while making the pseudonyms
+-- reversible to anyone who can read the policy DDL or the repository.
+--
+-- GET_DDL is live metadata, so this reflects what is actually deployed rather
+-- than what this file says.
+-- -----------------------------------------------------------------------------
+WITH body AS (
+    SELECT GET_DDL('POLICY', '{{ db }}.{{ schema }}.PHI_ID_MASK') AS TXT
+)
+SELECT
+    'SALT_NOT_IN_POLICY_BODY' AS CHECK_NAME,
+    IFF(POSITION('PSEUDO_ID' IN b.TXT) > 0
+        AND POSITION('voxel-phi-salt' IN b.TXT) = 0
+        AND POSITION('SHA2' IN b.TXT) = 0,
+        'PASS', 'FAIL') AS STATUS,
+    IFF(POSITION('PSEUDO_ID' IN b.TXT) > 0
+        AND POSITION('voxel-phi-salt' IN b.TXT) = 0
+        AND POSITION('SHA2' IN b.TXT) = 0,
+        'PHI_ID_MASK delegates to PSEUDO_ID; no salt literal and no inline SHA2 '
+          || 'in the policy body. Salt is only in DEID_SALT.',
+        'PHI_ID_MASK contains an inline hash or salt literal. Pseudonyms are '
+          || 'reversible by anyone who can read this policy or the repo. '
+          || 'Remedy: re-run 07_MASKING_POLICIES.') AS DETAIL
+FROM body b;
+
+-- Confirm the salt exists and is not the value anyone could guess, WITHOUT
+-- printing it. Length and presence only.
+SELECT 'PHI_SALT_PRESENT' AS CHECK_NAME,
+       IFF(COUNT(*) = 1 AND MAX(LENGTH(SALT_VALUE)) = 64, 'PASS', 'FAIL') AS STATUS,
+       COUNT(*)::STRING || ' phi_id salt row(s), '
+         || COALESCE(MAX(LENGTH(SALT_VALUE)), 0)::STRING
+         || ' chars (expect exactly 1 row of 64: a SHA2-256 hex digest).' AS DETAIL
+FROM DEID_SALT
+WHERE SALT_NAME = 'phi_id';

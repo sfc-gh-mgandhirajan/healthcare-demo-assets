@@ -1,0 +1,198 @@
+-- =============================================================================
+-- TEARDOWN
+--
+-- =============================================================================
+-- INERT UNTIL YOU EDIT ONE LINE
+--
+-- confirmed = FALSE below. As shipped this file DESCRIBES what it would remove
+-- and changes nothing. Set it to TRUE to actually drop.
+--
+-- This file is also its own manifest phase so no deploy path can reach it.
+--
+-- =============================================================================
+-- THE VERIFICATION TAIL IS THE POINT
+--
+-- The incumbent's bundle-level destroy does NOT remove its managed Postgres
+-- instance, its app services, its model serving endpoints, its vector index, or
+-- its BI space. An
+-- evaluation the customer believes they tore down keeps generating invoice lines
+-- indefinitely, and nothing tells them.
+--
+-- So teardown here does not merely drop. It drops, then RE-ENUMERATES, and
+-- reports a RESIDUAL row for anything still standing. "I removed it" becomes a
+-- claim with evidence attached, which is one of the two headline compete numbers
+-- (the other being $/month at zero users).
+--
+-- =============================================================================
+-- WHAT IS DELIBERATELY KEPT
+--
+-- The BENCH schema survives, because the residual-cost measurement cannot be
+-- read from a ledger that teardown deleted. Drop it explicitly with
+-- drop_bench = TRUE once the measurement is finished.
+--
+-- The warehouse is opt-in for the same reason a shared warehouse name is easy to
+-- break by accident.
+--
+-- =============================================================================
+-- ORDER MATTERS
+--
+--   1. suspend tasks        (a running task can recreate objects mid-teardown)
+--   2. STOP ALL on pools    (a pool with a live service cannot be dropped)
+--   3. drop the EAI         (it references the network rule inside the database)
+--   4. drop the database    (cascades tables, views, procedures, UDFs, stages,
+--                            policies, tags, network rule)
+--   5. drop the pools       (only now that nothing is scheduled on them)
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    -- ---------------------------------------------------------------------
+    -- EDIT THESE
+    -- ---------------------------------------------------------------------
+    confirmed       BOOLEAN DEFAULT FALSE;   -- set TRUE to actually drop
+    drop_warehouse  BOOLEAN DEFAULT FALSE;   -- opt-in: may be shared
+    drop_bench      BOOLEAN DEFAULT FALSE;   -- opt-in: holds the residual ledger
+
+    vx_db      STRING DEFAULT '{{ db }}';
+    vx_schema  STRING DEFAULT '{{ schema }}';
+    vx_wh      STRING DEFAULT '{{ warehouse }}';
+    web_pool   STRING DEFAULT '{{ cfg.dicomweb_pool }}';
+    gpu_pool   STRING DEFAULT '{{ cfg.gpu_pool }}';
+    eai_name   STRING DEFAULT '{{ cfg.eai_name }}';
+    svc_name   STRING DEFAULT '{{ cfg.dicomweb_service }}';
+    stmt       STRING;
+BEGIN
+    IF (NOT confirmed) THEN
+        RETURN 'DRY RUN -- nothing was dropped. This would remove: '
+            || 'database ' || vx_db || ' (all tables, views, procedures, UDFs, '
+            || 'stages, masking policies, tags, network rule); '
+            || 'service ' || svc_name || '; '
+            || 'compute pools ' || web_pool || ' and ' || gpu_pool || '; '
+            || 'external access integration ' || eai_name || '. '
+            || 'KEPT unless opted in: warehouse ' || vx_wh
+            || ' (drop_warehouse), schema ' || vx_db || '.BENCH holding the cost '
+            || 'ledger (drop_bench). Set confirmed = TRUE to proceed.';
+    END IF;
+
+    -- 1. Stop the pipeline first. A task firing mid-teardown can recreate
+    --    temporary objects and leave the drop half-done.
+    BEGIN
+        stmt := 'ALTER TASK IF EXISTS ' || vx_db || '.' || vx_schema || '.TASK_VOXEL_SCAN SUSPEND';
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+    BEGIN
+        stmt := 'ALTER TASK IF EXISTS ' || vx_db || '.' || vx_schema || '.TASK_VOXEL_EXTRACT SUSPEND';
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+
+    -- 2. STOP ALL releases nodes and drops services. A pool with a live service
+    --    cannot be dropped, and DROP SERVICE alone leaves the pool billing.
+    --    Per-statement exception handling because a missing pool RAISES rather
+    --    than being covered by IF EXISTS.
+    BEGIN
+        stmt := 'ALTER COMPUTE POOL IF EXISTS ' || web_pool || ' STOP ALL';
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+    BEGIN
+        stmt := 'ALTER COMPUTE POOL IF EXISTS ' || gpu_pool || ' STOP ALL';
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+
+    -- 3. EAI before the database: it references the network rule that lives
+    --    inside the schema, and dropping the database first orphans it.
+    BEGIN
+        stmt := 'DROP EXTERNAL ACCESS INTEGRATION IF EXISTS ' || eai_name;
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+
+    -- 4. Preserve BENCH unless explicitly dropping it. Cloning to a temporary
+    --    database is the only way to keep it through a DROP DATABASE, and it
+    --    keeps the residual measurement readable afterwards.
+    IF (NOT drop_bench) THEN
+        BEGIN
+            stmt := 'CREATE DATABASE IF NOT EXISTS ' || vx_db || '_BENCH_KEEP';
+            EXECUTE IMMEDIATE :stmt;
+            stmt := 'CREATE SCHEMA IF NOT EXISTS ' || vx_db || '_BENCH_KEEP.BENCH '
+                 || 'CLONE ' || vx_db || '.BENCH';
+            EXECUTE IMMEDIATE :stmt;
+        EXCEPTION WHEN OTHER THEN NULL;
+        END;
+    END IF;
+
+    BEGIN
+        stmt := 'DROP DATABASE IF EXISTS ' || vx_db;
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+
+    -- 5. Pools last.
+    BEGIN
+        stmt := 'DROP COMPUTE POOL IF EXISTS ' || web_pool;
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+    BEGIN
+        stmt := 'DROP COMPUTE POOL IF EXISTS ' || gpu_pool;
+        EXECUTE IMMEDIATE :stmt;
+    EXCEPTION WHEN OTHER THEN NULL;
+    END;
+
+    IF (drop_warehouse) THEN
+        BEGIN
+            stmt := 'DROP WAREHOUSE IF EXISTS ' || vx_wh;
+            EXECUTE IMMEDIATE :stmt;
+        EXCEPTION WHEN OTHER THEN NULL;
+        END;
+    END IF;
+
+    RETURN 'Teardown executed. Now READ THE RESIDUAL REPORT BELOW -- do not '
+        || 'assume success. Anything reported RESIDUAL is still billing.';
+END;
+$$;
+
+-- =============================================================================
+-- RESIDUAL REPORT
+--
+-- Re-enumerates every billable object class this plugin can create. A RESIDUAL
+-- row means something survived and is still costing money. This runs whether or
+-- not the drop was confirmed, so a dry run shows the current footprint.
+-- =============================================================================
+-- Named pools, not LIKE 'VOXEL%'. The wildcard also matched compute pools
+-- belonging to OTHER Voxel deployments in the same account and reported them as
+-- RESIDUAL, which is a false positive on somebody else's healthy service. A
+-- residual report that cries wolf is a residual report people stop reading, and
+-- this one exists precisely because the failure it catches -- a pool that survives
+-- and bills for weeks -- is only ever found by reading it.
+SHOW COMPUTE POOLS;
+SELECT 'COMPUTE_POOL'   AS OBJECT_CLASS,
+       "name"            AS OBJECT_NAME,
+       "state"           AS STATE,
+       IFF("state" IN ('SUSPENDED'), 'RESIDUAL (suspended: not billing, but still present)',
+           'RESIDUAL (BILLING)') AS VERDICT
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+WHERE "name" IN ('{{ cfg.dicomweb_pool }}', '{{ cfg.gpu_pool }}');
+
+SHOW WAREHOUSES LIKE '{{ warehouse }}';
+SELECT 'WAREHOUSE', "name", "state",
+       IFF("state" = 'SUSPENDED', 'RESIDUAL (suspended: not billing)', 'RESIDUAL (BILLING)')
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW DATABASES LIKE '{{ db }}';
+SELECT 'DATABASE', "name", 'present', 'RESIDUAL (storage billing)'
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{{ cfg.eai_name }}';
+SELECT 'EAI', "name", "enabled"::STRING, 'RESIDUAL (no direct cost, but egress capability remains)'
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+-- Empty output from all four = clean teardown, verified rather than assumed.
+SELECT 'If every section above returned no rows, teardown is verified clean. '
+    || 'Any row is a billable object that survived -- which is exactly what '
+    || '`bundle destroy` does not tell you.' AS INTERPRETATION;

@@ -1,0 +1,301 @@
+-- =============================================================================
+-- 00: Account setup
+--
+-- Provisions the account-level objects Voxel needs:
+--   - Warehouse for SQL and DICOM UDTF execution
+--   - Database + schema, ownership handed to owner_role
+--   - Web compute pool  (dicomweb service: nginx router + pydicom gateway)
+--   - GPU compute pool   (Vista3D, seg phase; created here so the seg phase
+--                         needs no ACCOUNTADMIN)
+--   - Image repository    (router + gateway + pre-baked Vista3D images)
+--   - BUILD-ONLY network rule + EAI
+--
+-- Requires ACCOUNTADMIN. Everything from 01 onward runs as {{ owner_role }}.
+--
+-- =============================================================================
+-- TWO COST DECISIONS ARE LOAD-BEARING HERE. Both are easy to get wrong and
+-- both cost real money silently.
+--
+-- 1. INITIALLY_SUSPENDED = TRUE on every compute pool.
+--    The parameter DEFAULTS TO FALSE. A pool created the default way
+--    immediately provisions MIN_NODES and enters IDLE, and IDLE BILLS. A pool
+--    created at deploy time and never used would bill continuously from the
+--    moment this script runs. Compute pools do not bill in SUSPENDED or
+--    STARTING, so creating them suspended means the account-setup phase itself
+--    costs nothing and the pool starts billing only when a service lands on it.
+--    This is directly load-bearing for the "$/month at zero users" number in
+--    the bench phase -- get it wrong and the headline claim is wrong.
+--
+-- 2. The network rule is scoped, and the EAI is BUILD-ONLY.
+--    It is never attached to the dicomweb or inference services. A serving
+--    container holds a Snowflake session token and has read access to PHI; an
+--    EAI on it is unrestricted egress from inside the PHI perimeter regardless
+--    of what the code does. Model weights and npm packages are fetched ONCE at
+--    build time and staged, so steady-state runtime has zero outbound network
+--    capability -- which makes "no data egress" a structural property provable
+--    with a one-line DESCRIBE SERVICE, not a promise about code.
+--
+--    The reference DICOM plugin used '0.0.0.0:443' + '0.0.0.0:80' because
+--    HuggingFace redirects model downloads across rotating CDN hostnames and a
+--    blocked host does not fail cleanly (hf-xet retries silently and the job
+--    hangs with no log output). That is a real problem, but the answer is to
+--    move the fetch to build time rather than to widen the rule. Port 80 is
+--    omitted entirely -- there is nothing here that needs cleartext egress.
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    -- ---------------------------------------------------------------------
+    -- Rename here to fit your account conventions
+    -- ---------------------------------------------------------------------
+    vx_db         STRING DEFAULT '{{ db }}';
+    vx_schema     STRING DEFAULT '{{ schema }}';
+    vx_wh         STRING DEFAULT '{{ warehouse }}';
+    vx_wh_size    STRING DEFAULT '{{ cfg.warehouse_size }}';
+    web_pool      STRING DEFAULT '{{ cfg.dicomweb_pool }}';
+    web_family    STRING DEFAULT '{{ cfg.dicomweb_pool_family }}';
+    gpu_pool      STRING DEFAULT '{{ cfg.gpu_pool }}';
+    gpu_family    STRING DEFAULT '{{ cfg.gpu_pool_family }}';
+    image_repo    STRING DEFAULT '{{ cfg.image_repo }}';
+    net_rule      STRING DEFAULT '{{ cfg.network_rule }}';
+    eai_name      STRING DEFAULT '{{ cfg.eai_name }}';
+    owner_role    STRING DEFAULT '{{ owner_role }}';
+    fq_schema     STRING;
+    fq_rule       STRING;
+    fq_repo       STRING;
+    stmt          STRING;
+BEGIN
+    fq_schema := vx_db || '.' || vx_schema;
+    fq_rule   := fq_schema || '.' || net_rule;
+    fq_repo   := fq_schema || '.' || image_repo;
+
+    -- ---------------------------------------------------------------------
+    -- Database and schema
+    --
+    -- Created here, not only in 01, because the network rule and image
+    -- repository below are SCHEMA-level objects and need a deterministic
+    -- home. Creating them unqualified would silently place them in whatever
+    -- the connection's default database happens to be, and would fail
+    -- outright on a connection with no default database set.
+    --
+    -- Ownership goes to owner_role immediately, because 01 onward creates
+    -- policies, procedures, and services in this schema.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE DATABASE IF NOT EXISTS ' || vx_db
+         || ' COMMENT = ''Voxel: Snowflake-native medical imaging platform.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'CREATE SCHEMA IF NOT EXISTS ' || fq_schema
+         || ' COMMENT = ''DICOM catalog, frame plane, DICOMweb service, governance.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Image repository
+    --
+    -- Created BEFORE ownership is handed over, because it is a schema-level
+    -- object and we want it to exist regardless of which phase runs next.
+    --
+    -- The Vista3D image is pre-baked into this repository at install time so
+    -- that CREATE SERVICE in the seg phase is an image PULL, not a build. The
+    -- reference plugin measured 10-20 minutes for a model-registry container
+    -- build plus a 45-minute readiness polling budget. Pre-baking removes that
+    -- from the critical path, and it is also why the GPU pool below does not
+    -- need 3 nodes: the reference needed 3 because the ML job, the kaniko
+    -- build, and the inference service each wanted a node simultaneously
+    -- during deploy, and with fewer the build deadlocked.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE IMAGE REPOSITORY IF NOT EXISTS ' || fq_repo;
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON DATABASE ' || vx_db
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON SCHEMA ' || fq_schema
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON IMAGE REPOSITORY ' || fq_repo
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Warehouse
+    -- INITIALLY_SUSPENDED so creation costs nothing. 60s auto-suspend keeps
+    -- idle cost near zero between deploy steps.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE WAREHOUSE IF NOT EXISTS ' || vx_wh
+         || ' WAREHOUSE_SIZE = ' || vx_wh_size
+         || ' AUTO_SUSPEND = 60'
+         || ' AUTO_RESUME = TRUE'
+         || ' INITIALLY_SUSPENDED = TRUE'
+         || ' COMMENT = ''Voxel: SQL + DICOM header/frame UDTF execution''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE, MONITOR ON WAREHOUSE ' || vx_wh || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Web compute pool: the dicomweb service (nginx router + pydicom gateway)
+    --
+    -- MAX_NODES = 2 rather than 1 so the service can be upgraded with a
+    -- rolling replacement instead of a hard outage, and so a second instance
+    -- can absorb a concurrency spike. Note the platform caps stage volume
+    -- mounts at 8 PER NODE regardless of which service owns them, which is a
+    -- ceiling on how many source stages one node can serve.
+    --
+    -- Deliberately NOT block storage. A service using block volumes must set
+    -- MIN_INSTANCES = MAX_INSTANCES, which forfeits autoscaling on the
+    -- clinical read path. The frame plane uses a shared memory volume plus
+    -- series-open prefetch instead.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE COMPUTE POOL IF NOT EXISTS ' || web_pool
+         || ' MIN_NODES = 1'
+         || ' MAX_NODES = 2'
+         || ' INSTANCE_FAMILY = ' || web_family
+         || ' AUTO_RESUME = TRUE'
+         || ' AUTO_SUSPEND_SECS = 600'
+         || ' INITIALLY_SUSPENDED = TRUE'
+         || ' COMMENT = ''Voxel: DICOMweb service (nginx router + pydicom gateway)''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON COMPUTE POOL ' || web_pool
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- GPU compute pool: Vista3D (seg phase)
+    --
+    -- AUTO_SUSPEND_SECS = 300 and a 1-node floor, deliberately instead of the
+    -- reference plugin's 3 nodes with a 07:00-19:00 weekday cron window. That
+    -- pattern billed 3 GPU nodes for 12 hours every weekday whether or not a
+    -- single series was segmented (~36 GPU-node-hours/day of floor), AND left
+    -- zero capacity for an after-hours read. AUTO_RESUME with a short suspend
+    -- inverts both: no idle floor, and a 3am request provisions on demand.
+    --
+    -- Created here even though the seg phase is later, so that phase needs no
+    -- ACCOUNTADMIN. INITIALLY_SUSPENDED means an unused GPU pool costs nothing
+    -- while it waits.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE COMPUTE POOL IF NOT EXISTS ' || gpu_pool
+         || ' MIN_NODES = 1'
+         || ' MAX_NODES = 2'
+         || ' INSTANCE_FAMILY = ' || gpu_family
+         || ' AUTO_RESUME = TRUE'
+         || ' AUTO_SUSPEND_SECS = 300'
+         || ' INITIALLY_SUSPENDED = TRUE'
+         || ' COMMENT = ''Voxel: Vista3D GPU inference. Pre-baked image, no build on the critical path.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON COMPUTE POOL ' || gpu_pool
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- BUILD-ONLY egress
+    --
+    -- Scoped to exact hosts on 443. No 0.0.0.0. No port 80.
+    --
+    -- This is attached ONLY to build jobs and to the one-time model-staging
+    -- job. It is never attached to the dicomweb service or to the Vista3D
+    -- inference service. Verify that with:
+    --     DESCRIBE SERVICE <svc>;   -- external_access_integrations must be null
+    --
+    -- Hosts, and why each is here:
+    --   pypi.org / files.pythonhosted.org  - pip for the gateway image
+    --   registry.npmjs.org                 - npm for the OHIF bundle build
+    --   huggingface.co + CDN hosts         - one-time Vista3D weight fetch
+    --
+    -- The HF CDN hostnames rotate. If a weight fetch hangs with no log output,
+    -- that is hf-xet retrying against a blocked host, not a slow download --
+    -- add the host from the NameResolutionError rather than widening to
+    -- 0.0.0.0. Once weights are staged this rule can be narrowed to PyPI/npm.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE OR REPLACE NETWORK RULE ' || fq_rule
+         || ' MODE = EGRESS'
+         || ' TYPE = HOST_PORT'
+         || ' VALUE_LIST = ('
+         ||   '''pypi.org:443'', ''files.pythonhosted.org:443'', '
+         ||   '''registry.npmjs.org:443'', '
+         ||   '''huggingface.co:443'', ''cdn-lfs.huggingface.co:443'', '
+         ||   '''cdn-lfs-us-1.huggingface.co:443'', ''us.aws.cdn.hf.co:443'', '
+         ||   '''transfer.xethub.hf.co:443'', ''cas-bridge.xethub.hf.co:443'', '
+         ||   '''cas-server.xethub.hf.co:443'''
+         || ')'
+         || ' COMMENT = ''Voxel BUILD-ONLY egress. Never attach to a serving service.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT OWNERSHIP ON NETWORK RULE ' || fq_rule
+         || ' TO ROLE ' || owner_role || ' COPY CURRENT GRANTS';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION ' || eai_name
+         || ' ALLOWED_NETWORK_RULES = (' || fq_rule || ')'
+         || ' ENABLED = TRUE'
+         || ' COMMENT = ''Voxel BUILD-ONLY. Attach to build/model-staging jobs only, never to dicomweb or inference services.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    stmt := 'GRANT USAGE ON INTEGRATION ' || eai_name || ' TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    -- ---------------------------------------------------------------------
+    -- Consumer role for the DICOMweb service
+    --
+    -- Created HERE, in the ACCOUNTADMIN phase, because CREATE ROLE is an
+    -- ACCOUNT-level privilege that SYSADMIN does not hold by default:
+    --   "Your primary role SYSADMIN must have CREATE ROLE granted on ACCOUNT"
+    -- Putting it in the dicomweb phase means that phase cannot run as owner_role,
+    -- which would force a platform admin into every viewer deployment.
+    --
+    -- The role deliberately gets NO privileges here. Object grants belong with
+    -- the objects, in DICOMWEB_GRANTS, where owner_role can grant on what it
+    -- owns. Row-level scope comes from USER_STUDY_SCOPE, not from this role.
+    -- ---------------------------------------------------------------------
+    stmt := 'CREATE ROLE IF NOT EXISTS VOXEL_RADIOLOGIST'
+         || ' COMMENT = ''Voxel: access to the DICOMweb service endpoint.'
+         || ' Row-level scope comes from USER_STUDY_SCOPE, not from this role.''';
+    EXECUTE IMMEDIATE :stmt;
+
+    -- owner_role must be able to grant object privileges to it later.
+    stmt := 'GRANT ROLE VOXEL_RADIOLOGIST TO ROLE ' || owner_role;
+    EXECUTE IMMEDIATE :stmt;
+
+    RETURN 'Account setup complete: '
+        || fq_schema || ', '
+        || vx_wh || ' (' || vx_wh_size || '), '
+        || web_pool || ' (' || web_family || ', suspended), '
+        || gpu_pool || ' (' || gpu_family || ', suspended), '
+        || fq_repo || ', '
+        || eai_name || ' (build-only), '
+        || 'role VOXEL_RADIOLOGIST';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- SHOW returns 30+ columns, which the CLI renders as unreadable column soup.
+-- RESULT_SCAN narrows it to what actually matters.
+--
+-- Both pools MUST report state = SUSPENDED here. Anything else means
+-- INITIALLY_SUSPENDED did not take effect and the deployment is already
+-- billing for idle nodes.
+-- -----------------------------------------------------------------------------
+SHOW WAREHOUSES LIKE '{{ warehouse }}';
+SELECT "name", "state", "size", "auto_suspend"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW COMPUTE POOLS LIKE '{{ cfg.dicomweb_pool }}';
+SELECT "name", "state", "instance_family", "min_nodes", "max_nodes", "auto_suspend_secs",
+       IFF("state" = 'SUSPENDED', 'OK', 'COST WARNING: pool is provisioning nodes') AS BILLING_CHECK
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW COMPUTE POOLS LIKE '{{ cfg.gpu_pool }}';
+SELECT "name", "state", "instance_family", "min_nodes", "max_nodes", "auto_suspend_secs",
+       IFF("state" = 'SUSPENDED', 'OK', 'COST WARNING: GPU pool is provisioning nodes') AS BILLING_CHECK
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{{ cfg.eai_name }}';
+SELECT "name", "type", "enabled"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

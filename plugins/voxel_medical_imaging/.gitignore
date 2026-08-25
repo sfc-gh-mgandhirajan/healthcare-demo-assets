@@ -1,0 +1,27 @@
+# Local config carries a real database/schema/warehouse and sometimes a bucket
+# name. Never commit it.
+config.json
+.env
+
+# Rendered SQL always goes to a scratch dir, never into the repo. This is a
+# backstop in case someone renders in place.
+rendered/
+*.rendered.sql
+
+# Bench output carries account identifiers and credit figures.
+bench_results/
+
+# OHIF build artifacts. The bundle is produced by npm inside the router image
+# build, never vendored here -- vendoring 154 MB of .wasm is what forced the incumbent
+# to abandon declarative app deployment.
+assets/dicomweb/router/ohif-dist/
+node_modules/
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.pytest_cache/
+
+# Local agent state: plans, conversation scratch. Not source.
+.snowflake/

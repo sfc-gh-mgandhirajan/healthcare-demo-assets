@@ -1,0 +1,239 @@
+-- =============================================================================
+-- 10: Pipeline config and state
+--
+--   DICOM_SOURCE_CONFIG   one row per storage location
+--   DICOM_SOURCE_PREFIX   scan scopes within a source
+--   DICOM_FILE_MANIFEST   the per-file state machine
+--   DICOM_LOAD_ERRORS     quarantine, joined to DICOM_ERROR_CATALOG for policy
+--
+-- Onboarding a customer stage is INSERTING ROWS, not editing SQL. That is the
+-- whole point of splitting config out of the procedures.
+--
+-- =============================================================================
+-- WHY PREFIXES ARE A SEPARATE TABLE
+--
+-- The IDC bucket holds >3.7M files. LIST at its root is impractical and a
+-- directory table on it fails outright at the 1 GB metadata ceiling. Prefixes
+-- let a scan be scoped to the parts of a bucket that matter, and let a large
+-- corpus be onboarded incrementally rather than all at once.
+--
+-- A source with one row of PREFIX = '' scans the whole stage, which is the right
+-- shape for a customer's own dedicated bucket.
+--
+-- Note that DISABLING a prefix marks its files DELETED, because they are now out
+-- of scope. Disabling a SOURCE does not, because SP_SCAN_ALL_SOURCES scopes
+-- delete detection to sources that actually appeared in the current scan. The
+-- asymmetry is deliberate but worth knowing before editing either table.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+CREATE TABLE IF NOT EXISTS DICOM_SOURCE_CONFIG (
+    SOURCE_NAME      VARCHAR       NOT NULL,
+    STAGE_FQN        VARCHAR       NOT NULL,
+    FILE_PATTERN     VARCHAR       DEFAULT '%.dcm',
+    -- Per-source window fallback. A chest source wants a lung window
+    -- (-600/1500) while a cardiac source wants soft tissue (40/400). Windowing a
+    -- lung study at 40/400 clips nearly all parenchyma to black -- it degrades
+    -- silently rather than erroring, which is why it is configurable per source
+    -- rather than a single global constant.
+    WINDOW_CENTER    FLOAT         DEFAULT {{ cfg.window_center }},
+    WINDOW_WIDTH     FLOAT         DEFAULT {{ cfg.window_width }},
+    ENABLED          BOOLEAN       DEFAULT TRUE,
+    LAST_SCAN_AT     TIMESTAMP_LTZ,
+    LAST_SCAN_FILES  NUMBER(38,0),
+    CONSTRAINT PK_DICOM_SOURCE_CONFIG PRIMARY KEY (SOURCE_NAME)
+)
+COMMENT = 'Voxel: one row per registered DICOM storage location.';
+
+-- PREFIX is relative to the stage root and must end in '/' unless empty.
+CREATE TABLE IF NOT EXISTS DICOM_SOURCE_PREFIX (
+    SOURCE_NAME  VARCHAR NOT NULL,
+    PREFIX       VARCHAR NOT NULL,
+    ENABLED      BOOLEAN DEFAULT TRUE,
+    CONSTRAINT PK_DICOM_SOURCE_PREFIX PRIMARY KEY (SOURCE_NAME, PREFIX),
+    CONSTRAINT FK_DICOM_SOURCE_PREFIX FOREIGN KEY (SOURCE_NAME)
+        REFERENCES DICOM_SOURCE_CONFIG (SOURCE_NAME)
+)
+COMMENT = 'Voxel: scan scopes within a source. One row with PREFIX = '''' scans the whole stage.';
+
+-- =============================================================================
+-- DICOM_FILE_MANIFEST -- the state machine
+--
+--   NEW      discovered, not yet parsed (or changed and needs reparsing)
+--   LOADED   parsed into DICOM_INSTANCE
+--   ERROR    parse failed; see DICOM_LOAD_ERRORS for the code
+--   DELETED  no longer present at the source
+--
+-- FILE_MD5 is what makes change detection work. A file overwritten in place
+-- keeps its name and often its size, so name+size alone would let it go stale
+-- forever with nothing erroring.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DICOM_FILE_MANIFEST (
+    SOURCE_NAME    VARCHAR       NOT NULL,
+    FILE_NAME      VARCHAR       NOT NULL,
+    FILE_SIZE      NUMBER(38,0),
+    FILE_MD5       VARCHAR,
+    STATUS         VARCHAR       NOT NULL DEFAULT 'NEW',
+    FIRST_SEEN_AT  TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    LAST_SEEN_AT   TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    LOADED_AT      TIMESTAMP_LTZ,
+    CONSTRAINT PK_DICOM_FILE_MANIFEST PRIMARY KEY (SOURCE_NAME, FILE_NAME)
+)
+COMMENT = 'Voxel: per-file state machine. NEW/LOADED/ERROR/DELETED with md5 change detection.';
+
+-- =============================================================================
+-- DICOM_LOAD_ERRORS -- quarantine
+--
+-- Carries an ERR_CODE that joins DICOM_ERROR_CATALOG, so the retry and
+-- quarantine DECISION is data rather than logic buried in a procedure. Retrying
+-- is then "replay everything whose code is RETRYABLE", not a judgement call at
+-- 3am.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DICOM_LOAD_ERRORS (
+    SOURCE_NAME    VARCHAR,
+    FILE_NAME      VARCHAR,
+    PIPELINE_STEP  VARCHAR,        -- 'SCAN' | 'EXTRACT' | 'FRAME' | 'RENDER'
+    ERR_CODE       VARCHAR,
+    ERR_DETAIL     VARCHAR,
+    OCCURRED_AT    TIMESTAMP_LTZ   DEFAULT CURRENT_TIMESTAMP(),
+    RESOLVED       BOOLEAN         DEFAULT FALSE
+)
+COMMENT = 'Voxel: quarantine. ERR_CODE joins DICOM_ERROR_CATALOG so retry policy is data, not logic.';
+
+-- -----------------------------------------------------------------------------
+-- Seed the bundled IDC demo source.
+--
+-- The 10 curated prefixes are PATH UUIDs, which is all the bucket layout offers
+-- before any file is parsed -- the real SERIES_INSTANCE_UID is only knowable
+-- after metadata extraction.
+-- -----------------------------------------------------------------------------
+{% if cfg.include_demo_series %}
+MERGE INTO DICOM_SOURCE_CONFIG t
+USING (
+    SELECT '{{ cfg.source_name }}' AS SOURCE_NAME,
+           '{{ db }}.{{ schema }}.{{ cfg.source_stage }}' AS STAGE_FQN,
+           '%.dcm' AS FILE_PATTERN
+) s
+ON t.SOURCE_NAME = s.SOURCE_NAME
+-- No UPDATE clause: a re-deploy must not reset a WINDOW_CENTER or an ENABLED
+-- flag that an operator changed deliberately.
+WHEN NOT MATCHED THEN INSERT
+    (SOURCE_NAME, STAGE_FQN, FILE_PATTERN, WINDOW_CENTER, WINDOW_WIDTH, ENABLED)
+    VALUES (s.SOURCE_NAME, s.STAGE_FQN, s.FILE_PATTERN,
+            {{ cfg.window_center }}, {{ cfg.window_width }}, TRUE);
+
+MERGE INTO DICOM_SOURCE_PREFIX t
+USING (
+    SELECT '{{ cfg.source_name }}' AS SOURCE_NAME, COLUMN1 AS PREFIX
+    FROM VALUES
+        ('7e1bcefd-d097-47c0-9d54-65bd5d9674cf/'),
+        ('3b5970f6-f130-4337-9666-a9741a267268/'),
+        ('4bed8f9a-bf84-44da-ac8d-d39e15d9c978/'),
+        ('f53b78ea-92ea-479e-a89f-967bec74e848/'),
+        ('1d92626a-e39d-4cf5-8ed9-864aae909d3d/'),
+        ('7f4806f3-5946-41cb-8684-8fd5d51f8931/'),
+        ('6dfa81e0-3520-4332-aecc-0767dd1cab74/'),
+        ('f6fc9ace-5516-418d-b979-7ffaf14de22b/'),
+        ('bb721c76-8056-4780-97be-1bc61b469454/'),
+        ('de9868a4-a9d9-4652-9f0f-04e06a95d09e/')
+) s
+ON t.SOURCE_NAME = s.SOURCE_NAME AND t.PREFIX = s.PREFIX
+WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, PREFIX, ENABLED)
+    VALUES (s.SOURCE_NAME, s.PREFIX, TRUE);
+{% else %}
+SELECT 'Demo source NOT seeded (include_demo_series = false). Register your own '
+       || 'with one row in DICOM_SOURCE_CONFIG and at least one in '
+       || 'DICOM_SOURCE_PREFIX.' AS NOTE;
+{% endif %}
+
+-- =============================================================================
+-- V_PIPELINE_STATUS -- outstanding work per source
+--
+-- The single query an operator runs first. One row per source, always -- never
+-- zero rows, because a source with nothing outstanding still needs to be visible
+-- as healthy rather than absent.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_PIPELINE_STATUS AS
+SELECT
+    c.SOURCE_NAME,
+    c.ENABLED,
+    c.LAST_SCAN_AT,
+    DATEDIFF('minute', c.LAST_SCAN_AT, CURRENT_TIMESTAMP()) AS MINUTES_SINCE_SCAN,
+    COUNT(m.FILE_NAME)                                  AS FILES_KNOWN,
+    COUNT_IF(m.STATUS = 'NEW')                          AS PENDING_EXTRACT,
+    COUNT_IF(m.STATUS = 'LOADED')                       AS LOADED,
+    COUNT_IF(m.STATUS = 'ERROR')                        AS IN_ERROR,
+    COUNT_IF(m.STATUS = 'DELETED')                       AS DELETED,
+    (SELECT COUNT(*) FROM DICOM_LOAD_ERRORS e
+      WHERE e.SOURCE_NAME = c.SOURCE_NAME AND NOT e.RESOLVED) AS UNRESOLVED_ERRORS,
+    -- Backlog alone is ambiguous: a large draining backlog is healthy, a small
+    -- growing one is not. Pairing the count with scan age is what makes the
+    -- state readable at a glance.
+    CASE
+        WHEN NOT c.ENABLED                                THEN 'DISABLED'
+        WHEN c.LAST_SCAN_AT IS NULL                       THEN 'NEVER SCANNED'
+        WHEN COUNT_IF(m.STATUS = 'ERROR') > 0             THEN 'DEGRADED: errors present'
+        WHEN COUNT_IF(m.STATUS = 'NEW') > 0               THEN 'WORKING: extract backlog'
+        ELSE 'OK'
+    END AS STATE
+FROM DICOM_SOURCE_CONFIG c
+LEFT JOIN DICOM_FILE_MANIFEST m ON m.SOURCE_NAME = c.SOURCE_NAME
+GROUP BY c.SOURCE_NAME, c.ENABLED, c.LAST_SCAN_AT;
+
+-- =============================================================================
+-- V_LOAD_ERRORS_RECENT -- quarantine joined to policy
+--
+-- Shows not just what failed but what to DO about it, because the join to
+-- DICOM_ERROR_CATALOG brings RETRYABLE, SEVERITY, and the runbook step along.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_LOAD_ERRORS_RECENT AS
+SELECT
+    e.OCCURRED_AT,
+    e.SOURCE_NAME,
+    e.FILE_NAME,
+    e.PIPELINE_STEP,
+    e.ERR_CODE,
+    COALESCE(c.ERR_CLASS, 'UNKNOWN')  AS ERR_CLASS,
+    COALESCE(c.SEVERITY, 'ALERT')     AS SEVERITY,
+    COALESCE(c.RETRYABLE, FALSE)      AS RETRYABLE,
+    COALESCE(c.QUARANTINE, TRUE)      AS QUARANTINE,
+    c.RUNBOOK_STEP,
+    e.ERR_DETAIL,
+    e.RESOLVED
+FROM DICOM_LOAD_ERRORS e
+LEFT JOIN DICOM_ERROR_CATALOG c ON c.ERR_CODE = e.ERR_CODE
+WHERE NOT e.RESOLVED
+ORDER BY e.OCCURRED_AT DESC;
+
+-- Aggregated form: the countable SLO. This is what the poisoned-cell pattern
+-- makes impossible.
+CREATE OR REPLACE VIEW V_ERROR_SUMMARY AS
+SELECT
+    COALESCE(c.ERR_CLASS, 'UNKNOWN') AS ERR_CLASS,
+    e.ERR_CODE,
+    COALESCE(c.SEVERITY, 'ALERT')    AS SEVERITY,
+    COALESCE(c.RETRYABLE, FALSE)     AS RETRYABLE,
+    COUNT(*)                         AS N_UNRESOLVED,
+    COUNT(DISTINCT e.SOURCE_NAME)    AS N_SOURCES,
+    MIN(e.OCCURRED_AT)               AS FIRST_SEEN,
+    MAX(e.OCCURRED_AT)               AS LAST_SEEN,
+    ANY_VALUE(c.RUNBOOK_STEP)        AS RUNBOOK_STEP
+FROM DICOM_LOAD_ERRORS e
+LEFT JOIN DICOM_ERROR_CATALOG c ON c.ERR_CODE = e.ERR_CODE
+WHERE NOT e.RESOLVED
+GROUP BY COALESCE(c.ERR_CLASS, 'UNKNOWN'), e.ERR_CODE,
+         COALESCE(c.SEVERITY, 'ALERT'), COALESCE(c.RETRYABLE, FALSE);
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT c.SOURCE_NAME, c.STAGE_FQN, c.ENABLED,
+       (SELECT COUNT(*) FROM DICOM_SOURCE_PREFIX p
+         WHERE p.SOURCE_NAME = c.SOURCE_NAME AND p.ENABLED) AS ENABLED_PREFIXES
+FROM DICOM_SOURCE_CONFIG c
+ORDER BY c.SOURCE_NAME;
+
+SELECT * FROM V_PIPELINE_STATUS;

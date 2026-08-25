@@ -1,0 +1,272 @@
+spec:
+# ===========================================================================
+  # Voxel DICOMweb service
+#
+  # ONE service. THREE containers. EXACTLY ONE public endpoint.
+#
+  # Containers in a service instance communicate over localhost with no endpoint
+  # declared for them. Each PUBLIC endpoint gets its own allocated hostname, so a
+  # second public endpoint would put the SPA and its own data source on different
+  # origins -- and the ingress proxy's baseline CSP is
+  #     connect-src 'self'
+  # which HARD-BLOCKS the SPA's fetch to the gateway. CORS cannot loosen it,
+  # because connect-src is evaluated in the SENDING document. A two-hostname
+  # split does not merely need configuration; it does not run.
+#
+  # This is also why an SPCS GATEWAY object is not used. A gateway supports
+  # neither caller's rights nor CORS/CSP headers, and executeAsCaller is
+  # load-bearing for the per-user row-access story -- a gateway would collapse
+  # every radiologist back to one service identity, which is the exact posture
+  # rejected in the incumbent.
+# ===========================================================================
+  containers:
+
+    # -----------------------------------------------------------------------
+    # router -- the ONLY container on the public port.
+    #
+    # nginx serves the OHIF static bundle at / and reverse-proxies /dicom-web/*
+    # to the gateway on localhost. Two reasons this is a separate container from
+    # the gateway rather than one image:
+    #   1. OHIF is a Node build producing ~154 MB of static assets including
+    #      .wasm codecs; the gateway is Python/pydicom. Separate images are
+    #      independently versioned and neither toolchain contaminates the other.
+    #   2. nginx serves static assets far better than uvicorn or hypercorn.
+    # -----------------------------------------------------------------------
+    - name: router
+      image: /{{ db }}/{{ schema }}/{{ cfg.image_repo }}/voxel-router:latest
+      volumeMounts:
+        # nginx.conf is BAKED INTO the router image at build time, not mounted.
+        # Mounting it from a stage would mean the authorization-critical
+        # Sf-Context-* forwarding could be changed without rebuilding or
+        # re-reviewing the image, which is the wrong property for the file that
+        # is the authorization boundary.
+        - name: hotring
+          mountPath: /dev/shm/voxel
+      resources:
+        requests: { cpu: 0.5, memory: 1Gi }
+        limits:   { cpu: 2,   memory: 2Gi }
+      readinessProbe:
+        port: 8000
+        path: /healthz
+
+    # -----------------------------------------------------------------------
+    # gateway -- QIDO-RS / WADO-RS / STOW-RS. NOT declared as an endpoint.
+    #
+    # Reachable only at localhost:8080 from the router, so it has no hostname of
+    # its own and no way to be addressed from the internet.
+    # -----------------------------------------------------------------------
+    - name: gateway
+      image: /{{ db }}/{{ schema }}/{{ cfg.image_repo }}/voxel-gateway:latest
+      env:
+        VOXEL_DB: {{ db }}
+        VOXEL_SCHEMA: {{ schema }}
+        VOXEL_WAREHOUSE: {{ warehouse }}
+        VOXEL_PREAD_MOUNT: /mnt/dicom
+        VOXEL_HOTRING: /dev/shm/voxel
+        # NOTE: there are deliberately no VOXEL_SCROLL_WINDOW_* variables here.
+        # They were set for a long time and read by nothing -- the scroll window is
+        # a CLIENT concern, chosen by OHIF and expressed as the comma-separated
+        # frame list in the request URL. The gateway only enforces the 512-frame
+        # ceiling in _parse_frame_list. Env vars a service sets and no code reads
+        # are worse than absent: they document a tuning knob that does not exist,
+        # so the next person tunes them and measures nothing.
+        #
+        # The reason batching matters at all still holds: a browser caps ~6
+        # concurrent connections per origin, so 500 individual frame GETs serialize
+        # into ~83 rounds of head-of-line blocking no matter how fast the server
+        # is. That is why ohif-app-config.js sets singlepart: false.
+        #
+        # The connector needs these to build a session. SNOWFLAKE_ACCOUNT and
+        # SNOWFLAKE_HOST are injected by SPCS; the rest are ours.
+        VOXEL_SESSION_TTL: '60'
+        VOXEL_LOG_LEVEL: INFO
+      volumeMounts:
+        - name: dicom
+          mountPath: /mnt/dicom
+        - name: hotring
+          mountPath: /dev/shm/voxel
+      resources:
+        requests: { cpu: 1, memory: 4Gi }
+        limits:   { cpu: 4, memory: 12Gi }
+      readinessProbe:
+        port: 8080
+        path: /healthz
+
+    # -----------------------------------------------------------------------
+    # prefetch -- series-open sequential warming.
+    #
+    # Converts the access pattern from many small random reads (which the GA
+    # stage volume implementation is documented as WEAK at) into one large
+    # contiguous read (which it is TUNED for). Triggered by the gateway over
+    # localhost when a series is opened, writing into the shared memory volume.
+    # -----------------------------------------------------------------------
+    - name: prefetch
+      image: /{{ db }}/{{ schema }}/{{ cfg.image_repo }}/voxel-gateway:latest
+      args: ['python', '-m', 'voxel.prefetch']
+      env:
+        VOXEL_PREAD_MOUNT: /mnt/dicom
+        VOXEL_HOTRING: /dev/shm/voxel
+        # ---------------------------------------------------------------------
+        # THE EVICTION BUDGET MUST BE DERIVED FROM THE VOLUME SIZE.
+        #
+        # prefetch.py defaults to 24 GiB. With a 12 GiB memory volume that default
+        # means eviction never fires before tmpfs fills, and warming then fails
+        # with ENOSPC -- which this process swallows by design, so the symptom is
+        # not an error but a cache that silently stops warming and a viewer that
+        # is mysteriously slow.
+        #
+        # Caught in the container logs on first deploy:
+        #   prefetch started: mount=/mnt/dicom ring=/dev/shm/voxel budget=24.0GiB
+        # against a 12Gi volume.
+        #
+        # Set to 80% of the volume so eviction has headroom to work in. Computed
+        # from the same config key as the volume, so the two cannot drift.
+        # ---------------------------------------------------------------------
+        VOXEL_HOTRING_BUDGET_BYTES: '{{ (cfg.hotring_size_gi * 1073741824 * 0.8) | int }}'
+      volumeMounts:
+        - name: dicom
+          mountPath: /mnt/dicom
+        - name: hotring
+          mountPath: /dev/shm/voxel
+      resources:
+        requests: { cpu: 0.5, memory: 1Gi }
+        limits:   { cpu: 2,   memory: 4Gi }
+
+# ===========================================================================
+  # EXACTLY ONE public endpoint. Verified with:
+  #     SHOW ENDPOINTS IN SERVICE {{ cfg.dicomweb_service }};
+  # More than one row with is_public = true breaks the single-origin guarantee
+  # that everything else here rests on.
+#
+  # No corsSettings, deliberately. Same-origin means there is no cross-origin
+  # request to permit, so the proxy's default
+  #     Cross-Origin-Resource-Policy: same-origin
+  # becomes correct rather than an obstacle.
+#
+  # Bonus: the proxy already sets COOP: same-origin and COEP: credentialless,
+  # which together ARE cross-origin isolation -- the precondition for
+  # SharedArrayBuffer, which OHIF's multithreaded HTJ2K and JPEG2000 WASM
+  # decoders want. That header combination is normally a fight with a CDN.
+  #
+  # KNOWN LIMITATION, not a solved problem. Safari implements only
+  # COEP: require-corp, not credentialless, so it will not report
+  # crossOriginIsolated under these headers and the multithreaded decoders fall
+  # back to their single-threaded path. Large HTJ2K series will decode more
+  # slowly in Safari.
+  #
+  # This comment used to claim the gateway "checks crossOriginIsolated and falls
+  # back to server-side transcode when false". IT DOES NOT, and it cannot: the
+  # gateway image deliberately ships no JPEG or JPEG2000 libraries at all
+  # (see gateway/Dockerfile) because frames are byte-range passthrough in their
+  # original transfer syntax. A server-side transcode path would mean adding
+  # pylibjpeg and openjpeg, decoding PHI pixel data in the serving container, and
+  # spending CPU on the clinical read path -- three things this design rejects on
+  # purpose. If Safari parity is ever required it is a real decision with real
+  # costs, not a fallback that already exists.
+# ===========================================================================
+  endpoints:
+    - name: web
+      port: 8000
+      public: true
+      protocol: HTTP
+
+  volumes:
+    # -----------------------------------------------------------------------
+    # The pread path. INTERNAL stage only -- "External stages aren't supported"
+    # is an explicit platform limitation, which is the entire reason
+    # {{ cfg.pread_stage }} exists alongside the external IDC stage.
+    #
+    # metadataCache is safe here because the imaging corpus is immutable once
+    # written. It would NOT be safe on a stage whose contents change while the
+    # service runs.
+    # -----------------------------------------------------------------------
+    - name: dicom
+      source: stage
+      stageConfig:
+        name: "@{{ db }}.{{ schema }}.{{ cfg.pread_stage }}"
+        metadataCache: 1h
+        resources:
+          requests: { cpu: 1,   memory: 1Gi }
+          limits:   { cpu: 4,   memory: 2Gi }
+
+    # -----------------------------------------------------------------------
+    # Shared RAM-backed cache, visible to router, gateway, and prefetch.
+    #
+    # Deliberately NOT block storage. A service using block volumes must set
+    # MIN_INSTANCES = MAX_INSTANCES, which forfeits autoscaling on the clinical
+    # read path. Block storage also persists cached PHI to disk, which is a
+    # governance surface a memory volume simply does not have.
+    #
+    # SIZE IS BOUNDED BY THE INSTANCE FAMILY, NOT BY TASTE.
+    # A memory volume is carved out of node RAM and competes with the containers'
+    # own memory requests. Oversizing it fails at CREATE SERVICE with:
+    #   invalid value 32Gi for 'memory.size'. Size of the memory volume 32Gi
+    #   exceeds the maximum available compute pool instance memory of 28Gi.
+    #
+    # For {{ cfg.dicomweb_pool_family }} (28Gi usable) the containers request
+    # 1 + 4 + 1 = 6Gi, so the volume must leave room for that plus headroom.
+    # 12Gi is the tuned value. CHANGING dicomweb_pool_family WITHOUT REVISITING
+    # hotring_size_gi WILL FAIL AT DEPLOY -- loudly, which is the good case.
+    # -----------------------------------------------------------------------
+    - name: hotring
+      source: memory
+      size: {{ cfg.hotring_size_gi }}Gi
+
+
+# ===========================================================================
+# TOP-LEVEL FIELDS. `spec`, `capabilities`, and `serviceRoles` are SIBLINGS.
+#
+# Nesting capabilities under spec fails with:
+#   Invalid spec: unknown option 'capabilities' for 'spec'.
+# The indentation below is load-bearing, not cosmetic.
+# ===========================================================================
+
+# ===========================================================================
+# Caller's rights. This is the security core.
+#
+# Snowflake injects Sf-Context-Current-User and Sf-Context-Current-User-Token
+  # into each request. The gateway builds its session as
+#     read('/snowflake/session/token') + '.' + <caller token>
+# so CURRENT_USER() inside every QIDO query is the actual radiologist, and row
+# access policies do the filtering in the query engine rather than in
+# application code.
+#
+# That replaces the incumbent's approach of hashing the user's group list into cache
+# keys -- authorization implemented in a Python dict, where a cache-key bug is
+# a PHI disclosure and no audit view can see the decision.
+#
+# It also means the router MUST forward the Sf-Context-* headers verbatim. If
+# it drops them the gateway silently falls back to OWNER rights and every row
+# access policy quietly passes. That failure does not error, so
+# dicomweb-deploy asserts it behaviorally with two differently-entitled users.
+# ===========================================================================
+capabilities:
+  securityContext:
+    executeAsCaller: true
+
+# ===========================================================================
+# serviceRoles -- how a human is granted access to the endpoint
+#
+# Without this there is no way to let a radiologist reach the service short of
+# making them the owner. A service role grants USAGE on named ENDPOINTS, which is
+# a different and narrower thing than any privilege on the underlying tables.
+#
+# The pairing matters: VOXEL_RADIOLOGIST (created in 00_ACCOUNT_SETUP) is granted
+# this service role to reach the endpoint, AND appears in USER_STUDY_SCOPE to
+# determine which studies they see. Endpoint access and row scope are separate
+# decisions, so granting someone the viewer does not silently grant them the whole
+# corpus.
+# ===========================================================================
+serviceRoles:
+  - name: voxel_viewer
+    endpoints:
+      - web
+
+# NOTE: no EXTERNAL_ACCESS_INTEGRATIONS on this service, deliberately and
+# permanently. A serving container holds a Snowflake session token and has read
+# access to PHI; an EAI on it is unrestricted egress from inside the PHI
+# perimeter regardless of what the code does. Model weights and npm packages are
+# fetched once at BUILD time. Verify with:
+#     DESCRIBE SERVICE {{ cfg.dicomweb_service }};
+# external_access_integrations must be null. That is a one-line proof of "no data
+# egress" rather than a promise about application behaviour.

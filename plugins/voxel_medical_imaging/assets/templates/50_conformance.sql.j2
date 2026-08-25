@@ -1,0 +1,258 @@
+-- =============================================================================
+-- 50_CONFORMANCE
+--
+-- DICOMweb conformance results, and the queries that make a claim defensible.
+--
+-- =============================================================================
+-- WHY CONFORMANCE IS A TABLE AND NOT A CI ARTIFACT
+--
+-- "We are DICOMweb compliant" is the single easiest claim to make and the hardest
+-- to substantiate in a compete conversation. A green CI badge is not evidence a
+-- buyer can interrogate -- it is a screenshot of someone else's test run.
+--
+-- Storing results IN the platform means a prospect can query them:
+--   which transfer syntaxes actually round-trip
+--   which QIDO attributes are honoured vs silently ignored
+--   what the p99 frame latency was, on their corpus, on a named date
+--
+-- The interesting rows are the FAILURES. A conformance table with no failures is a
+-- table nobody trusts, so SP_CONFORMANCE_SUMMARY reports unsupported features as
+-- first-class output rather than filtering them out.
+--
+-- =============================================================================
+-- WHAT RUNS THE TESTS
+--
+-- These tables are populated by an EXTERNAL harness -- dcm4che's `qidors`/`wadors`
+-- tools or pynetdicom -- pointed at the service endpoint. Deliberately external:
+-- a conformance suite written against the same code it tests shares the same
+-- misconceptions. A third-party client that has never heard of Voxel is the point.
+--
+-- The harness is not run by this SQL. See skills/conformance/SKILL.md.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- One row per assertion
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS CONFORMANCE_RESULT (
+    RUN_ID          VARCHAR       NOT NULL,
+    SUITE           VARCHAR       NOT NULL,   -- QIDO | WADO | STOW | TRANSPORT
+    TEST_NAME       VARCHAR       NOT NULL,
+    DICOM_REFERENCE VARCHAR,                  -- e.g. 'PS3.18 10.6.1'
+    OUTCOME         VARCHAR       NOT NULL,
+    HTTP_STATUS     NUMBER(38,0),
+    LATENCY_MS      NUMBER(38,0),
+    CLIENT          VARCHAR,                  -- the tool, so results are attributable
+    CLIENT_VERSION  VARCHAR,
+    DETAIL          VARCHAR,
+    EXECUTED_AT     TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_CONFORMANCE_RESULT PRIMARY KEY (RUN_ID, SUITE, TEST_NAME),
+    -- NOT_IMPLEMENTED is a distinct outcome from FAIL, and the distinction is the
+    -- honest part. STOW-RS returning 501 is not a defect; it is a documented
+    -- boundary. Collapsing the two would either overstate coverage or manufacture
+    -- failures.
+    CONSTRAINT CK_OUTCOME CHECK (
+        OUTCOME IN ('PASS', 'FAIL', 'NOT_IMPLEMENTED', 'SKIPPED', 'ERROR'))
+)
+COMMENT = 'Voxel: one row per DICOMweb conformance assertion. NOT_IMPLEMENTED is distinct from FAIL on purpose.';
+
+-- =============================================================================
+-- Frame latency samples
+--
+-- Separate table because latency is a DISTRIBUTION, not a pass/fail. A mean is
+-- close to useless for a clinical read path -- what a radiologist notices is the
+-- tail, so this stores samples and the views report percentiles.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS FRAME_LATENCY_SAMPLE (
+    RUN_ID          VARCHAR       NOT NULL,
+    SERIES_INSTANCE_UID VARCHAR,
+    SOP_INSTANCE_UID    VARCHAR,
+    FRAME_NUMBER    NUMBER(38,0),
+    N_FRAMES        NUMBER(38,0),   -- frames per request; batching changes the profile
+    BYTES_RETURNED  NUMBER(38,0),
+    LATENCY_MS      FLOAT,
+    SERVED_FROM     VARCHAR,        -- 'warm' | 'stage', from X-Voxel-Served-From
+    TRANSFER_SYNTAX_UID VARCHAR,
+    EXECUTED_AT     TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+)
+COMMENT = 'Voxel: raw frame latency samples. Percentiles are computed in views; a mean would hide the tail a radiologist actually feels.';
+
+-- =============================================================================
+-- Expected surface
+--
+-- The declared claim, seeded here so a conformance run can be scored against
+-- something written down IN ADVANCE. Without this, a run can only report what it
+-- happened to test, and absence of a test is indistinguishable from a pass.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS CONFORMANCE_EXPECTATION (
+    SUITE           VARCHAR NOT NULL,
+    TEST_NAME       VARCHAR NOT NULL,
+    DICOM_REFERENCE VARCHAR,
+    EXPECTED        VARCHAR NOT NULL,
+    RATIONALE       VARCHAR,
+    CONSTRAINT PK_CONFORMANCE_EXPECTATION PRIMARY KEY (SUITE, TEST_NAME),
+    CONSTRAINT CK_EXPECTED CHECK (
+        EXPECTED IN ('PASS', 'NOT_IMPLEMENTED'))
+)
+COMMENT = 'Voxel: the declared DICOMweb surface, written down before a run so an untested assertion cannot masquerade as a pass.';
+
+MERGE INTO CONFORMANCE_EXPECTATION t USING (
+    SELECT * FROM VALUES
+    -- QIDO-RS
+    ('QIDO','search_studies','PS3.18 10.6','PASS','GET /studies with DICOM JSON response.'),
+    ('QIDO','search_series_in_study','PS3.18 10.6','PASS','GET /studies/{uid}/series.'),
+    ('QIDO','search_instances_in_series','PS3.18 10.6','PASS','GET /studies/{uid}/series/{uid}/instances.'),
+    ('QIDO','filter_by_modality','PS3.18 10.6.1','PASS','Allowlisted attribute, typed column match.'),
+    ('QIDO','filter_by_patient_id','PS3.18 10.6.1','PASS','Allowlisted but masked; matches nothing for unidentified roles by design.'),
+    ('QIDO','wildcard_matching','PS3.18 10.6.1.1','PASS','* and ? translated to SQL LIKE with escaping applied first.'),
+    ('QIDO','uid_list_matching','PS3.18 10.6.1.1','NOT_IMPLEMENTED','Comma-separated UID lists are not supported; single exact UID only.'),
+    ('QIDO','range_matching','PS3.18 10.6.1.1','NOT_IMPLEMENTED','Date range matching (StudyDate=a-b) not implemented.'),
+    ('QIDO','fuzzy_matching','PS3.18 10.6.1.1','NOT_IMPLEMENTED','fuzzymatching parameter is accepted and ignored; declared here rather than implied.'),
+    ('QIDO','includefield','PS3.18 10.6.1.2','NOT_IMPLEMENTED','Response attribute set is fixed per level.'),
+    ('QIDO','limit_offset','PS3.18 10.6.1.3','PASS','Clamped to a hard ceiling regardless of request.'),
+    ('QIDO','reject_unknown_attribute','PS3.18 10.6','PASS','400 rather than silently dropping the filter.'),
+
+    -- WADO-RS
+    ('WADO','retrieve_series_metadata','PS3.18 10.4','PASS','DICOM JSON, transfer syntax injected into group 0002.'),
+    ('WADO','retrieve_frames_single','PS3.18 10.4.1','PASS','multipart/related, one part, transfer-syntax on the part Content-Type.'),
+    ('WADO','retrieve_frames_list','PS3.18 10.4.1','PASS','Comma-separated frame list in one request; coalesced read.'),
+    -- Declared as its own line because it is the ONLY assertion that exercises
+    -- the STORED-offset branch of the frame plane over HTTP. Native instances
+    -- resolve offsets arithmetically and never touch DICOM_FRAME_OFFSET, so a
+    -- suite that only reads native CT can be fully green while the encapsulated
+    -- path is broken -- which is exactly the state this repo was in until the
+    -- offset oracle found the Extended Offset Table off-by-8.
+    ('WADO','encapsulated_frame_serving','PS3.5 A.4','PASS','Multi-frame encapsulated instance: one part per requested frame, read via stored offsets.'),
+    ('WADO','retrieve_instance','PS3.18 10.4','PASS','application/dicom, byte-identical to what was ingested.'),
+    ('WADO','frame_numbers_are_1_based','PS3.18 10.4.1','PASS','An off-by-one here returns neighbouring anatomy, not an error.'),
+    ('WADO','reject_frame_zero','PS3.18 10.4.1','PASS','400. Frame 0 does not exist in DICOM.'),
+    ('WADO','content_type_carries_transfer_syntax','PS3.18 8.7.3.3','PASS','Omitting it makes a viewer guess, and a wrong guess renders noise.'),
+    ('WADO','rendered_resources','PS3.18 10.5','NOT_IMPLEMENTED','No server-side rendering; frames are passthrough and the browser decodes.'),
+    ('WADO','thumbnail_resource','PS3.18 10.7','NOT_IMPLEMENTED','No server-side rendering.'),
+    ('WADO','bulkdata','PS3.18 10.4','NOT_IMPLEMENTED','Bulk data URI references not emitted.'),
+
+    -- STOW-RS
+    ('STOW','store_instances','PS3.18 10.5','NOT_IMPLEMENTED','Returns 501 deliberately. A route that accepts and discards is worse than none.'),
+
+    -- Transport / platform behaviour
+    ('TRANSPORT','requires_authentication','-','PASS','Ingress requires a Snowflake session; no anonymous access.'),
+    ('TRANSPORT','caller_identity_forwarded','-','PASS','Sf-Context-* survives the nginx hop; verified by /whoami.'),
+    ('TRANSPORT','no_identity_is_401','-','PASS','Absent caller token is 401, never a fallback to owner rights.'),
+    ('TRANSPORT','row_access_policy_enforced','-','PASS','Unentitled user sees zero studies.'),
+    ('TRANSPORT','multipart_streams_incrementally','-','PASS','Parts flush as read; keeps the 90 s ingress idle timer from firing.'),
+    ('TRANSPORT','wasm_content_type','-','PASS','application/wasm, or the browser refuses to instantiate the decoders.')
+    AS v (SUITE, TEST_NAME, DICOM_REFERENCE, EXPECTED, RATIONALE)
+) s ON t.SUITE = s.SUITE AND t.TEST_NAME = s.TEST_NAME
+WHEN NOT MATCHED THEN INSERT (SUITE, TEST_NAME, DICOM_REFERENCE, EXPECTED, RATIONALE)
+    VALUES (s.SUITE, s.TEST_NAME, s.DICOM_REFERENCE, s.EXPECTED, s.RATIONALE);
+
+-- =============================================================================
+-- Scoring
+--
+-- FULL OUTER JOIN, not LEFT. A LEFT join from expectations would hide results for
+-- tests nobody declared; a LEFT join from results would hide declared tests that
+-- never ran. Both are exactly the gaps worth surfacing, so neither side may be
+-- dropped.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_CONFORMANCE_SCORE
+COMMENT = 'Voxel: declared surface vs measured outcome. UNTESTED and UNDECLARED rows are the honest findings.'
+AS
+WITH latest AS (
+    SELECT r.*,
+           ROW_NUMBER() OVER (PARTITION BY SUITE, TEST_NAME
+                              ORDER BY EXECUTED_AT DESC) AS rn
+    FROM CONFORMANCE_RESULT r
+)
+SELECT COALESCE(e.SUITE, l.SUITE)           AS SUITE,
+       COALESCE(e.TEST_NAME, l.TEST_NAME)   AS TEST_NAME,
+       e.DICOM_REFERENCE,
+       e.EXPECTED,
+       l.OUTCOME                            AS ACTUAL,
+       l.HTTP_STATUS,
+       l.LATENCY_MS,
+       l.CLIENT,
+       l.EXECUTED_AT,
+       CASE
+           WHEN e.TEST_NAME IS NULL THEN 'UNDECLARED - tested but not in the declared surface'
+           WHEN l.TEST_NAME IS NULL THEN 'UNTESTED - declared but never exercised'
+           WHEN e.EXPECTED = l.OUTCOME THEN 'MATCH'
+           WHEN e.EXPECTED = 'PASS' AND l.OUTCOME <> 'PASS'
+               THEN 'REGRESSION - declared supported, did not pass'
+           WHEN e.EXPECTED = 'NOT_IMPLEMENTED' AND l.OUTCOME = 'PASS'
+               THEN 'UNDERCLAIM - works but documented as unimplemented'
+           ELSE 'MISMATCH'
+       END                                  AS ASSESSMENT,
+       e.RATIONALE
+FROM CONFORMANCE_EXPECTATION e
+FULL OUTER JOIN (SELECT * FROM latest WHERE rn = 1) l
+  ON l.SUITE = e.SUITE AND l.TEST_NAME = e.TEST_NAME;
+
+CREATE OR REPLACE VIEW V_FRAME_LATENCY
+COMMENT = 'Voxel: frame latency percentiles split by warm vs stage. The p99 is the number a radiologist feels.'
+AS
+SELECT SERVED_FROM,
+       CASE WHEN N_FRAMES = 1 THEN 'single' ELSE 'batched' END AS REQUEST_SHAPE,
+       COUNT(*)                                       AS N_SAMPLES,
+       ROUND(AVG(LATENCY_MS), 1)                      AS MEAN_MS,
+       ROUND(APPROX_PERCENTILE(LATENCY_MS, 0.50), 1)  AS P50_MS,
+       ROUND(APPROX_PERCENTILE(LATENCY_MS, 0.95), 1)  AS P95_MS,
+       ROUND(APPROX_PERCENTILE(LATENCY_MS, 0.99), 1)  AS P99_MS,
+       ROUND(MAX(LATENCY_MS), 1)                      AS MAX_MS,
+       ROUND(AVG(BYTES_RETURNED) / 1024.0, 1)         AS AVG_KIB,
+       -- Throughput matters as much as latency for a scroll: a fast small read is
+       -- not the same as keeping up with a radiologist's wheel.
+       ROUND(SUM(BYTES_RETURNED) / 1024.0 / 1024.0
+             / NULLIF(SUM(LATENCY_MS) / 1000.0, 0), 1) AS MIB_PER_SEC
+FROM FRAME_LATENCY_SAMPLE
+GROUP BY SERVED_FROM, REQUEST_SHAPE;
+
+-- =============================================================================
+-- Summary
+--
+-- Reports NOT_IMPLEMENTED and UNTESTED counts alongside passes, because a summary
+-- that only counts passes is marketing rather than evidence.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_CONFORMANCE_SUMMARY()
+RETURNS TABLE (CATEGORY VARCHAR, N NUMBER, DETAIL VARCHAR)
+LANGUAGE SQL
+COMMENT = 'Voxel: conformance posture including gaps. Passes alone are not evidence.'
+AS
+$$
+DECLARE
+    res RESULTSET;
+BEGIN
+    res := (
+        SELECT ASSESSMENT AS CATEGORY,
+               COUNT(*) AS N,
+               LISTAGG(SUITE || '.' || TEST_NAME, ', ')
+                   WITHIN GROUP (ORDER BY SUITE, TEST_NAME) AS DETAIL
+        FROM V_CONFORMANCE_SCORE
+        GROUP BY ASSESSMENT
+        ORDER BY
+            CASE ASSESSMENT
+                WHEN 'REGRESSION - declared supported, did not pass' THEN 1
+                WHEN 'MISMATCH' THEN 2
+                WHEN 'UNTESTED - declared but never exercised' THEN 3
+                WHEN 'UNDECLARED - tested but not in the declared surface' THEN 4
+                WHEN 'UNDERCLAIM - works but documented as unimplemented' THEN 5
+                ELSE 6
+            END);
+    RETURN TABLE(res);
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT SUITE, EXPECTED, COUNT(*) AS N
+FROM CONFORMANCE_EXPECTATION
+GROUP BY SUITE, EXPECTED
+ORDER BY SUITE, EXPECTED;
+
+-- With no run recorded yet, every declared test must report UNTESTED. That is the
+-- correct starting state and it proves the scoring view is not defaulting to PASS.
+CALL SP_CONFORMANCE_SUMMARY();

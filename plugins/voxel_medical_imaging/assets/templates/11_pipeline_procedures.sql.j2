@@ -1,0 +1,969 @@
+-- =============================================================================
+-- 11: Pipeline procedures
+--
+--   SP_SCAN_ALL_SOURCES   discover files, detect md5 changes and deletes
+--   SP_LOAD_METADATA      parse NEW files -> DICOM_INSTANCE + DICOM_FRAME_OFFSET
+--   SP_RECONCILE_DELETES  remove derived rows for files that vanished
+--   SP_REPLAY_FILE        idempotent single-file recovery verb
+--   SP_REPLAY_ERROR_CLASS bulk replay, refusing codes that cannot benefit
+--   SP_RESUME_PIPELINE / SP_SUSPEND_PIPELINE   order-aware task control
+--
+-- Every procedure is safe to call repeatedly and does only outstanding work, so
+-- the same code serves the initial backfill and the every-few-minutes task run.
+--
+-- BATCH_LIMIT bounds cost per run. Without it, a customer pointing this at a
+-- million-file bucket has one task run try to parse all of it.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- SP_SCAN_ALL_SOURCES
+--
+-- WHY THIS ONE IS PYTHON AND THE REST ARE SQL
+-- LIST is rejected inside a SQL stored procedure:
+--     Unsupported statement type 'LIST_FILES'
+-- It is allowed in an anonymous block and in a task body, but neither is
+-- callable, so the logic would have to be duplicated between the task DAG and
+-- the backfill. A Python procedure can issue LIST via session.sql, giving one
+-- definition that both call.
+--
+-- Listings never enter Python memory: LIST is followed IMMEDIATELY by
+-- INSERT ... SELECT FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())). Nothing may run
+-- between those two statements or LAST_QUERY_ID() resolves to the wrong query.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_SCAN_ALL_SOURCES()
+RETURNS STRING
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'run'
+COMMENT = 'Discovers stage files into DICOM_FILE_MANIFEST via scoped LIST. Detects new, changed (md5), and deleted files. Python because LIST is rejected in a SQL procedure.'
+AS
+$$
+import json
+
+
+def _sql_str(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _merge_counts(rows):
+    """Split a MERGE result into (inserted, updated).
+
+    MERGE returns several columns, so rows[0][0] silently reports INSERTS ONLY --
+    which reads as "nothing happened" on a run that actually re-touched every
+    row. Match on column NAME, because which columns exist depends on which WHEN
+    branches the statement has.
+    """
+    if not rows:
+        return 0, 0
+    inserted = updated = 0
+    for key, value in rows[0].as_dict().items():
+        if not isinstance(value, int):
+            continue
+        name = key.lower()
+        if "insert" in name:
+            inserted += value
+        elif "updat" in name:
+            updated += value
+    return inserted, updated
+
+
+def _stage_url(session, stage_fqn):
+    """Resolve an EXTERNAL stage's URL, or None for an internal stage.
+
+    DESCRIBE STAGE reports URL as a JSON array: ["s3://bucket/"]. Internal
+    stages report an empty string, which is how they are detected here.
+    """
+    rows = session.sql(f"DESCRIBE STAGE {stage_fqn}").collect()
+    raw = None
+    for row in rows:
+        d = row.as_dict()
+        if d.get("property") == "URL":
+            raw = d.get("property_value")
+            break
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        url = parsed[0] if isinstance(parsed, list) and parsed else str(parsed)
+    except (ValueError, TypeError):
+        url = raw.strip('[]"')
+    if not url:
+        return None
+    return url if url.endswith("/") else url + "/"
+
+
+def _relative_path_expr(session, stage_fqn, prefix):
+    """SQL expression turning LIST's "name" into a stage-relative path.
+
+    LIST reports different shapes by stage type:
+      external:  s3://bucket/siteA/file.dcm
+      internal:  mystage/siteA/file.dcm      (stage name, lowercased)
+
+    Downstream needs 'siteA/file.dcm' in both cases. Anchoring on the prefix
+    handles both shapes without caring which kind of stage it is, which is the
+    normal path. The length-arithmetic fallbacks are only needed for a
+    whole-stage scan where there is no prefix to anchor on.
+    """
+    if prefix:
+        return f'SUBSTR("name", POSITION({_sql_str(prefix)} IN "name"))'
+    url = _stage_url(session, stage_fqn)
+    if url:
+        return f'SUBSTR("name", {len(url) + 1})'
+    short = stage_fqn.split(".")[-1].strip('"').lower()
+    return f'SUBSTR("name", {len(short) + 2})'
+
+
+def run(session):
+    session.sql("""
+        CREATE OR REPLACE TRANSIENT TABLE DICOM_SCAN_SCRATCH (
+            SOURCE_NAME VARCHAR,
+            FILE_NAME   VARCHAR,
+            FILE_SIZE   NUMBER(38,0),
+            FILE_MD5    VARCHAR
+        )
+    """).collect()
+
+    pairs = session.sql("""
+        SELECT c.SOURCE_NAME, c.STAGE_FQN, c.FILE_PATTERN, p.PREFIX
+        FROM DICOM_SOURCE_CONFIG c
+        JOIN DICOM_SOURCE_PREFIX p
+          ON p.SOURCE_NAME = c.SOURCE_NAME AND p.ENABLED
+        WHERE c.ENABLED
+        ORDER BY c.SOURCE_NAME, p.PREFIX
+    """).collect()
+
+    if not pairs:
+        return "No enabled source/prefix pairs. Nothing scanned."
+
+    n_listed = 0
+    n_prefix = 0
+    for row in pairs:
+        source = row["SOURCE_NAME"]
+        stage = row["STAGE_FQN"]
+        pattern = row["FILE_PATTERN"] or "%.dcm"
+        prefix = row["PREFIX"] or ""
+        path_expr = _relative_path_expr(session, stage, prefix)
+
+        # LIST then RESULT_SCAN, back to back. Do NOT add a session.sql call
+        # between these two.
+        session.sql(f"LIST @{stage}/{prefix}").collect()
+        inserted = session.sql(
+            "INSERT INTO DICOM_SCAN_SCRATCH "
+            "(SOURCE_NAME, FILE_NAME, FILE_SIZE, FILE_MD5) "
+            f"SELECT {_sql_str(source)}, "
+            f'       {path_expr}, "size", "md5" '
+            "FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) "
+            f'WHERE "name" LIKE {_sql_str(pattern)}'
+        ).collect()
+        n_listed += inserted[0][0] if inserted else 0
+        n_prefix += 1
+
+    # CONFIG-0001: if the path rewrite failed, entries keep their URL scheme and
+    # every downstream read would fail one file at a time. ABORT rather than
+    # write corrupt paths into the manifest.
+    bad = session.sql(
+        "SELECT COUNT(*) AS C FROM DICOM_SCAN_SCRATCH WHERE FILE_NAME LIKE '%://%'"
+    ).collect()[0]["C"]
+    if bad:
+        session.sql(
+            "INSERT INTO DICOM_LOAD_ERRORS "
+            "(SOURCE_NAME, FILE_NAME, PIPELINE_STEP, ERR_CODE, ERR_DETAIL) "
+            f"SELECT DISTINCT SOURCE_NAME, FILE_NAME, 'SCAN', 'CONFIG-0001', "
+            f"  'prefix strip failed; path retains a URL scheme' "
+            "FROM DICOM_SCAN_SCRATCH WHERE FILE_NAME LIKE '%://%'"
+        ).collect()
+        return (f"FAILED (CONFIG-0001): {bad} listed path(s) still contain a URL "
+                "scheme, so the stage prefix was not stripped. Manifest NOT modified.")
+
+    # GROUP BY collapses files seen under overlapping prefixes -- MERGE rejects
+    # multiple source rows matching one target row.
+    #
+    # Adoption joins DICOM_INSTANCE on (SOURCE_NAME, FILE_NAME), not FILE_NAME
+    # alone. The reference plugin keyed derived tables on FILE_NAME only, which
+    # forced a pre-flight abort whenever one path appeared under two sources.
+    # Keying on the pair removes that failure mode entirely.
+    merged = session.sql("""
+        MERGE INTO DICOM_FILE_MANIFEST t
+        USING (
+            SELECT
+                s.SOURCE_NAME,
+                s.FILE_NAME,
+                ANY_VALUE(s.FILE_SIZE) AS FILE_SIZE,
+                ANY_VALUE(s.FILE_MD5)  AS FILE_MD5,
+                MAX(IFF(i.FILE_NAME IS NULL, 0, 1)) AS ALREADY_PARSED
+            FROM DICOM_SCAN_SCRATCH s
+            LEFT JOIN DICOM_INSTANCE i
+                   ON i.SOURCE_NAME = s.SOURCE_NAME
+                  AND i.FILE_NAME   = s.FILE_NAME
+                  AND i.FILE_MD5    = s.FILE_MD5
+            GROUP BY s.SOURCE_NAME, s.FILE_NAME
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME AND t.FILE_NAME = s.FILE_NAME
+        WHEN MATCHED AND t.FILE_MD5 IS DISTINCT FROM s.FILE_MD5 THEN UPDATE SET
+            t.FILE_SIZE    = s.FILE_SIZE,
+            t.FILE_MD5     = s.FILE_MD5,
+            t.STATUS       = 'NEW',
+            t.LAST_SEEN_AT = CURRENT_TIMESTAMP(),
+            t.LOADED_AT    = NULL
+        WHEN MATCHED THEN UPDATE SET
+            t.LAST_SEEN_AT = CURRENT_TIMESTAMP(),
+            t.STATUS       = IFF(t.STATUS = 'DELETED', 'NEW', t.STATUS)
+        WHEN NOT MATCHED THEN INSERT
+            (SOURCE_NAME, FILE_NAME, FILE_SIZE, FILE_MD5, STATUS,
+             FIRST_SEEN_AT, LAST_SEEN_AT, LOADED_AT)
+            VALUES (s.SOURCE_NAME, s.FILE_NAME, s.FILE_SIZE, s.FILE_MD5,
+                    IFF(s.ALREADY_PARSED = 1, 'LOADED', 'NEW'),
+                    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(),
+                    IFF(s.ALREADY_PARSED = 1, CURRENT_TIMESTAMP(), NULL))
+    """).collect()
+
+    # Delete detection scoped to sources that APPEARED in this scan, so a
+    # temporarily disabled source does not mass-delete its files.
+    deleted = session.sql("""
+        UPDATE DICOM_FILE_MANIFEST t
+           SET STATUS = 'DELETED'
+         WHERE t.SOURCE_NAME IN (SELECT DISTINCT SOURCE_NAME FROM DICOM_SCAN_SCRATCH)
+           AND t.STATUS <> 'DELETED'
+           AND NOT EXISTS (
+               SELECT 1 FROM DICOM_SCAN_SCRATCH s
+                WHERE s.SOURCE_NAME = t.SOURCE_NAME
+                  AND s.FILE_NAME   = t.FILE_NAME)
+    """).collect()
+
+    session.sql("""
+        UPDATE DICOM_SOURCE_CONFIG c
+           SET LAST_SCAN_AT    = CURRENT_TIMESTAMP(),
+               LAST_SCAN_FILES = (SELECT COUNT(*) FROM DICOM_SCAN_SCRATCH s
+                                   WHERE s.SOURCE_NAME = c.SOURCE_NAME)
+         WHERE c.SOURCE_NAME IN (SELECT DISTINCT SOURCE_NAME FROM DICOM_SCAN_SCRATCH)
+    """).collect()
+
+    n_inserted, n_updated = _merge_counts(merged)
+    n_deleted = deleted[0][0] if deleted else 0
+    return (f"Scanned {n_prefix} prefix(es), listed {n_listed} file(s). "
+            f"New: {n_inserted}. Updated: {n_updated}. Marked deleted: {n_deleted}.")
+$$;
+
+
+-- =============================================================================
+-- SP_LOAD_METADATA
+--
+-- Parses NEW files with EXTRACT_DICOM_HEADER_AND_FRAMES and lands BOTH
+-- DICOM_INSTANCE and DICOM_FRAME_OFFSET from ONE file read.
+--
+-- -----------------------------------------------------------------------------
+-- FIVE THINGS HERE ARE NOT INCIDENTAL
+--
+-- 1. BUCKET IS MATERIALIZED AS A COLUMN.
+--    A vectorized end_partition UDTF requires PARTITION BY, and PARTITION BY
+--    must be a COLUMN -- an expression fails with "Invalid partitioning
+--    expression; must be a column". Bucket count is derived from BATCH_LIMIT
+--    and udtf_max_batch_size so each partition holds roughly
+--    {{ cfg.udtf_max_batch_size }} files no matter how large BATCH_LIMIT is.
+--    PARTITION BY 1 would be one handler call for the entire batch: zero
+--    parallelism and a guaranteed 180-second timeout at scale.
+--
+-- 2. THE UDTF OUTPUT IS MATERIALIZED ONCE, THEN READ THREE TIMES.
+--    Header insert, frame insert, and error insert all read DICOM_EXTRACT_BATCH.
+--    Re-running the SELECT would re-read every DICOM file from object storage
+--    per use.
+--
+-- 3. NO ORDER BY BEFORE LIMIT.
+--    Snowflake serializes Python UDF evaluation when it must sort before
+--    limiting. On the reference plugin this turned a 10-second parallel scan
+--    into a 10+ minute hang, WITH NO ERROR. The batch selection deliberately has
+--    no ORDER BY.
+--
+-- 4. ONLY f.* IS SELECTED FROM THE TABLE FUNCTION.
+--    For a partitioned table function the OUTER table's columns come back NULL
+--    on the function's output rows. Selecting b.FILE_SIZE alongside f.* yields
+--    NULL silently. FILE_SIZE / FILE_MD5 / SOURCE_NAME are recovered by JOINING
+--    BACK on FILE_NAME afterwards.
+--
+-- 5. REPROCESS DELETES EVERY DERIVED ROW, NOT JUST THE CATALOG ROW.
+--    Frame offsets are deleted BEFORE instances, because the offset rows are
+--    found via the instance rows. Miss this and a changed file keeps its old
+--    byte offsets forever: the anti-join sees a row present, skips it, and the
+--    frame server serves WRONG PIXELS AT HTTP 200. That is INVARIANT-0001.
+--
+-- -----------------------------------------------------------------------------
+-- MAX_OBJECT_BYTES IS ENFORCED BEFORE THE FILE IS OPENED
+--
+-- A 4 GB whole-slide image must never reach the shared parse path -- it would
+-- exhaust handler memory and take down the partition, killing files that were
+-- fine. Size comes from the manifest (LIST already reported it), so the check
+-- costs nothing and the file is never opened.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_LOAD_METADATA(BATCH_LIMIT NUMBER DEFAULT {{ cfg.batch_limit_metadata }})
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Parses NEW manifest files into DICOM_INSTANCE + DICOM_FRAME_OFFSET in one pass. Bounded by BATCH_LIMIT.'
+AS
+$$
+DECLARE
+    n_pending   NUMBER  DEFAULT 0;
+    n_oversized NUMBER  DEFAULT 0;
+    n_batch     NUMBER  DEFAULT 0;
+    n_hdr       NUMBER  DEFAULT 0;
+    n_frames    NUMBER  DEFAULT 0;
+    n_err       NUMBER  DEFAULT 0;
+    n_buckets   NUMBER  DEFAULT 1;
+BEGIN
+    SELECT COUNT(*) INTO n_pending FROM DICOM_FILE_MANIFEST WHERE STATUS = 'NEW';
+    IF (n_pending = 0) THEN
+        RETURN 'Nothing to do: no files in STATUS = NEW.';
+    END IF;
+
+    -- CAPABILITY-0002: oversized objects are quarantined WITHOUT being opened.
+    LET oversize_sql STRING :=
+        'INSERT INTO DICOM_LOAD_ERRORS '
+     || '(SOURCE_NAME, FILE_NAME, PIPELINE_STEP, ERR_CODE, ERR_DETAIL) '
+     || 'SELECT SOURCE_NAME, FILE_NAME, ''EXTRACT'', ''CAPABILITY-0002'', '
+     || '       ''object is '' || FILE_SIZE || '' bytes, over the '
+     ||        '{{ cfg.max_object_bytes }} byte ceiling; not opened'' '
+     || 'FROM DICOM_FILE_MANIFEST '
+     || 'WHERE STATUS = ''NEW'' AND FILE_SIZE > {{ cfg.max_object_bytes }}';
+    EXECUTE IMMEDIATE :oversize_sql;
+    n_oversized := SQLROWCOUNT;
+
+    IF (n_oversized > 0) THEN
+        UPDATE DICOM_FILE_MANIFEST
+           SET STATUS = 'ERROR'
+         WHERE STATUS = 'NEW' AND FILE_SIZE > {{ cfg.max_object_bytes }};
+    END IF;
+
+    -- Bucket count chosen so partitions stay near udtf_max_batch_size. See
+    -- note 1.
+    --
+    -- LEAST(BATCH_LIMIT, n_pending) is load-bearing and was a measured bug, not
+    -- a theoretical one. Deriving buckets from BATCH_LIMIT alone gives
+    -- CEIL(100000/64) = 1563 partitions for a 2748-file backfill -- 1.8 files
+    -- per partition. The handler's thread pool then has almost nothing to
+    -- parallelize and the whole inner level of concurrency is wasted, silently:
+    -- it still completes, just at row-wise speed. Sizing on the ACTUAL batch
+    -- gives CEIL(2748/64) = 43 partitions of ~64 files, which is what the
+    -- {{ cfg.udtf_io_threads }} threads exist for.
+    --
+    -- GREATEST(1, ...) because MOD by zero is an error and a tiny batch must
+    -- still produce one bucket.
+    n_buckets := GREATEST(1, CEIL(LEAST(:BATCH_LIMIT, n_pending) / {{ cfg.udtf_max_batch_size }}));
+
+    -- EXECUTE IMMEDIATE is needed here ONLY because LIMIT will not take a bind.
+    -- Note what is NOT string-built: the stage path is an ordinary column
+    -- expression ('@' || c.STAGE_FQN || '/' || m.FILE_NAME), because
+    -- require_scoped_url=False lets the UDTF accept a path from a column. The
+    -- reference plugin had to string-build the whole statement per source
+    -- because BUILD_SCOPED_FILE_URL demands a literal stage name.
+    LET batch_sql STRING :=
+        'CREATE OR REPLACE TEMPORARY TABLE DICOM_LOAD_BATCH AS '
+     || 'SELECT m.SOURCE_NAME, m.FILE_NAME, m.FILE_SIZE, m.FILE_MD5, '
+     || '       ''@'' || c.STAGE_FQN || ''/'' || m.FILE_NAME AS FILE_PATH, '
+     || '       MOD(ABS(HASH(m.FILE_NAME)), ' || n_buckets::STRING || ') AS BUCKET '
+     || 'FROM DICOM_FILE_MANIFEST m '
+     || 'JOIN DICOM_SOURCE_CONFIG c ON c.SOURCE_NAME = m.SOURCE_NAME '
+     || 'WHERE m.STATUS = ''NEW'' AND c.ENABLED '
+     || '  AND m.FILE_SIZE <= {{ cfg.max_object_bytes }} '
+     -- NO ORDER BY. See note 3.
+     || 'LIMIT ' || :BATCH_LIMIT::STRING;
+    EXECUTE IMMEDIATE :batch_sql;
+
+    SELECT COUNT(*) INTO n_batch FROM DICOM_LOAD_BATCH;
+    IF (n_batch = 0) THEN
+        RETURN 'Nothing to do: ' || n_oversized::STRING
+            || ' oversized file(s) quarantined, no parseable files pending.';
+    END IF;
+
+    -- One file read, both outputs. f.* only -- see note 4.
+    CREATE OR REPLACE TEMPORARY TABLE DICOM_EXTRACT_BATCH AS
+    SELECT f.*
+    FROM DICOM_LOAD_BATCH b,
+         TABLE(EXTRACT_DICOM_HEADER_AND_FRAMES(b.FILE_PATH, b.FILE_NAME)
+               OVER (PARTITION BY b.BUCKET)) f;
+
+    -- ---------------------------------------------------------------------
+    -- Reprocess cleanup. ORDER MATTERS -- see note 5.
+    -- ---------------------------------------------------------------------
+    DELETE FROM DICOM_FRAME_OFFSET
+     WHERE SOP_INSTANCE_UID IN (
+        SELECT i.SOP_INSTANCE_UID
+        FROM DICOM_INSTANCE i
+        JOIN DICOM_LOAD_BATCH b
+          ON b.SOURCE_NAME = i.SOURCE_NAME AND b.FILE_NAME = i.FILE_NAME);
+
+    DELETE FROM DICOM_INSTANCE i
+     WHERE EXISTS (SELECT 1 FROM DICOM_LOAD_BATCH b
+                    WHERE b.SOURCE_NAME = i.SOURCE_NAME
+                      AND b.FILE_NAME   = i.FILE_NAME);
+
+    -- ---------------------------------------------------------------------
+    -- Catalog. Geometry columns are cast to NUMBER here so the closed-form
+    -- frame-offset arithmetic never has to cast at read time.
+    -- ---------------------------------------------------------------------
+    INSERT INTO DICOM_INSTANCE (
+        SOP_INSTANCE_UID, SERIES_INSTANCE_UID, STUDY_INSTANCE_UID, SOP_CLASS_UID,
+        SOURCE_NAME, FILE_NAME, FILE_SIZE, FILE_MD5,
+        TRANSFER_SYNTAX_UID, PIXEL_DATA_START, IMAGE_ROWS, IMAGE_COLUMNS,
+        BITS_ALLOCATED, BITS_STORED, SAMPLES_PER_PIXEL, NUMBER_OF_FRAMES,
+        PHOTOMETRIC_INTERPRETATION, PIXEL_REPRESENTATION,
+        WINDOW_CENTER, WINDOW_WIDTH, RESCALE_SLOPE, RESCALE_INTERCEPT,
+        MODALITY, BODY_PART_EXAMINED, STUDY_DATE, STUDY_TIME, STUDY_DESCRIPTION,
+        SERIES_NUMBER, SERIES_DESCRIPTION, INSTANCE_NUMBER, ACQUISITION_NUMBER,
+        IMAGE_TYPE, PROTOCOL_NAME, SLICE_THICKNESS, SLICE_LOCATION, PIXEL_SPACING,
+        IMAGE_POSITION_PATIENT, IMAGE_ORIENTATION_PATIENT,
+        PATIENT_ID, PATIENT_NAME, PATIENT_SEX, PATIENT_AGE, PATIENT_BIRTH_DATE,
+        ACCESSION_NUMBER, INSTITUTION_NAME, REFERRING_PHYSICIAN_NAME,
+        MANUFACTURER, MANUFACTURER_MODEL_NAME, DEVICE_SERIAL_NUMBER,
+        BURNED_IN_ANNOTATION, RAW_METADATA
+    )
+    SELECT
+        e.SOP_INSTANCE_UID,
+        e.META:"0020000E".Value[0]::VARCHAR,
+        e.META:"0020000D".Value[0]::VARCHAR,
+        e.META:"00080016".Value[0]::VARCHAR,
+        b.SOURCE_NAME, b.FILE_NAME, b.FILE_SIZE, b.FILE_MD5,
+        e.TRANSFER_SYNTAX_UID,
+        e.PIXEL_DATA_START,
+        TRY_CAST(e.META:"00280010".Value[0]::VARCHAR AS NUMBER(38,0)),
+        TRY_CAST(e.META:"00280011".Value[0]::VARCHAR AS NUMBER(38,0)),
+        TRY_CAST(e.META:"00280100".Value[0]::VARCHAR AS NUMBER(38,0)),
+        TRY_CAST(e.META:"00280101".Value[0]::VARCHAR AS NUMBER(38,0)),
+        TRY_CAST(e.META:"00280002".Value[0]::VARCHAR AS NUMBER(38,0)),
+        e.NUMBER_OF_FRAMES,
+        e.META:"00280004".Value[0]::VARCHAR,
+        TRY_CAST(e.META:"00280103".Value[0]::VARCHAR AS NUMBER(38,0)),
+        e.META:"00281050".Value[0]::VARCHAR,
+        e.META:"00281051".Value[0]::VARCHAR,
+        TRY_CAST(e.META:"00281053".Value[0]::VARCHAR AS FLOAT),
+        TRY_CAST(e.META:"00281052".Value[0]::VARCHAR AS FLOAT),
+        e.META:"00080060".Value[0]::VARCHAR,
+        e.META:"00180015".Value[0]::VARCHAR,
+        e.META:"00080020".Value[0]::VARCHAR,
+        e.META:"00080030".Value[0]::VARCHAR,
+        e.META:"00081030".Value[0]::VARCHAR,
+        TRY_CAST(e.META:"00200011".Value[0]::VARCHAR AS NUMBER(38,0)),
+        e.META:"0008103E".Value[0]::VARCHAR,
+        TRY_CAST(e.META:"00200013".Value[0]::VARCHAR AS NUMBER(38,0)),
+        TRY_CAST(e.META:"00200012".Value[0]::VARCHAR AS NUMBER(38,0)),
+        ARRAY_TO_STRING(e.META:"00080008".Value, '\\'),
+        e.META:"00181030".Value[0]::VARCHAR,
+        TRY_CAST(e.META:"00180050".Value[0]::VARCHAR AS FLOAT),
+        TRY_CAST(e.META:"00201041".Value[0]::VARCHAR AS FLOAT),
+        ARRAY_TO_STRING(e.META:"00280030".Value, '\\'),
+        ARRAY_TO_STRING(e.META:"00200032".Value, '\\'),
+        ARRAY_TO_STRING(e.META:"00200037".Value, '\\'),
+        e.META:"00100020".Value[0]::VARCHAR,
+        e.META:"00100010".Value[0]::VARCHAR,
+        e.META:"00100040".Value[0]::VARCHAR,
+        e.META:"00101010".Value[0]::VARCHAR,
+        e.META:"00100030".Value[0]::VARCHAR,
+        e.META:"00080050".Value[0]::VARCHAR,
+        e.META:"00080080".Value[0]::VARCHAR,
+        e.META:"00080090".Value[0]::VARCHAR,
+        e.META:"00080070".Value[0]::VARCHAR,
+        e.META:"00081090".Value[0]::VARCHAR,
+        e.META:"00181000".Value[0]::VARCHAR,
+        e.META:"00280301".Value[0]::VARCHAR,
+        e.META
+    FROM DICOM_EXTRACT_BATCH e
+    -- Join back for SOURCE_NAME / FILE_SIZE / FILE_MD5. See note 4.
+    JOIN DICOM_LOAD_BATCH b ON b.FILE_NAME = e.FILE_NAME
+    WHERE e.ROW_KIND = 'HEADER'
+      AND e.SOP_INSTANCE_UID IS NOT NULL;
+    n_hdr := SQLROWCOUNT;
+
+    -- -----------------------------------------------------------------------
+    -- IDENTITY IS SOPInstanceUID, NOT THE FILE PATH.
+    --
+    -- Runs AFTER the INSERT above, because it exists to clean up what that INSERT
+    -- may have just duplicated.
+    --
+    -- An earlier version of this fix was spliced into the MIDDLE of that INSERT,
+    -- between its FROM and its JOIN, silently detaching the join and the WHERE
+    -- clause. CREATE PROCEDURE then failed, the deploy check counted
+    -- "successfully" lines instead of checking for errors, and the PREVIOUS
+    -- procedure body stayed live -- so the bug looked fixed while the fix was
+    -- never deployed, its symptom having been cleaned up by hand. Statement order
+    -- in SQL scripting is not a formatting concern.
+    --
+    -- The cleanup earlier in this procedure deletes by (SOURCE_NAME, FILE_NAME),
+    -- which assumes one file is one instance. True for read-only ingest of an
+    -- immutable corpus; false the moment one SOPInstanceUID arrives at a second
+    -- path -- a file moved or renamed, or a producer re-run writing elsewhere.
+    -- Derived data does this routinely: re-running segmentation under a different
+    -- prefix produced THREE rows for one UID, and QIDO returned the series three
+    -- times.
+    --
+    -- A predicate cannot separate byte-identical rows, which is what a repeated
+    -- load at one path produces. So the keeper is selected into a temp table,
+    -- every row for those UIDs is deleted, and the keeper is re-inserted. Scoped
+    -- to duplicated UIDs only, so the ordinary case touches nothing. FILE_NAME
+    -- breaks LOADED_AT ties to keep the choice deterministic.
+    -- -----------------------------------------------------------------------
+    CREATE OR REPLACE TEMPORARY TABLE _DEDUPE_KEEP AS
+    SELECT * FROM DICOM_INSTANCE
+     WHERE SOP_INSTANCE_UID IN (SELECT SOP_INSTANCE_UID FROM DICOM_INSTANCE
+                                 GROUP BY SOP_INSTANCE_UID HAVING COUNT(*) > 1)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY SOP_INSTANCE_UID
+                               ORDER BY LOADED_AT DESC, FILE_NAME) = 1;
+
+    -- The files whose rows are about to be dropped. Captured BEFORE the delete,
+    -- because afterwards there is no way to tell a superseded duplicate from a
+    -- load that silently produced nothing -- and those two must not be conflated.
+    CREATE OR REPLACE TEMPORARY TABLE _DEDUPE_LOSERS AS
+    SELECT i.SOURCE_NAME, i.FILE_NAME
+      FROM DICOM_INSTANCE i
+      JOIN _DEDUPE_KEEP k USING (SOP_INSTANCE_UID)
+     WHERE (i.SOURCE_NAME, i.FILE_NAME) <> (k.SOURCE_NAME, k.FILE_NAME);
+
+    DELETE FROM DICOM_INSTANCE
+     WHERE SOP_INSTANCE_UID IN (SELECT SOP_INSTANCE_UID FROM _DEDUPE_KEEP);
+
+    INSERT INTO DICOM_INSTANCE SELECT * FROM _DEDUPE_KEEP;
+
+    DELETE FROM DICOM_FRAME_OFFSET
+     WHERE SOP_INSTANCE_UID NOT IN (SELECT SOP_INSTANCE_UID FROM DICOM_INSTANCE);
+
+    -- ------------------------------------------------------------------------
+    -- A DEDUPED FILE IS SUPERSEDED, NOT LOADED, AND NOT LIMBO EITHER.
+    --
+    -- Dropping the duplicate catalog row leaves its manifest row claiming LOADED
+    -- with nothing to point at, which is precisely the condition
+    -- INVARIANT_0002_NO_LIMBO_FILES exists to catch. Discovered when a dedupe
+    -- test tripped that check -- the fix had created the exact class of
+    -- inconsistency the checks were written to find.
+    --
+    -- Widening the invariant to tolerate it would have blunted the one assertion
+    -- that catches a silently failed load. So the state gets its own name
+    -- instead: the file was read, and its instance is represented by another
+    -- path. LOADED means "this file backs a catalog row" and stays true.
+    -- ------------------------------------------------------------------------
+    UPDATE DICOM_FILE_MANIFEST m
+       SET STATUS = 'SUPERSEDED'
+     WHERE EXISTS (SELECT 1 FROM _DEDUPE_LOSERS l
+                    WHERE l.SOURCE_NAME = m.SOURCE_NAME
+                      AND l.FILE_NAME   = m.FILE_NAME);
+
+
+    -- ---------------------------------------------------------------------
+    -- Frame offsets. Encapsulated instances only -- native syntaxes emit no
+    -- FRAME rows at all, by design.
+    -- ---------------------------------------------------------------------
+    INSERT INTO DICOM_FRAME_OFFSET
+        (SOP_INSTANCE_UID, FRAME_NUMBER, FRAME_OFFSET, FRAME_LENGTH,
+         OFFSET_SOURCE, FILE_MD5)
+    SELECT e.SOP_INSTANCE_UID, e.FRAME_NUMBER, e.FRAME_OFFSET, e.FRAME_LENGTH,
+           e.OFFSET_SOURCE, b.FILE_MD5
+    FROM DICOM_EXTRACT_BATCH e
+    JOIN DICOM_LOAD_BATCH b ON b.FILE_NAME = e.FILE_NAME
+    WHERE e.ROW_KIND = 'FRAME';
+    n_frames := SQLROWCOUNT;
+
+    -- ---------------------------------------------------------------------
+    -- Quarantine. QUARANTINE is read from DICOM_ERROR_CATALOG, so a CAPACITY
+    -- error does not sideline a perfectly good file.
+    -- ---------------------------------------------------------------------
+    INSERT INTO DICOM_LOAD_ERRORS
+        (SOURCE_NAME, FILE_NAME, PIPELINE_STEP, ERR_CODE, ERR_DETAIL)
+    SELECT b.SOURCE_NAME, e.FILE_NAME, 'EXTRACT', e.ERR_CODE, e.ERR_DETAIL
+    FROM DICOM_EXTRACT_BATCH e
+    JOIN DICOM_LOAD_BATCH b ON b.FILE_NAME = e.FILE_NAME
+    WHERE e.ERR_CODE IS NOT NULL;
+    n_err := SQLROWCOUNT;
+
+    -- ---------------------------------------------------------------------
+    -- Manifest transitions.
+    --
+    -- A file is ERROR only when its code is marked QUARANTINE. Codes like
+    -- CAPABILITY-0003 (non-image SOP class) are recorded but the file is LOADED
+    -- and correct -- a structured report is not a failure.
+    -- ---------------------------------------------------------------------
+    UPDATE DICOM_FILE_MANIFEST m
+       SET STATUS = 'ERROR'
+     WHERE EXISTS (
+        SELECT 1
+        FROM DICOM_EXTRACT_BATCH e
+        JOIN DICOM_LOAD_BATCH b ON b.FILE_NAME = e.FILE_NAME
+        LEFT JOIN DICOM_ERROR_CATALOG c ON c.ERR_CODE = e.ERR_CODE
+        WHERE b.SOURCE_NAME = m.SOURCE_NAME
+          AND b.FILE_NAME   = m.FILE_NAME
+          AND e.ERR_CODE IS NOT NULL
+          AND COALESCE(c.QUARANTINE, TRUE));
+
+    UPDATE DICOM_FILE_MANIFEST m
+       SET STATUS = 'LOADED', LOADED_AT = CURRENT_TIMESTAMP()
+     WHERE m.STATUS = 'NEW'
+       AND EXISTS (SELECT 1 FROM DICOM_INSTANCE i
+                    WHERE i.SOURCE_NAME = m.SOURCE_NAME
+                      AND i.FILE_NAME   = m.FILE_NAME);
+
+    RETURN 'Pending ' || n_pending::STRING
+        || ' | batch ' || n_batch::STRING
+        || ' in ' || n_buckets::STRING || ' partition(s)'
+        || ' | instances ' || n_hdr::STRING
+        || ' | frame offsets ' || n_frames::STRING
+        || ' | errors ' || n_err::STRING
+        || ' | oversized ' || n_oversized::STRING;
+END;
+$$;
+
+
+-- =============================================================================
+-- SP_RECONCILE_DELETES
+--
+-- Deliberately separate from SP_SCAN_ALL_SOURCES so a misconfigured prefix is
+-- VISIBLE in the manifest as DELETED before any rows are actually removed. A
+-- scan that both detected and purged would make a config typo destructive.
+--
+-- =============================================================================
+-- WHY IT IS NOW SCHEDULED, AND WHAT REPLACES THE PROTECTION THAT GAVE UP
+--
+-- Leaving this purely manual was correct while the only thing that produced
+-- DELETED rows was a human changing a prefix. The UID dedupe changed that: dedupe
+-- keeps the most recent load, so when the same SOPInstanceUID arrives at a second
+-- path the surviving catalog row can point at the path that is no longer there.
+-- Nothing errors -- the row is present, the frame plane resolves, and the gateway
+-- 503s on bytes that were reconciled away from underneath it. That is an ordering
+-- hazard that only a scheduled reconcile closes, so TASK_VOXEL_RECONCILE now runs
+-- it after every extract.
+--
+-- But automating a destructive step is exactly what the original note warned
+-- against, so the protection is replaced rather than dropped: a BLAST RADIUS
+-- GUARD. Real deletions are incremental -- a study is retired, a file is
+-- superseded. A misconfigured prefix marks an entire source DELETED in one scan.
+-- Those two are trivially separable by proportion, so the procedure REFUSES when
+-- the DELETED share of a source exceeds P_MAX_DELETE_PCT and says so, leaving the
+-- rows in place for a human to look at.
+--
+-- Pass 0 to disable the guard. That is the deliberate manual path for a genuine
+-- bulk retirement, and it has to be typed on purpose.
+--
+-- KNOWN EDGE: a percentage guard is the wrong shape for a very small source. This
+-- deployment has sources with 1 and 7 files, and retiring the single file of a
+-- one-file source is 100% -- so the guard trips on a legitimate action. That is the
+-- conservative direction to fail in (it refuses and explains, rather than deleting),
+-- and SP_RECONCILE_DELETES(0) is the documented override, but it is a real rough
+-- edge rather than a clean rule. A row-count floor alongside the percentage would
+-- smooth it; not added yet because a floor is another number to justify and no
+-- deployment has needed it.
+-- =============================================================================
+
+-- Snowflake keys procedures on name + SIGNATURE, so adding a defaulted parameter
+-- creates a new signature and leaves the previous zero-arg version live as a stale
+-- overload -- the same trap documented for the UDFs in 06_UDFS. CALL
+-- SP_RECONCILE_DELETES() would keep resolving to the OLD, unguarded body.
+DROP PROCEDURE IF EXISTS SP_RECONCILE_DELETES();
+
+CREATE OR REPLACE PROCEDURE SP_RECONCILE_DELETES(P_MAX_DELETE_PCT FLOAT DEFAULT 5.0)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Removes derived rows for files marked DELETED, refusing when the DELETED share of a source exceeds P_MAX_DELETE_PCT (0 disables the guard).'
+AS
+$$
+DECLARE
+    n_frames  NUMBER DEFAULT 0;
+    n_inst    NUMBER DEFAULT 0;
+    n_deleted NUMBER DEFAULT 0;
+    worst_pct FLOAT  DEFAULT 0;
+    worst_src VARCHAR;
+BEGIN
+    SELECT COUNT_IF(STATUS = 'DELETED') INTO n_deleted FROM DICOM_FILE_MANIFEST;
+    IF (n_deleted = 0) THEN
+        RETURN 'Nothing to reconcile: no files in STATUS = DELETED.';
+    END IF;
+
+    -- Per SOURCE, not account-wide. One small source being fully retired inside a
+    -- large corpus is a legitimate action that an account-wide percentage would
+    -- wave through, and it is precisely the shape a bad prefix on that source
+    -- also has.
+    IF (:P_MAX_DELETE_PCT > 0) THEN
+        SELECT SOURCE_NAME, PCT
+          INTO worst_src, worst_pct
+          FROM (
+            SELECT SOURCE_NAME,
+                   100.0 * COUNT_IF(STATUS = 'DELETED') / NULLIF(COUNT(*), 0) AS PCT
+              FROM DICOM_FILE_MANIFEST
+             GROUP BY SOURCE_NAME
+             ORDER BY PCT DESC
+             LIMIT 1);
+
+        IF (worst_pct > :P_MAX_DELETE_PCT) THEN
+            -- 4 decimal places, not 1. ROUND(pct, 1) printed "REFUSED: 0% of
+            -- source X is marked DELETED, above the 0.001% guard", which is a
+            -- refusal message that reads as a contradiction and invites the
+            -- operator to assume the guard is broken rather than doing its job.
+            RETURN 'REFUSED: ' || ROUND(worst_pct, 4)::STRING || '% of source '
+                || worst_src || ' is marked DELETED, above the '
+                || :P_MAX_DELETE_PCT::STRING || '% guard. This is the shape of a '
+                || 'prefix or stage misconfiguration, not incremental retirement. '
+                || 'Inspect with: SELECT * FROM V_PIPELINE_STATUS. If the deletions '
+                || 'are real, call SP_RECONCILE_DELETES(0) to override.';
+        END IF;
+    END IF;
+
+    -- Frame offsets first: they are reached THROUGH the instance rows.
+    DELETE FROM DICOM_FRAME_OFFSET
+     WHERE SOP_INSTANCE_UID IN (
+        SELECT i.SOP_INSTANCE_UID
+        FROM DICOM_INSTANCE i
+        JOIN DICOM_FILE_MANIFEST m
+          ON m.SOURCE_NAME = i.SOURCE_NAME AND m.FILE_NAME = i.FILE_NAME
+        WHERE m.STATUS = 'DELETED');
+    n_frames := SQLROWCOUNT;
+
+    DELETE FROM DICOM_INSTANCE i
+     WHERE EXISTS (SELECT 1 FROM DICOM_FILE_MANIFEST m
+                    WHERE m.SOURCE_NAME = i.SOURCE_NAME
+                      AND m.FILE_NAME   = i.FILE_NAME
+                      AND m.STATUS = 'DELETED');
+    n_inst := SQLROWCOUNT;
+
+    RETURN 'Removed ' || n_inst::STRING || ' instance(s) and '
+        || n_frames::STRING || ' frame offset(s) for ' || n_deleted::STRING
+        || ' DELETED file(s).';
+END;
+$$;
+
+
+-- =============================================================================
+-- RECOVERY VERBS
+--
+-- Every recovery action is ONE named, idempotent procedure. At 3am a human
+-- executing a multi-statement recovery by hand in the wrong order is its own
+-- incident. The reference plugin's retry was a documented 2-statement pattern;
+-- these make it a single CALL.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_REPLAY_FILE(P_SOURCE VARCHAR, P_FILE VARCHAR)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Idempotent single-file replay: drops derived rows, resolves errors, resets manifest to NEW.'
+AS
+$$
+BEGIN
+    -- The reprocess-delete invariant is enforced INSIDE the procedure so it
+    -- cannot be forgotten by whoever is doing the recovery.
+    DELETE FROM DICOM_FRAME_OFFSET
+     WHERE SOP_INSTANCE_UID IN (
+        SELECT SOP_INSTANCE_UID FROM DICOM_INSTANCE
+         WHERE SOURCE_NAME = :P_SOURCE AND FILE_NAME = :P_FILE);
+
+    DELETE FROM DICOM_INSTANCE
+     WHERE SOURCE_NAME = :P_SOURCE AND FILE_NAME = :P_FILE;
+
+    UPDATE DICOM_LOAD_ERRORS
+       SET RESOLVED = TRUE
+     WHERE SOURCE_NAME = :P_SOURCE AND FILE_NAME = :P_FILE AND NOT RESOLVED;
+
+    UPDATE DICOM_FILE_MANIFEST
+       SET STATUS = 'NEW', LOADED_AT = NULL
+     WHERE SOURCE_NAME = :P_SOURCE AND FILE_NAME = :P_FILE;
+
+    RETURN 'Replay queued for ' || :P_SOURCE || '/' || :P_FILE
+        || '. Call SP_LOAD_METADATA or wait for the next task run.';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE SP_REPLAY_ERROR_CLASS(P_ERR_CODE VARCHAR)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Bulk replay by error code. Refuses codes whose catalog entry says retrying cannot help.'
+AS
+$$
+DECLARE
+    is_retryable BOOLEAN DEFAULT FALSE;
+    err_class    VARCHAR DEFAULT NULL;
+    n            NUMBER  DEFAULT 0;
+BEGIN
+    SELECT RETRYABLE, ERR_CLASS INTO is_retryable, err_class
+    FROM DICOM_ERROR_CATALOG WHERE ERR_CODE = :P_ERR_CODE;
+
+    IF (err_class IS NULL) THEN
+        RETURN 'REFUSED: ' || :P_ERR_CODE || ' is not in DICOM_ERROR_CATALOG.';
+    END IF;
+
+    -- Refusing is the feature. Replaying a DATA-* code re-reads the same bad
+    -- bytes; replaying a CONFIG-* code re-hits the same misconfiguration. Both
+    -- burn credits to reach the identical failure.
+    IF (NOT is_retryable) THEN
+        RETURN 'REFUSED: ' || :P_ERR_CODE || ' (' || err_class
+            || ') is marked RETRYABLE = FALSE. Replaying it cannot succeed. '
+            || 'Fix the underlying cause, then use SP_REPLAY_FILE per file.';
+    END IF;
+
+    UPDATE DICOM_FILE_MANIFEST m
+       SET STATUS = 'NEW', LOADED_AT = NULL
+     WHERE EXISTS (SELECT 1 FROM DICOM_LOAD_ERRORS e
+                    WHERE e.SOURCE_NAME = m.SOURCE_NAME
+                      AND e.FILE_NAME   = m.FILE_NAME
+                      AND e.ERR_CODE    = :P_ERR_CODE
+                      AND NOT e.RESOLVED);
+    n := SQLROWCOUNT;
+
+    UPDATE DICOM_LOAD_ERRORS
+       SET RESOLVED = TRUE
+     WHERE ERR_CODE = :P_ERR_CODE AND NOT RESOLVED;
+
+    RETURN 'Requeued ' || n::STRING || ' file(s) for ' || :P_ERR_CODE || '.';
+END;
+$$;
+
+
+-- =============================================================================
+-- SP_RESUME_PIPELINE / SP_SUSPEND_PIPELINE
+--
+-- The ORDER is encoded here, not left to the operator, because Snowflake
+-- requires children resumed BEFORE the root and the root suspended BEFORE its
+-- children. Getting it backwards leaves the DAG in a state where the root runs
+-- but children never fire -- and nothing errors.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_RESUME_PIPELINE()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Resumes the task DAG children-before-root, which is the order Snowflake requires.'
+AS
+$$
+BEGIN
+    ALTER TASK IF EXISTS TASK_VOXEL_RECONCILE RESUME;
+    ALTER TASK IF EXISTS TASK_VOXEL_EXTRACT RESUME;
+    ALTER TASK IF EXISTS TASK_VOXEL_SCAN RESUME;
+    RETURN 'Pipeline resumed (children first, then root).';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE SP_SUSPEND_PIPELINE()
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Suspends the task DAG root-before-children, which is the order Snowflake requires.'
+AS
+$$
+BEGIN
+    ALTER TASK IF EXISTS TASK_VOXEL_SCAN SUSPEND;
+    ALTER TASK IF EXISTS TASK_VOXEL_EXTRACT SUSPEND;
+    ALTER TASK IF EXISTS TASK_VOXEL_RECONCILE SUSPEND;
+    RETURN 'Pipeline suspended (root first, then children). Compute cost stops.';
+END;
+$$;
+
+-- =============================================================================
+-- SP_SYNC_PREAD_STAGE
+--
+-- Copies DICOM bytes from the EXTERNAL source stage into the INTERNAL stage that
+-- the DICOMweb service mounts.
+--
+-- =============================================================================
+-- WHY THIS PROCEDURE HAS TO EXIST
+--
+-- SPCS stage volumes mount INTERNAL stages only. But the catalog is built by
+-- reading the EXTERNAL stage, and DICOM_INSTANCE.FILE_NAME records paths relative
+-- to that external stage.
+--
+-- So a deployment can look completely healthy -- 2,848 instances catalogued, frame
+-- plane 100% resolved, QIDO-RS returning studies, series, and instances -- and
+-- still serve NOT ONE PIXEL, because the bytes were never copied to the stage the
+-- service can actually read. The failure is:
+--
+--   FileNotFoundError: [Errno 2] No such file or directory:
+--     '/mnt/dicom/f53b78ea-.../621cc748-....dcm'
+--
+-- That is exactly what happened on first deploy. Metadata and pixels come from
+-- DIFFERENT stages, and only one of them was populated. Nothing in the ingest path
+-- notices, because ingest reads the external stage successfully.
+--
+-- V_PREAD_COVERAGE below makes the gap visible BEFORE a clinician finds it.
+--
+-- =============================================================================
+-- PATHS MUST BE PRESERVED EXACTLY
+--
+-- The gateway resolves a frame as os.pread(MOUNT + '/' + FILE_NAME). So the
+-- relative path in the internal stage must match FILE_NAME byte for byte. Copying
+-- per registered prefix preserves it; flattening the structure would break every
+-- lookup while appearing to succeed at the copy step.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_SYNC_PREAD_STAGE(SERIES_LIMIT NUMBER)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Copies DICOM files from the external source stage to the internal stage the service mounts, preserving relative paths. SERIES_LIMIT <= 0 copies every registered prefix.'
+AS
+$$
+DECLARE
+    c CURSOR FOR
+        SELECT PREFIX
+        FROM {{ db }}.{{ schema }}.DICOM_SOURCE_PREFIX
+        WHERE SOURCE_NAME = '{{ cfg.source_name }}'
+        ORDER BY PREFIX;
+    n_prefix  NUMBER DEFAULT 0;
+    n_limit   NUMBER DEFAULT 0;
+    stmt      VARCHAR;
+BEGIN
+    -- A limit of 0 or less means "everything". The IDC corpus is ~1.4 GiB, so a
+    -- full copy is cheap; a bigger corpus is why the limit exists at all.
+    n_limit := IFF(:SERIES_LIMIT IS NULL OR :SERIES_LIMIT <= 0, 1000000, :SERIES_LIMIT);
+
+    FOR rec IN c DO
+        IF (n_prefix >= n_limit) THEN
+            BREAK;
+        END IF;
+
+        -- COPY FILES is the supported stage-to-stage copy. Targeting the SAME
+        -- prefix on both sides is what keeps FILE_NAME valid.
+        stmt := 'COPY FILES INTO @{{ db }}.{{ schema }}.{{ cfg.pread_stage }}/'
+             || rec.PREFIX
+             || ' FROM @{{ db }}.{{ schema }}.{{ cfg.source_stage }}/'
+             || rec.PREFIX;
+        EXECUTE IMMEDIATE :stmt;
+
+        n_prefix := n_prefix + 1;
+    END FOR;
+
+    -- Refresh the directory table, or the stage volume mount will not see the new
+    -- files and the service keeps 404ing on bytes that are now present.
+    stmt := 'ALTER STAGE {{ db }}.{{ schema }}.{{ cfg.pread_stage }} REFRESH';
+    EXECUTE IMMEDIATE :stmt;
+
+    RETURN 'Copied ' || n_prefix || ' prefix(es) into {{ cfg.pread_stage }} and '
+        || 'refreshed the directory table. Check V_PREAD_COVERAGE for per-series '
+        || 'servability.';
+END;
+$$;
+
+-- =============================================================================
+-- V_PREAD_COVERAGE
+--
+-- The check that would have caught this immediately: which catalogued instances
+-- actually have BYTES on the stage the service reads.
+--
+-- A series is only truly viewable when it is both catalogued AND present here.
+-- Everything else in the system reports on the catalog alone.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_PREAD_COVERAGE
+COMMENT = 'Voxel: catalogued instances vs bytes present on the mounted internal stage. PCT_PRESENT < 100 means the viewer will 404 on those frames.'
+AS
+WITH staged AS (
+    SELECT REGEXP_REPLACE(RELATIVE_PATH, '^/+', '') AS REL_PATH
+    FROM DIRECTORY(@{{ db }}.{{ schema }}.{{ cfg.pread_stage }})
+)
+SELECT i.SERIES_INSTANCE_UID,
+       ANY_VALUE(i.MODALITY)                         AS MODALITY,
+       COUNT(*)                                      AS N_CATALOGUED,
+       COUNT(s.REL_PATH)                             AS N_PRESENT,
+       ROUND(100.0 * COUNT(s.REL_PATH) / NULLIF(COUNT(*), 0), 1) AS PCT_PRESENT,
+       CASE
+           WHEN COUNT(s.REL_PATH) = 0            THEN 'NO_BYTES - viewer will 404 every frame'
+           WHEN COUNT(s.REL_PATH) < COUNT(*)     THEN 'PARTIAL - some frames will 404'
+           ELSE 'COMPLETE'
+       END                                           AS PREAD_STATE
+FROM DICOM_INSTANCE i
+LEFT JOIN staged s ON s.REL_PATH = i.FILE_NAME
+GROUP BY i.SERIES_INSTANCE_UID;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SHOW PROCEDURES LIKE 'SP_%' IN SCHEMA {{ db }}.{{ schema }};
+SELECT "name", "arguments" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY "name";
+

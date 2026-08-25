@@ -1,0 +1,194 @@
+-- =============================================================================
+-- 03: Catalog table
+--
+-- DICOM_INSTANCE is the per-instance catalog: one row per SOP Instance, with
+-- the DICOMweb-relevant attributes flattened into typed columns and the full
+-- header retained in RAW_METADATA.
+--
+-- =============================================================================
+-- THREE DESIGN DECISIONS THAT DIFFER FROM THE REFERENCE PLUGIN
+--
+-- 1. GEOMETRY COLUMNS ARE TYPED NUMBERS, NOT VARCHAR.
+--    IMAGE_ROWS, IMAGE_COLUMNS, BITS_ALLOCATED, SAMPLES_PER_PIXEL, and
+--    NUMBER_OF_FRAMES are NUMBER, and PIXEL_DATA_START is NUMBER.
+--
+--    This is not tidiness. For native uncompressed transfer syntaxes the frame
+--    offset is closed-form:
+--
+--      offset(n) = PIXEL_DATA_START
+--                + n * IMAGE_ROWS * IMAGE_COLUMNS
+--                    * (BITS_ALLOCATED / 8) * SAMPLES_PER_PIXEL
+--
+--    Every multiplicand except PIXEL_DATA_START is already in the QIDO-RS
+--    metadata response the viewer holds, so for a large fraction of a real CT
+--    or MR archive the frame offset needs no stored offset row at all -- it is
+--    a multiply. Storing these as VARCHAR (as the reference plugin does) forces
+--    a cast on every frame lookup and makes the arithmetic path silently
+--    fragile on a value like '512.0' or a multi-valued tag.
+--
+-- 2. SOP_INSTANCE_UID IS THE IDENTITY, NOT FILE_NAME.
+--    The reference keys derived tables on FILE_NAME alone, which required a
+--    pre-flight guard aborting when one FILE_NAME appeared under two
+--    SOURCE_NAMEs. DICOMweb addresses everything by UID
+--    (/studies/{study}/series/{series}/instances/{sop}/frames/{n}), so the
+--    catalog keys on the UID and carries (SOURCE_NAME, FILE_NAME) as the
+--    physical locator. A UID colliding across two distinct files is a real
+--    data problem and is asserted in CHECKS rather than designed around.
+--
+-- 3. FILE_MD5 LIVES HERE, NOT ONLY IN THE MANIFEST.
+--    Derived rows carry the md5 of the file they were computed from. That makes
+--    "this row is stale relative to its source" a joinable predicate instead of
+--    something inferred from timestamps. The invariant sweep in CHECKS uses it.
+--
+-- =============================================================================
+-- KNOWN PHI GAP, CLOSED IN THE DEID PHASE
+--
+-- RAW_METADATA holds the whole header, including PatientName (0010,0010),
+-- PatientID, InstitutionName, ReferringPhysicianName, AccessionNumber, device
+-- serials, and free-text comments. 07_MASKING_POLICIES masks the typed
+-- identifier columns but NOT this VARIANT, so in phase 1
+--
+--     SELECT RAW_METADATA:"00100010" FROM DICOM_INSTANCE
+--
+-- returns cleartext to any role with SELECT. That is a real finding and it is
+-- asserted as a WARN in CHECKS so it cannot be quietly shipped. The deid phase
+-- closes it with a masking policy ON THE VARIANT (the policy body calls a UDF
+-- doing nested OBJECT_INSERT) plus a governed tag allowlist that drops
+-- non-SAFE tags at ingest rather than storing-then-masking them.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+CREATE TABLE IF NOT EXISTS DICOM_INSTANCE (
+    -- Identity ---------------------------------------------------------------
+    SOP_INSTANCE_UID            VARCHAR         NOT NULL,
+    SERIES_INSTANCE_UID         VARCHAR,
+    STUDY_INSTANCE_UID          VARCHAR,
+    SOP_CLASS_UID               VARCHAR,
+
+    -- Physical locator -------------------------------------------------------
+    SOURCE_NAME                 VARCHAR         NOT NULL,
+    FILE_NAME                   VARCHAR         NOT NULL,
+    FILE_SIZE                   NUMBER(38,0),
+    FILE_MD5                    VARCHAR,
+
+    -- Pixel geometry. TYPED, because the closed-form offset path does
+    -- arithmetic on these. See header note 1.
+    TRANSFER_SYNTAX_UID         VARCHAR,
+    PIXEL_DATA_START            NUMBER(38,0),
+    IMAGE_ROWS                  NUMBER(38,0),
+    IMAGE_COLUMNS               NUMBER(38,0),
+    BITS_ALLOCATED              NUMBER(38,0),
+    BITS_STORED                 NUMBER(38,0),
+    SAMPLES_PER_PIXEL           NUMBER(38,0),
+    NUMBER_OF_FRAMES            NUMBER(38,0),
+    PHOTOMETRIC_INTERPRETATION  VARCHAR,
+    PIXEL_REPRESENTATION        NUMBER(38,0),
+
+    -- Rendering intent. Kept as VARCHAR deliberately: WindowCenter and
+    -- WindowWidth are legitimately multi-valued in DICOM (a file may carry
+    -- several named presets), so coercing to a single NUMBER at ingest would
+    -- discard information. The renderer resolves [0] at read time.
+    WINDOW_CENTER               VARCHAR,
+    WINDOW_WIDTH                VARCHAR,
+    RESCALE_SLOPE               FLOAT,
+    RESCALE_INTERCEPT           FLOAT,
+
+    -- Clinical / study context ----------------------------------------------
+    MODALITY                    VARCHAR,
+    BODY_PART_EXAMINED          VARCHAR,
+    STUDY_DATE                  VARCHAR,
+    STUDY_TIME                  VARCHAR,
+    STUDY_DESCRIPTION           VARCHAR,
+    SERIES_NUMBER               NUMBER(38,0),
+    SERIES_DESCRIPTION          VARCHAR,
+    INSTANCE_NUMBER             NUMBER(38,0),
+    ACQUISITION_NUMBER          NUMBER(38,0),
+    IMAGE_TYPE                  VARCHAR,
+    PROTOCOL_NAME               VARCHAR,
+    SLICE_THICKNESS             FLOAT,
+    SLICE_LOCATION              FLOAT,
+    PIXEL_SPACING               VARCHAR,
+    IMAGE_POSITION_PATIENT      VARCHAR,
+    IMAGE_ORIENTATION_PATIENT   VARCHAR,
+
+    -- Identifiers. Masked in 07. See the PHI gap note in the header.
+    PATIENT_ID                  VARCHAR,
+    PATIENT_NAME                VARCHAR,
+    PATIENT_SEX                 VARCHAR,
+    PATIENT_AGE                 VARCHAR,
+    PATIENT_BIRTH_DATE          VARCHAR,
+    ACCESSION_NUMBER            VARCHAR,
+    INSTITUTION_NAME            VARCHAR,
+    REFERRING_PHYSICIAN_NAME    VARCHAR,
+    MANUFACTURER                VARCHAR,
+    MANUFACTURER_MODEL_NAME     VARCHAR,
+    DEVICE_SERIAL_NUMBER        VARCHAR,
+
+    -- Burned-in pixel PHI signal. Populated in phase 1 straight from tag
+    -- (0028,0301) when present, so the deid phase has a starting population to
+    -- triage rather than having to re-read every file. NULL means "the tag was
+    -- absent", which is NOT the same as "clean" -- the tag is optional and
+    -- widely omitted, which is exactly why the deid phase needs OCR.
+    BURNED_IN_ANNOTATION        VARCHAR,
+
+    -- Full header, untyped ---------------------------------------------------
+    RAW_METADATA                VARIANT,
+
+    -- Lineage ----------------------------------------------------------------
+    LOADED_AT                   TIMESTAMP_LTZ   DEFAULT CURRENT_TIMESTAMP()
+)
+COMMENT = 'Voxel: one row per DICOM SOP Instance. Geometry columns are typed NUMBER so the closed-form frame-offset path can do arithmetic without casting.';
+
+-- -----------------------------------------------------------------------------
+-- Series-level rollup, derived.
+--
+-- QIDO-RS asks for series lists constantly (every study open), and the answer
+-- is an aggregation over instances. A view rather than a table because the
+-- aggregation is cheap and a table would need its own staleness story on top of
+-- the one DICOM_INSTANCE already has.
+--
+-- MIN/MAX on the geometry columns rather than ANY_VALUE: a series whose slices
+-- disagree on Rows/Columns cannot be rendered as a single volume, and surfacing
+-- that as MIN <> MAX makes it visible instead of arbitrary.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW V_DICOM_SERIES AS
+SELECT
+    SERIES_INSTANCE_UID,
+    ANY_VALUE(STUDY_INSTANCE_UID)       AS STUDY_INSTANCE_UID,
+    ANY_VALUE(MODALITY)                 AS MODALITY,
+    ANY_VALUE(SERIES_NUMBER)            AS SERIES_NUMBER,
+    ANY_VALUE(SERIES_DESCRIPTION)       AS SERIES_DESCRIPTION,
+    ANY_VALUE(BODY_PART_EXAMINED)       AS BODY_PART_EXAMINED,
+    ANY_VALUE(SOURCE_NAME)              AS SOURCE_NAME,
+    COUNT(*)                            AS INSTANCE_COUNT,
+    SUM(COALESCE(NUMBER_OF_FRAMES, 1))  AS FRAME_COUNT,
+    MIN(IMAGE_ROWS)                     AS MIN_ROWS,
+    MAX(IMAGE_ROWS)                     AS MAX_ROWS,
+    MIN(IMAGE_COLUMNS)                  AS MIN_COLUMNS,
+    MAX(IMAGE_COLUMNS)                  AS MAX_COLUMNS,
+    COUNT(DISTINCT TRANSFER_SYNTAX_UID) AS DISTINCT_TRANSFER_SYNTAXES,
+    ANY_VALUE(TRANSFER_SYNTAX_UID)      AS TRANSFER_SYNTAX_UID,
+    -- A mixed-geometry or mixed-syntax series is renderable only slice by
+    -- slice. Flag it here so the viewer can decide rather than discovering it
+    -- mid-scroll.
+    (MIN(IMAGE_ROWS) <> MAX(IMAGE_ROWS)
+     OR MIN(IMAGE_COLUMNS) <> MAX(IMAGE_COLUMNS)
+     OR COUNT(DISTINCT TRANSFER_SYNTAX_UID) > 1) AS IS_HETEROGENEOUS,
+    MAX(LOADED_AT)                      AS LAST_LOADED_AT
+FROM DICOM_INSTANCE
+WHERE SERIES_INSTANCE_UID IS NOT NULL
+GROUP BY SERIES_INSTANCE_UID;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT COUNT(*) AS INSTANCE_ROWS FROM DICOM_INSTANCE;
+
+-- SHOW VIEWS has no "rows" column -- it reports definition metadata, not
+-- cardinality. Selecting a non-existent column here fails the whole script with
+-- an invalid-identifier error, which is a silly way to break a deploy.
+SHOW VIEWS LIKE 'V_DICOM_SERIES';
+SELECT "name", "is_secure", "created_on" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

@@ -1,0 +1,23 @@
+-- =============================================================================
+-- 01: Database and schema
+--
+-- Idempotent. 00_ACCOUNT_SETUP already created these and handed ownership to
+-- {{ owner_role }}; this exists so the core phase can be re-run standalone
+-- (for example against a schema that was dropped without a full teardown)
+-- without needing ACCOUNTADMIN.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+
+CREATE DATABASE IF NOT EXISTS {{ db }}
+  COMMENT = 'Voxel: Snowflake-native medical imaging platform.';
+
+CREATE SCHEMA IF NOT EXISTS {{ db }}.{{ schema }}
+  COMMENT = 'DICOM catalog, frame plane, DICOMweb service, governance.';
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+SELECT CURRENT_DATABASE() AS DB,
+       CURRENT_SCHEMA()   AS SCH,
+       CURRENT_ROLE()     AS ROLE;

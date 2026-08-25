@@ -1,0 +1,106 @@
+-- =============================================================================
+-- 02: Stages
+--
+-- TWO stages, deliberately. This is not redundancy -- they serve different
+-- phases and neither can do the other's job.
+--
+-- 1. {{ cfg.source_stage }}  (EXTERNAL, read-only, public IDC bucket)
+--    Carries the ingest-scale story. The header/frame UDTF reads through it via
+--    SnowflakeFile, which works fine against an external stage.
+--
+-- 2. {{ cfg.pread_stage }}  (INTERNAL)
+--    Exists solely because SPCS stage volumes mount INTERNAL STAGES ONLY --
+--    "External stages aren't supported" is an explicit platform limitation, not
+--    an oversight. The dicomweb phase serves frames with os.pread() against a
+--    mounted stage volume, so it cannot reach a public S3 bucket no matter how
+--    the stage is defined. A subset of series is COPY'd here in 13.
+--
+-- The bench phase measures the delta between reading the same series through
+-- the external stage versus the internal one. That delta is a receipt, not a
+-- workaround -- it quantifies what the pread path actually buys.
+--
+-- =============================================================================
+-- WHY NO DIRECTORY TABLES
+--
+-- The reference DICOM plugin established this the hard way. A directory table
+-- on the root of the IDC bucket fails outright:
+--
+--   Total size (>=1,073,741,904 bytes) of the directory table exceeds the
+--   limit (1,073,741,824 bytes)
+--
+-- The bucket holds >3.7M files. Discovery therefore uses LIST + RESULT_SCAN
+-- into DICOM_FILE_MANIFEST (see 11_PIPELINE_PROCEDURES), which also gives md5
+-- change detection and delete reconciliation that a directory table does not.
+--
+-- If your own bucket is small enough to list, a directory table is a fine
+-- alternative -- but nothing in Voxel requires one. SnowflakeFile does not need
+-- it, and neither does BUILD_SCOPED_FILE_URL.
+--
+-- =============================================================================
+-- ENCRYPTION ON THE INTERNAL STAGE IS LOAD-BEARING FOR PORTABILITY
+--
+-- SNOWFLAKE_SSE is set explicitly rather than left to default. Stage volume
+-- support differs by cloud:
+--   AWS   - supports both SNOWFLAKE_FULL and SNOWFLAKE_SSE
+--   Azure - supports SNOWFLAKE_SSE ONLY
+--   GCP   - stage volumes are NOT SUPPORTED AT ALL
+--
+-- Setting SNOWFLAKE_SSE means this stage mounts on AWS and Azure without
+-- change. Leaving it to default would work in this AWS account and then fail
+-- on an Azure deployment with an error that points at the service, not at the
+-- stage. GCP accounts cannot run the pread frame path at all; that is a
+-- documented deployment-matrix hole, not something a config flag can fix.
+-- =============================================================================
+
+USE ROLE {{ owner_role }};
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- -----------------------------------------------------------------------------
+-- External stage: the public IDC (Imaging Data Commons) open-data bucket.
+-- No credentials -- the bucket is public. Gated on include_demo_series so a
+-- customer bringing only their own imaging can skip it entirely.
+-- -----------------------------------------------------------------------------
+CREATE STAGE IF NOT EXISTS {{ cfg.source_stage }}
+  URL = '{{ cfg.source_url }}'
+  DIRECTORY = (ENABLE = FALSE)
+  COMMENT = 'Voxel: public IDC open-data DICOM bucket. Directory table deliberately disabled (see header).';
+
+-- -----------------------------------------------------------------------------
+-- Internal stage: the pread path for the DICOMweb frame server.
+--
+-- Populated by 13_INITIAL_BACKFILL with a bounded subset
+-- (pread_series_limit = {{ cfg.pread_series_limit }} series), because this is a
+-- real copy of pixel data and therefore real storage cost. Frame serving reads
+-- it as an ordinary POSIX file through the mounted volume.
+--
+-- DIRECTORY = (ENABLE = TRUE) here, unlike the external stage. The subset is
+-- small and bounded by construction, so the 1 GB directory-table ceiling is not
+-- in play, and the stage volume's metadataCache benefits from stat/readdir
+-- being cheap.
+-- -----------------------------------------------------------------------------
+CREATE STAGE IF NOT EXISTS {{ cfg.pread_stage }}
+  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+  DIRECTORY = (ENABLE = TRUE)
+  COMMENT = 'Voxel: internal stage mounted as an SPCS stage volume for os.pread frame serving. SNOWFLAKE_SSE for AWS+Azure portability.';
+
+-- -----------------------------------------------------------------------------
+-- Verify
+--
+-- The internal stage MUST report type = INTERNAL. If a customer edits config to
+-- point pread_stage at an external location, the stage will create successfully
+-- and then the dicomweb service will fail at CREATE SERVICE with a volume
+-- error that names the service, not the stage. Catching it here is cheaper.
+-- -----------------------------------------------------------------------------
+SHOW STAGES LIKE '{{ cfg.source_stage }}';
+SELECT "name", "type", "url", "directory_enabled"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW STAGES LIKE '{{ cfg.pread_stage }}';
+SELECT "name",
+       "type",
+       "directory_enabled",
+       IFF("type" LIKE 'INTERNAL%', 'OK',
+           'FAIL: pread_stage must be INTERNAL -- SPCS stage volumes cannot mount external stages')
+         AS STAGE_VOLUME_CHECK
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
