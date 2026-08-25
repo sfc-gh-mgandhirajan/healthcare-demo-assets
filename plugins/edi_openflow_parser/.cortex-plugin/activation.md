@@ -20,7 +20,7 @@ Run one of the slash commands:
 - Snowflake account with Cortex AI access (for Gold layer AI enrichment)
 - For Openflow path: Medium+ Openflow runtime
 - For Python UDF lite path: No additional infrastructure needed
-- Recommended: Fork of [x12-openflow-quickstart](https://github.com/sfc-gh-akelkar/x12-openflow-quickstart)
+- Recommended: an X12 sample-data source of your own (S3/SFTP prefix with test 837/835/834 files)
 
 ## Pre-Built Transaction Types
 

@@ -11,21 +11,30 @@ You provide pipeline health information for the EDI ingestion system.
 
 ## Health Checks
 
-Run these queries and present a summary dashboard:
+Run these queries and present a summary dashboard. The canonical copies live in
+`scripts/verify_pipeline.sql` — keep the two in step if you change either.
 
 ### 1. Dynamic Table Status
 
 ```sql
-SELECT 
+SELECT
     NAME,
-    SCHEDULING_STATE,
-    LAST_COMPLETED_REFRESH_STATE,
-    LAST_COMPLETED_REFRESH_STATE_MESSAGE,
+    STATE,
+    STATE_MESSAGE,
+    REFRESH_ACTION,
     DATA_TIMESTAMP,
     DATEDIFF('minute', DATA_TIMESTAMP, CURRENT_TIMESTAMP()) AS LAG_MINUTES
-FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())
-WHERE NAME LIKE '%GOLD%' OR NAME LIKE '%LANDING%'
-ORDER BY DATA_TIMESTAMP DESC;
+FROM TABLE(X12_EDI_AI.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())
+WHERE DATABASE_NAME = 'X12_EDI_AI'
+ORDER BY DATA_TIMESTAMP DESC
+LIMIT 20;
+```
+
+For scheduling state (ACTIVE vs SUSPENDED), which is not exposed by the refresh
+history table function, use:
+
+```sql
+SHOW DYNAMIC TABLES IN DATABASE X12_EDI_AI;
 ```
 
 ### 2. Landing Table Row Counts
@@ -45,31 +54,41 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME;
 
 ### 3. Recent Ingestion Activity
 
+Snowpipe Streaming is not tracked by `COPY_HISTORY` (that view covers file-based
+`COPY INTO` only), so check landing-table freshness instead:
+
 ```sql
-SELECT 
+SELECT
+    TABLE_SCHEMA,
     TABLE_NAME,
-    COUNT(*) AS RECORDS_LAST_HOUR
-FROM X12_EDI_AI.INFORMATION_SCHEMA.TABLES t
-JOIN TABLE(X12_EDI_AI.INFORMATION_SCHEMA.COPY_HISTORY(
-    TABLE_NAME => t.TABLE_NAME,
-    START_TIME => DATEADD('hour', -1, CURRENT_TIMESTAMP())
-)) ch ON TRUE
-GROUP BY TABLE_NAME;
+    ROW_COUNT,
+    LAST_ALTERED,
+    DATEDIFF('minute', LAST_ALTERED, CURRENT_TIMESTAMP()) AS MINUTES_SINCE_WRITE
+FROM X12_EDI_AI.INFORMATION_SCHEMA.TABLES
+WHERE TABLE_TYPE = 'BASE TABLE'
+  AND TABLE_NAME LIKE 'LANDING_%'
+ORDER BY LAST_ALTERED DESC;
 ```
 
-### 4. Task Status (Lite Path)
+### 4. Task Status
+
+Only relevant if the deployment schedules its own tasks; the Openflow path does
+not create any.
 
 ```sql
-SELECT 
+SELECT
     NAME,
     STATE,
-    LAST_COMMITTED_ON,
-    LAST_SUSPENDED_ON,
-    SCHEDULE
-FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+    SCHEDULED_TIME,
+    COMPLETED_TIME,
+    ERROR_CODE,
+    ERROR_MESSAGE
+FROM TABLE(X12_EDI_AI.INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START => DATEADD('hour', -24, CURRENT_TIMESTAMP()),
+    RESULT_LIMIT => 50
+))
 WHERE NAME LIKE '%EDI%'
-ORDER BY COMPLETED_TIME DESC
-LIMIT 10;
+ORDER BY SCHEDULED_TIME DESC;
 ```
 
 ### 5. Error Summary
@@ -82,7 +101,7 @@ SELECT
     STATE_MESSAGE,
     REFRESH_START_TIME,
     REFRESH_END_TIME
-FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())
+FROM TABLE(X12_EDI_AI.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())
 WHERE STATE = 'FAILED'
   AND REFRESH_START_TIME > DATEADD('day', -1, CURRENT_TIMESTAMP())
 ORDER BY REFRESH_START_TIME DESC;
@@ -109,8 +128,6 @@ Gold Dynamic Tables:
   GOLD.GOLD_REMITTANCES           | ACTIVE | Lag: 5 min | Last refresh: SUCCESS
 
 Errors (last 24h): 0
-
-Task (Lite Path): RUNNING | Last run: 3 min ago | Next: 2 min
 ```
 
 ## Troubleshooting

@@ -25,7 +25,7 @@ Locate the plugin's bundled parsing engine (`src/x12_processors/`) and determine
    The plugin's parsing engine is bundled but not editable in your current workspace.
    
    Options:
-   A) Clone the plugin repo locally for editing (git clone https://github.com/sfc-gh-akelkar/edi-openflow-parser)
+   A) Clone the plugin repo locally for editing (git clone https://github.com/Snowflake-Solutions/sf-hcls-solutions-incubator)
    B) Continue in dry-run mode (I'll output code blocks for you to apply)
    ```
 

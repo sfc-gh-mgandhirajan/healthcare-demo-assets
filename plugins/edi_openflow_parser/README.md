@@ -119,7 +119,7 @@ EDI Files (S3/SFTP/Stage)
 ### Install the Plugin
 
 ```bash
-cortex plugin install sfc-gh-akelkar/edi-openflow-parser
+cortex plugin install Snowflake-Solutions/sf-hcls-solutions-incubator --plugin edi_openflow_parser
 ```
 
 Or find it in the **HCLS Industry Skills** profile in Cortex Code.
