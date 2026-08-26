@@ -1,0 +1,9 @@
+{
+  "name": "sfmi-router",
+  "private": true,
+  "version": "0.1.0",
+  "description": "OHIF viewer bundle for the DICOMweb service. Pinned here rather than vendored as prebuilt bytes so a version bump is a reviewable diff.",
+  "dependencies": {
+    "@ohif/app": "3.13.3"
+  }
+}

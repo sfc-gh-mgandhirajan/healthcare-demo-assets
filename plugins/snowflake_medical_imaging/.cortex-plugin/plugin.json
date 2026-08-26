@@ -1,0 +1,28 @@
+{
+  "name": "snowflake-medical-imaging",
+  "displayName": "Snowflake for Medical Imaging",
+  "description": "Deploy a governed DICOM catalog, real DICOMweb serving (QIDO-RS/WADO-RS) with an OHIF viewer, MONAI Vista3D segmentation, and a cost harness into your own Snowflake account. Header-only ingest reads ~0.7% of corpus bytes; frame offsets are computed rather than stored. Ships with a public IDC demo corpus you can point away from your own stage.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Snowflake HCLS Solutions"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "hcls",
+    "dicom",
+    "medical-imaging",
+    "ohif",
+    "dicomweb",
+    "wado-rs",
+    "qido-rs",
+    "stow-rs",
+    "vista3d",
+    "monai",
+    "radiology",
+    "phi",
+    "de-identification",
+    "spcs",
+    "cost-benchmark"
+  ],
+  "skills": "./skills"
+}
