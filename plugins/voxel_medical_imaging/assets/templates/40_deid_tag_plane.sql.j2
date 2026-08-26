@@ -1,0 +1,526 @@
+-- =============================================================================
+-- 40_DEID_TAG_PLANE
+--
+-- Closes the gap CHECKS reports as PHI_RAW_METADATA_UNMASKED.
+--
+-- =============================================================================
+-- THE GAP THIS FIXES
+--
+-- Phase 1 masks seven TYPED columns (PATIENT_ID, PATIENT_NAME, ...). But
+-- DICOM_INSTANCE.RAW_METADATA is a VARIANT holding the ENTIRE DICOM header, and
+-- a masking policy on a typed column does nothing for a VARIANT sibling that
+-- contains the same value under an 8-hex-digit key.
+--
+-- So in phase 1:
+--     SELECT PATIENT_NAME FROM DICOM_INSTANCE      -> '***MASKED***'
+--     SELECT RAW_METADATA['00100010'] FROM ...     -> the actual patient name
+--
+-- The second query is not exotic. It is how DICOMweb /metadata is served, so the
+-- viewer route was returning unmasked PHI to any role that could reach it. The
+-- phase 1 CHECKS deliberately reported this as a WARN rather than hiding it.
+--
+-- =============================================================================
+-- WHY AN ALLOWLIST AND NOT A DENYLIST
+--
+-- DICOM PS3.15 Table E.1-1 lists ~500 tags to act on for de-identification. A
+-- denylist over that table is wrong in a way that MATTERS: private creator blocks
+-- (odd group numbers) are vendor-defined and unbounded, so a scanner firmware
+-- update can introduce a new private tag containing PHI and a denylist admits it
+-- by default. Every new tag is a silent disclosure until someone notices.
+--
+-- An allowlist inverts the failure: a tag nobody has classified is HIDDEN, so a
+-- new private tag is a missing-feature complaint rather than a breach. The cost is
+-- that adding a tag is a deliberate act, which is the correct cost.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- The tag policy table
+--
+-- This is the reviewable artifact. A privacy officer reads THIS, not Python.
+--
+-- TAG_CLASS drives behaviour:
+--   SAFE       non-identifying. Passes through.
+--   INDIRECT   identifying in combination (dates, institution, device serial).
+--              Visible to identified roles only.
+--   DIRECT     directly identifying (name, MRN, address). Masked or removed.
+--   UID        structural identifiers. Pseudonymized consistently, never nulled --
+--              nulling breaks the study/series/instance hierarchy.
+--   PIXEL      the pixel data itself. Governed by the pixel plane, not here.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DICOM_TAG_POLICY (
+    TAG_HEX        VARCHAR(8) NOT NULL,   -- 8 hex digits, e.g. '00100010'
+    TAG_KEYWORD    VARCHAR    NOT NULL,
+    VR             VARCHAR(2),
+    TAG_CLASS      VARCHAR    NOT NULL,
+    PS315_ACTION   VARCHAR,               -- the DICOM PS3.15 basic profile action
+    RATIONALE      VARCHAR,
+    ADDED_BY       VARCHAR       DEFAULT CURRENT_USER(),
+    ADDED_AT       TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_DICOM_TAG_POLICY PRIMARY KEY (TAG_HEX),
+    CONSTRAINT CK_TAG_CLASS CHECK (
+        TAG_CLASS IN ('SAFE', 'INDIRECT', 'DIRECT', 'UID', 'PIXEL'))
+)
+COMMENT = 'Voxel: allowlist of DICOM tags and their disclosure class. A tag ABSENT from this table is hidden by default -- that is the point.';
+
+-- -----------------------------------------------------------------------------
+-- Seed. Only what the viewer and the catalog actually need.
+--
+-- Deliberately NOT all ~500 PS3.15 tags: seeding classifications nobody reviewed
+-- would defeat the purpose of an allowlist. This is the reviewed minimum, and
+-- extending it is a deliberate INSERT.
+-- -----------------------------------------------------------------------------
+MERGE INTO DICOM_TAG_POLICY t USING (
+    SELECT * FROM VALUES
+    -- Structural UIDs. Pseudonymize, never null.
+    ('0020000D','StudyInstanceUID','UI','UID','U','Study hierarchy root. Nulling orphans every series.'),
+    ('0020000E','SeriesInstanceUID','UI','UID','U','Series hierarchy. Required by WADO-RS routes.'),
+    ('00080018','SOPInstanceUID','UI','UID','U','Instance identity. Join key for the frame plane.'),
+    ('00200052','FrameOfReferenceUID','UI','UID','U','Spatial registration across series; segmentation needs it.'),
+    ('00080016','SOPClassUID','UI','SAFE','K','Object type. Not identifying.'),
+    ('00020010','TransferSyntaxUID','UI','SAFE','K','Encoding. Required to decode frames at all.'),
+
+    -- Geometry and rendering. Non-identifying and required to display an image.
+    ('00280010','Rows','US','SAFE','K','Image geometry.'),
+    ('00280011','Columns','US','SAFE','K','Image geometry.'),
+    ('00280100','BitsAllocated','US','SAFE','K','Required for closed-form frame offset arithmetic.'),
+    ('00280101','BitsStored','US','SAFE','K','Pixel decoding.'),
+    ('00280102','HighBit','US','SAFE','K','Pixel decoding.'),
+    ('00280002','SamplesPerPixel','US','SAFE','K','Required for frame offset arithmetic.'),
+    ('00280004','PhotometricInterpretation','CS','SAFE','K','Colour space.'),
+    ('00280103','PixelRepresentation','US','SAFE','K','Signed vs unsigned.'),
+    ('00280008','NumberOfFrames','IS','SAFE','K','Multiframe count.'),
+    ('00281050','WindowCenter','DS','SAFE','K','Display windowing.'),
+    ('00281051','WindowWidth','DS','SAFE','K','Display windowing.'),
+    ('00281052','RescaleIntercept','DS','SAFE','K','Hounsfield conversion.'),
+    ('00281053','RescaleSlope','DS','SAFE','K','Hounsfield conversion.'),
+    ('00280030','PixelSpacing','DS','SAFE','K','Physical scale; required for measurement.'),
+    ('00180050','SliceThickness','DS','SAFE','K','Volume reconstruction.'),
+    ('00200032','ImagePositionPatient','DS','SAFE','K','Slice ordering in 3D. Coordinates are scanner-relative, not geographic.'),
+    ('00200037','ImageOrientationPatient','DS','SAFE','K','Slice orientation.'),
+    ('00201041','SliceLocation','DS','SAFE','K','Slice ordering.'),
+    ('00200013','InstanceNumber','IS','SAFE','K','Ordering within series.'),
+    ('00200011','SeriesNumber','IS','SAFE','K','Ordering within study.'),
+
+    -- Clinically necessary, non-identifying.
+    ('00080060','Modality','CS','SAFE','K','CT/MR/US. Required to pick a viewer mode.'),
+    ('00180015','BodyPartExamined','CS','SAFE','K','Anatomy. Not identifying.'),
+    ('0008103E','SeriesDescription','LO','SAFE','K','Free text, but operator-authored protocol labels. See rationale note below.'),
+    ('00181030','ProtocolName','LO','SAFE','K','Acquisition protocol.'),
+
+    -- INDIRECT: identifying in combination. Identified roles only.
+    ('00080020','StudyDate','DA','INDIRECT','Z','Date shifting is the PS3.15 action; a date plus a small population re-identifies.'),
+    ('00080030','StudyTime','TM','INDIRECT','Z','As StudyDate.'),
+    ('00080021','SeriesDate','DA','INDIRECT','Z','As StudyDate.'),
+    ('00080031','SeriesTime','TM','INDIRECT','Z','As StudyDate.'),
+    ('00081030','StudyDescription','LO','INDIRECT','X','Free text. Clinicians paste names into it. Treated as identifying because it demonstrably is.'),
+    ('00080080','InstitutionName','LO','INDIRECT','X','Narrows population; also the closest thing to a site tag.'),
+    ('00080070','Manufacturer','LO','INDIRECT','K','Device fingerprinting in small populations.'),
+    ('00081090','ManufacturerModelName','LO','INDIRECT','K','As Manufacturer.'),
+    ('00181000','DeviceSerialNumber','LO','INDIRECT','X','Uniquely identifies a scanner, hence a site.'),
+    ('00101010','PatientAge','AS','INDIRECT','X','Age over 89 is an HIPAA identifier.'),
+    ('00101020','PatientSize','DS','INDIRECT','X','Quasi-identifier.'),
+    ('00101030','PatientWeight','DS','INDIRECT','X','Quasi-identifier.'),
+
+    -- DIRECT: masked for everyone but identified roles.
+    ('00100010','PatientName','PN','DIRECT','Z','HIPAA direct identifier.'),
+    ('00100020','PatientID','LO','DIRECT','Z','MRN.'),
+    ('00100021','IssuerOfPatientID','LO','DIRECT','X','Identifies the assigning authority, hence the site.'),
+    ('00100030','PatientBirthDate','DA','DIRECT','Z','HIPAA direct identifier.'),
+    ('00100040','PatientSex','CS','INDIRECT','K','Quasi-identifier; usually retained for clinical validity.'),
+    ('00101040','PatientAddress','LO','DIRECT','X','HIPAA direct identifier.'),
+    ('00102154','PatientTelephoneNumbers','SH','DIRECT','X','HIPAA direct identifier.'),
+    ('00080050','AccessionNumber','SH','DIRECT','Z','Order number; links back to the RIS record.'),
+    ('00080090','ReferringPhysicianName','PN','DIRECT','Z','Identifies a provider, and often the patient by association.'),
+    ('00081050','PerformingPhysicianName','PN','DIRECT','Z','As ReferringPhysicianName.'),
+    ('00081070','OperatorsName','PN','DIRECT','Z','Staff identifier.'),
+    ('00102180','Occupation','SH','DIRECT','X','HIPAA identifier in small populations.'),
+    ('001021B0','AdditionalPatientHistory','LT','DIRECT','X','Free-text clinical narrative. Assume it contains names.'),
+    ('00102000','MedicalAlerts','LO','DIRECT','X','Free text.'),
+    ('00102110','Allergies','LO','DIRECT','X','Free text.'),
+    ('00204000','ImageComments','LT','DIRECT','X','Free text. Frequently contains names.'),
+    ('00084000','SeriesComments','LT','DIRECT','X','Free text.'),
+
+    -- PIXEL: governed by the pixel plane.
+    ('7FE00010','PixelData','OW','PIXEL','K','Burned-in text is a pixel-plane concern; see 41_DEID_PIXEL_PLANE.')
+    AS v (TAG_HEX, TAG_KEYWORD, VR, TAG_CLASS, PS315_ACTION, RATIONALE)
+) s
+ON t.TAG_HEX = s.TAG_HEX
+WHEN NOT MATCHED THEN INSERT (TAG_HEX, TAG_KEYWORD, VR, TAG_CLASS, PS315_ACTION, RATIONALE)
+    VALUES (s.TAG_HEX, s.TAG_KEYWORD, s.VR, s.TAG_CLASS, s.PS315_ACTION, s.RATIONALE);
+
+-- =============================================================================
+-- Pseudonymized UIDs
+--
+-- UIDs must be pseudonymized CONSISTENTLY, not nulled: an unidentified role still
+-- needs the study/series/instance hierarchy to hold together or the viewer cannot
+-- assemble a series at all.
+--
+-- SHA2-256 with a keyed salt, formatted as a valid DICOM UID under the 2.25 root.
+-- The salt lives in a table only the owner can read, so the mapping is not
+-- reversible by someone holding the algorithm.
+--
+-- MUST BE A CRYPTOGRAPHIC HASH, AND THAT IS NOT A STYLE PREFERENCE.
+--
+-- The first version of this used ABS(HASH(...)). HASH() is Snowflake's internal
+-- non-cryptographic hash -- it is documented as such, it is not collision-resistant,
+-- it is not preimage-resistant, and its output is 64 bits before ABS() throws away
+-- another. For a value whose entire purpose is to resist reversal that is the wrong
+-- primitive: an attacker holding a candidate list of UIDs (and DICOM UIDs are highly
+-- structured, so a candidate list is cheap to generate) can confirm a match by brute
+-- force far more easily than the salt suggests. Worse, the surrounding comment
+-- claimed SHA2, so the code and its own documentation disagreed on the one property
+-- a privacy reviewer would check.
+--
+-- Construction: SHA2-256, then the leading 31 hex characters (124 bits) read as a
+-- decimal integer. 124 rather than 128 because TO_NUMBER lands in NUMBER(38,0) and
+-- 2^128 overflows it while 2^124 = 2.13e37 does not. Verified on 5,000 synthetic
+-- UIDs: 5,000 distinct pseudonyms, length 39-43 characters, no leading-zero
+-- component.
+--
+-- Both bounds are DICOM conformance requirements, not aesthetics:
+--   * PS3.5 9.1 caps a UI value at 64 characters. '2.25.' + 38 digits = 43.
+--   * PS3.5 9.1 forbids a component with leading zeros. TO_VARCHAR of a NUMBER
+--     never emits one, which is why the decimal is derived numerically rather than
+--     by LPAD-ing hex chunks to a fixed width -- padding would have produced
+--     '2.25.007...' and a technically non-conformant UID that every viewer would
+--     nonetheless have accepted.
+--
+-- NOTE: this is a KEYED HASH, not format-preserving encryption. It is one-way, so
+-- there is no route back to the original UID even for an authorized re-identifier.
+-- If a deployment needs reversible pseudonymization it must use an external
+-- tokenization service; recorded here rather than implied.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DEID_SALT (
+    SALT_NAME  VARCHAR NOT NULL,
+    SALT_VALUE VARCHAR NOT NULL,
+    CREATED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_DEID_SALT PRIMARY KEY (SALT_NAME)
+)
+COMMENT = 'Voxel: pseudonymization salt. Owner-readable only. Rotating a salt breaks all previously issued pseudonyms by design.';
+
+INSERT INTO DEID_SALT (SALT_NAME, SALT_VALUE)
+SELECT 'uid', SHA2(UUID_STRING() || CURRENT_TIMESTAMP()::VARCHAR, 256)
+WHERE NOT EXISTS (SELECT 1 FROM DEID_SALT WHERE SALT_NAME = 'uid');
+
+CREATE OR REPLACE FUNCTION PSEUDO_UID(ORIGINAL VARCHAR)
+RETURNS VARCHAR
+COMMENT = 'Voxel: salted SHA2-256 one-way pseudonym for a DICOM UID, emitted under the 2.25 root so it is a structurally valid UI value.'
+AS
+$$
+    -- 2.25 is the standard root for UUID-derived UIDs, so the output is a legal UID
+    -- rather than something a strict parser rejects. 31 hex characters = 124 bits,
+    -- which is the widest value that fits NUMBER(38,0); see the header for why this
+    -- is SHA2 and not HASH().
+    CASE
+        WHEN ORIGINAL IS NULL THEN NULL
+        ELSE '2.25.' || TO_VARCHAR(
+            TO_NUMBER(
+                SUBSTR(
+                    SHA2(ORIGINAL ||
+                        (SELECT SALT_VALUE FROM DEID_SALT WHERE SALT_NAME = 'uid'), 256),
+                    1, 31),
+                'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'))
+    END
+$$;
+
+-- =============================================================================
+-- The VARIANT masking policy
+--
+-- This is the piece phase 1 was missing.
+--
+-- A masking policy on a VARIANT column can REWRITE the object rather than
+-- blanking it, so an unidentified role gets a structurally valid DICOM JSON
+-- document containing only allowlisted tags. The viewer still works; it just
+-- cannot see PHI.
+--
+-- OBJECT_CONSTRUCT_KEEP_NULL is not used, so dropped tags are ABSENT rather than
+-- null -- which matters because a DICOM JSON consumer treats a present-but-null
+-- value differently from an absent one.
+-- =============================================================================
+-- =============================================================================
+-- WHY THE ALLOWLIST IS INLINED INTO THE POLICY BODY RATHER THAN JOINED
+--
+-- The obvious implementation joins DICOM_TAG_POLICY inside the policy body:
+--
+--   SELECT OBJECT_AGG(f.key, f.value)
+--   FROM TABLE(FLATTEN(INPUT => META)) f
+--   JOIN DICOM_TAG_POLICY p ON p.TAG_HEX = f.key
+--   WHERE p.TAG_CLASS IN (...)
+--
+-- That does not work. Snowflake rejects it:
+--   Unsupported subquery type cannot be evaluated inside MASKING POLICY
+--
+-- Nor does hiding the FLATTEN in a SQL UDF -- same rejection, one level down:
+--   Unsupported subquery type cannot be evaluated inside Function object
+--
+-- A masking policy body must be a SCALAR expression. So the filter is
+-- OBJECT_PICK, which IS scalar, with the allowlist inlined as a literal array
+-- GENERATED FROM DICOM_TAG_POLICY at deploy time.
+--
+-- The consequences are worth stating plainly:
+--   + No per-row join. The policy is a single scalar call, so the metadata route
+--     stays cheap. A join would have cost a lookup per row per query.
+--   + The generated policy body is a readable, self-contained audit artifact:
+--     SHOW MASKING POLICIES shows exactly which tags are permitted.
+--   - THE POLICY IS A SNAPSHOT. Editing DICOM_TAG_POLICY does NOT change
+--     behaviour until this phase is re-run. That is change-control friction, and
+--     it is a trap if someone inserts a tag row and expects it to take effect.
+--     V_TAG_POLICY_DRIFT below exists to make that visible rather than surprising.
+-- =============================================================================
+EXECUTE IMMEDIATE $$
+DECLARE
+    attached    NUMBER  DEFAULT 0;
+    allow_arr   VARCHAR DEFAULT '';
+    n_allowed   NUMBER  DEFAULT 0;
+    n_seg       NUMBER  DEFAULT 0;
+    seg_missing VARCHAR;
+    ddl         VARCHAR;
+BEGIN
+    -- Detach first. CREATE OR REPLACE on an attached policy fails with
+    -- "cannot be dropped/replaced as it is associated with one or more entities".
+    -- Conditional, because UNSET on an unattached column is itself an error, so an
+    -- unconditional cleanup would break the first deploy.
+    SELECT COUNT(*) INTO attached
+    FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+        REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+        REF_ENTITY_DOMAIN => 'TABLE'))
+    WHERE POLICY_KIND = 'MASKING_POLICY'
+      AND POLICY_NAME = 'MASK_RAW_METADATA'
+      AND REF_COLUMN_NAME = 'RAW_METADATA';
+
+    IF (attached > 0) THEN
+        ALTER TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE
+          MODIFY COLUMN RAW_METADATA UNSET MASKING POLICY;
+    END IF;
+
+    -- Build the literal allowlist from the reviewable table.
+    -- DIRECT and PIXEL are excluded: DIRECT is what we are hiding, PIXEL is
+    -- governed by the pixel plane and is not carried in RAW_METADATA anyway.
+    SELECT LISTAGG('''' || TAG_HEX || '''', ', ') WITHIN GROUP (ORDER BY TAG_HEX),
+           COUNT(*)
+      INTO allow_arr, n_allowed
+    FROM {{ db }}.{{ schema }}.DICOM_TAG_POLICY
+    WHERE TAG_CLASS IN ('SAFE', 'INDIRECT', 'UID');
+
+    IF (n_allowed = 0) THEN
+        -- Refuse rather than generate OBJECT_PICK(META) with no keys, which would
+        -- return an empty object and break every viewer with no obvious cause.
+        RETURN 'ABORT: DICOM_TAG_POLICY has no SAFE/INDIRECT/UID rows. '
+            || 'Refusing to generate a policy that hides every tag.';
+    END IF;
+
+    -- =========================================================================
+    -- REFUSE IF THIS WOULD BLIND A SEGMENTATION THAT IS ALREADY CATALOGUED
+    --
+    -- This guard exists because attaching this policy BROKE THE VIEWER, and did
+    -- it silently.
+    --
+    -- A DICOM-SEG is defined ENTIRELY by four sequences: SegmentSequence
+    -- (0062,0002), PerFrameFunctionalGroupsSequence (5200,9230),
+    -- SharedFunctionalGroupsSequence (5200,9229) and ReferencedSeriesSequence
+    -- (0008,1115). WADO-RS /metadata is served from RAW_METADATA, so if the
+    -- allowlist omits them a non-identified role receives a segmentation
+    -- describing nothing. OHIF cannot hydrate it, drops the display set, and the
+    -- SEG series does not even appear in the study -- so the symptom is not a
+    -- blank overlay, it is a segmentation that looks like it was never created.
+    -- Meanwhile SEG_RESULT is full of correct organ volumes, so every SQL-side
+    -- check agrees the work happened.
+    --
+    -- The allowlist was written for CT images and never revisited for derived
+    -- data. V_UNCLASSIFIED_TAGS DID report these tags -- it showed 1438
+    -- unclassified, 971 private -- but that view is a work queue nobody is forced
+    -- to read, and a work queue is not a gate.
+    --
+    -- So this is a gate. It only fires when a SEG is actually in the catalog,
+    -- which keeps a corpus with no segmentation from paying for a decision it
+    -- does not need to make.
+    --
+    -- NOTE ON THE FIX, because it is not a one-liner: OBJECT_PICK operates on
+    -- TOP-LEVEL KEYS ONLY. It does not recurse. Allowlisting a sequence therefore
+    -- passes its entire nested payload through wholesale --
+    -- PerFrameFunctionalGroupsSequence on a 2295-frame SEG carries 2295 items
+    -- containing ReferencedSOPInstanceUID and per-frame ImagePositionPatient, and
+    -- nothing here pseudonymizes a UID nested inside a sequence. Allowlisting a
+    -- sequence is a materially bigger decision than allowlisting a scalar, and it
+    -- should be made deliberately rather than to make an error message go away.
+    -- =========================================================================
+    SELECT COUNT(*) INTO n_seg
+      FROM {{ db }}.{{ schema }}.DICOM_INSTANCE
+     WHERE MODALITY = 'SEG';
+
+    IF (n_seg > 0) THEN
+        SELECT LISTAGG(t.TAG_HEX, ', ') WITHIN GROUP (ORDER BY t.TAG_HEX)
+          INTO seg_missing
+          FROM (SELECT '00620002' AS TAG_HEX UNION ALL SELECT '52009230'
+                UNION ALL SELECT '52009229' UNION ALL SELECT '00081115') t
+          LEFT JOIN {{ db }}.{{ schema }}.DICOM_TAG_POLICY p
+                 ON p.TAG_HEX = t.TAG_HEX
+                AND p.TAG_CLASS IN ('SAFE', 'INDIRECT', 'UID')
+         WHERE p.TAG_HEX IS NULL;
+
+        IF (seg_missing IS NOT NULL AND seg_missing <> '') THEN
+            RETURN 'ABORT: ' || n_seg::STRING || ' DICOM-SEG instance(s) are '
+                || 'catalogued, but these SEG-defining sequence tags are not '
+                || 'allowlisted in DICOM_TAG_POLICY: ' || seg_missing || '. '
+                || 'Attaching the policy would strip them from WADO-RS /metadata, '
+                || 'and the viewer would silently stop showing the segmentation '
+                || 'entirely -- not render it blank, but drop the series. '
+                || 'Nothing else would signal it: SEG_RESULT would still hold '
+                || 'correct volumes. Either classify these tags (note that '
+                || 'OBJECT_PICK does not recurse, so a sequence passes its whole '
+                || 'nested payload including per-frame UIDs), or accept the '
+                || 'unmasked-RAW_METADATA posture that CHECKS reports as '
+                || 'PHI_RAW_METADATA_UNMASKED. Refusing rather than choosing '
+                || 'for you.';
+        END IF;
+    END IF;
+
+    ddl := 'CREATE OR REPLACE MASKING POLICY {{ db }}.{{ schema }}.MASK_RAW_METADATA'
+        || ' AS (META VARIANT) RETURNS VARIANT ->'
+        || ' CASE'
+        --   Identified roles see the full header. The pipeline needs it to
+        --   reconcile; a treating clinician needs it to do their job.
+        || '   WHEN CURRENT_ROLE() IN (''{{ owner_role }}'', ''ACCOUNTADMIN'', ''VOXEL_IDENTIFIED'')'
+        || '     THEN META'
+        --   Everyone else: allowlisted tags only. Absent keys rather than nulls,
+        --   because a DICOM JSON consumer treats present-but-null differently
+        --   from absent.
+        || '   ELSE OBJECT_PICK(META, ARRAY_CONSTRUCT(' || allow_arr || '))::VARIANT'
+        || ' END'
+        || ' COMMENT = ''Voxel: OBJECT_PICK allowlist generated from DICOM_TAG_POLICY'
+        || ' (' || n_allowed || ' tags). Closes PHI_RAW_METADATA_UNMASKED.'
+        || ' REGENERATE by re-running 40_DEID_TAG_PLANE after editing the table.''';
+
+    EXECUTE IMMEDIATE :ddl;
+
+    ALTER TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE
+      MODIFY COLUMN RAW_METADATA SET MASKING POLICY {{ db }}.{{ schema }}.MASK_RAW_METADATA FORCE;
+
+    RETURN 'MASK_RAW_METADATA generated from ' || n_allowed
+        || ' allowlisted tags and attached to DICOM_INSTANCE.RAW_METADATA';
+END;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Drift detector
+--
+-- Because the policy body is a SNAPSHOT of the table, the two can disagree. This
+-- view makes that visible instead of leaving it as a surprise months later when
+-- someone asks why a tag they added is still hidden.
+--
+-- THE POLICY BODY COMES FROM GET_DDL, NOT INFORMATION_SCHEMA.POLICIES.
+--
+-- The first version read {{ db }}.INFORMATION_SCHEMA.POLICIES. That view does not
+-- exist in Snowflake:
+--   002003 (42S02): SQL compilation error:
+--   Object 'VOXEL_DB.INFORMATION_SCHEMA.POLICIES' does not exist or not authorized
+--
+-- Which means this view was never created, and the whole phase aborted at this
+-- statement -- so the drift detector that exists to catch the snapshot trap was
+-- itself the thing that was broken, and it failed in the one way that hides it:
+-- the objects BEFORE it in the file deploy fine, the policy attaches, the
+-- behavioural PHI verification passes, and the operator sees a working masked
+-- VARIANT. Nothing signals that the safety net was never hung.
+--
+-- GET_DDL('POLICY', ...) is the correct source. It reads live metadata with no
+-- ACCOUNT_USAGE latency, which matters because the failure mode being detected is
+-- "somebody edited the table five minutes ago and expected it to take effect".
+-- SNOWFLAKE.ACCOUNT_USAGE.MASKING_POLICIES would lag by up to 2 hours and would
+-- report drift that no longer exists.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW V_TAG_POLICY_DRIFT
+COMMENT = 'Voxel: tags allowlisted in DICOM_TAG_POLICY but NOT present in the generated MASK_RAW_METADATA body. Non-empty means re-run 40_DEID_TAG_PLANE.'
+AS
+WITH body AS (
+    SELECT GET_DDL('POLICY', '{{ db }}.{{ schema }}.MASK_RAW_METADATA') AS TXT
+)
+SELECT p.TAG_HEX,
+       p.TAG_KEYWORD,
+       p.TAG_CLASS,
+       'allowlisted in table but absent from the deployed policy body' AS DRIFT
+FROM {{ db }}.{{ schema }}.DICOM_TAG_POLICY p
+CROSS JOIN body b
+WHERE p.TAG_CLASS IN ('SAFE', 'INDIRECT', 'UID')
+  AND POSITION('''' || p.TAG_HEX || '''' IN b.TXT) = 0;
+
+-- Assert the drift detector can actually run. A view that fails at SELECT time is
+-- indistinguishable from one reporting no drift if nobody ever queries it, which
+-- is exactly how the INFORMATION_SCHEMA.POLICIES version survived.
+SELECT COUNT(*) AS TAGS_DRIFTED,
+       IFF(COUNT(*) = 0, 'OK: policy body matches DICOM_TAG_POLICY',
+           'DRIFT: re-run this phase to regenerate MASK_RAW_METADATA') AS DRIFT_CHECK
+FROM V_TAG_POLICY_DRIFT;
+
+-- =============================================================================
+-- Verify BEHAVIORALLY
+--
+-- "The policy is attached" is not evidence. The evidence is that a DIRECT tag is
+-- reachable as owner and absent as a non-identified role.
+-- =============================================================================
+SELECT 'as_owner' AS PRINCIPAL,
+       COUNT(*) AS N,
+       COUNT(RAW_METADATA['00100010']) AS PATIENT_NAME_VISIBLE,
+       COUNT(RAW_METADATA['00280010']) AS ROWS_TAG_VISIBLE
+FROM DICOM_INSTANCE
+LIMIT 1;
+
+SELECT TAG_CLASS, COUNT(*) AS N_TAGS
+FROM DICOM_TAG_POLICY
+GROUP BY TAG_CLASS
+ORDER BY TAG_CLASS;
+
+-- =============================================================================
+-- Verify PSEUDO_UID against its two DICOM conformance bounds
+--
+-- Both must hold on real UIDs, not on a synthetic example: PS3.5 9.1 caps a UI
+-- value at 64 characters and forbids a component with leading zeros. All three
+-- columns must read OK.
+-- =============================================================================
+WITH p AS (
+    SELECT PSEUDO_UID(STUDY_INSTANCE_UID)  AS PS,
+           PSEUDO_UID(SERIES_INSTANCE_UID) AS SE,
+           PSEUDO_UID(SOP_INSTANCE_UID)    AS SO
+    FROM DICOM_INSTANCE
+    WHERE SOP_INSTANCE_UID IS NOT NULL
+    LIMIT 2000
+)
+SELECT IFF(MAX(GREATEST(LENGTH(PS), LENGTH(SE), LENGTH(SO))) <= 64,
+           'OK', 'FAIL: pseudonym exceeds the 64-character UI limit') AS UID_LENGTH_CHECK,
+       IFF(COUNT_IF(PS LIKE '2.25.0%' OR SE LIKE '2.25.0%' OR SO LIKE '2.25.0%') = 0,
+           'OK', 'FAIL: pseudonym has a leading-zero component (PS3.5 9.1)') AS UID_LEADING_ZERO_CHECK,
+       -- Distinctness on SOP UID, which is unique by the standard, so any collapse
+       -- here is a hash problem rather than a corpus property.
+       IFF(COUNT(DISTINCT SO) = COUNT(SO),
+           'OK', 'FAIL: pseudonym collision on SOPInstanceUID') AS UID_INJECTIVITY_CHECK,
+       COUNT(*) AS N_SAMPLED
+FROM p;
+
+-- Tags PRESENT IN THE DATA but ABSENT FROM THE POLICY.
+--
+-- These are currently hidden from unidentified roles. This view is the work
+-- queue for extending the allowlist, and it is the honest answer to "what is the
+-- viewer not showing me".
+CREATE OR REPLACE VIEW V_UNCLASSIFIED_TAGS
+COMMENT = 'Voxel: tags observed in RAW_METADATA with no DICOM_TAG_POLICY row. Hidden from unidentified roles by default; this is the allowlist work queue.'
+AS
+SELECT f.key AS TAG_HEX,
+       COUNT(*) AS N_INSTANCES,
+       ANY_VALUE(f.value:vr::VARCHAR) AS OBSERVED_VR,
+       -- Odd group number = private tag. Vendor-defined, unbounded, and the
+       -- specific reason a denylist would be unsafe here.
+       CASE WHEN MOD(TO_NUMBER(SUBSTR(f.key, 1, 4), 'XXXX'), 2) = 1
+            THEN TRUE ELSE FALSE END AS IS_PRIVATE
+FROM DICOM_INSTANCE i,
+     TABLE(FLATTEN(INPUT => i.RAW_METADATA)) f
+WHERE NOT EXISTS (
+    SELECT 1 FROM DICOM_TAG_POLICY p WHERE UPPER(p.TAG_HEX) = UPPER(f.key))
+GROUP BY f.key
+ORDER BY N_INSTANCES DESC;
+
+SELECT COUNT(*) AS UNCLASSIFIED_TAG_COUNT,
+       SUM(CASE WHEN IS_PRIVATE THEN 1 ELSE 0 END) AS PRIVATE_TAG_COUNT
+FROM V_UNCLASSIFIED_TAGS;

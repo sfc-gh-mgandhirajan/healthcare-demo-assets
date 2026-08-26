@@ -1,0 +1,227 @@
+-- =============================================================================
+-- 05: Frame plane
+--
+-- The per-frame byte offsets that let the DICOMweb frame server answer
+-- GET /studies/{s}/series/{se}/instances/{sop}/frames/{n}
+-- with a ranged read instead of a full-object download.
+--
+-- =============================================================================
+-- THIS TABLE IS DELIBERATELY SPARSE, AND THAT IS THE DESIGN
+--
+-- The incumbent maintains a row per frame for EVERY instance, in a
+-- dedicated managed Postgres instance, fronted by a 3-tier cache, warmed by a
+-- Spark job after every ingest, with an access-frequency priority scorer
+-- deciding what to preload at app startup. Their documented capacity model is
+-- ~31 KB per CT entry, about 3 GB for 100k entries.
+--
+-- Most of that does not need to exist.
+--
+--   Native uncompressed syntaxes  -> offset is CLOSED FORM:
+--        PIXEL_DATA_START + n * ROWS * COLUMNS * (BITS_ALLOCATED/8) * SAMPLES
+--     Every multiplicand except PIXEL_DATA_START is already in the QIDO-RS
+--     metadata the viewer holds. NO ROW IS STORED HERE AT ALL. There is nothing
+--     to cache, nothing to evict, nothing to prime, and no staleness question.
+--
+--   Encapsulated with an Extended Offset Table -> one small analytic read of
+--     (7FE0,0001)/(7FE0,0002) yields the whole offset array. Stored, because
+--     re-reading it per request is a wasted round trip, but never computed
+--     twice.
+--
+--   Encapsulated without an EOT -> an 8-byte (FFFE,E000) item-header forward
+--     scan. This is the only genuinely expensive case, it runs ONCE per file
+--     ever, and it is the only case that truly requires this table.
+--
+-- Consequence: on a typical CT/MR archive this table is a small fraction of the
+-- corpus, and the "3 GB of cache for 100k entries" capacity problem does not
+-- arise. The frame server holds a packed per-series offset array in process
+-- (12 bytes per frame in a flat array, not ~1.7 KB per row object) and reads it
+-- once on series open.
+--
+-- =============================================================================
+-- WHY A STANDARD TABLE AND NOT A HYBRID TABLE
+--
+-- A hybrid table looks like the obvious substitute for that managed Postgres,
+-- and it is the
+-- wrong choice for the hot path. Verified constraints:
+--   - ~16,000 ops/sec PER DATABASE, shared with the manifest and audit writes
+--   - 2 TB per database row-store ceiling
+--   - no Streams, Dynamic Tables, Snowpipe, or materialized views, so no
+--     incremental primitive can maintain it
+--   - results cache disabled for hybrid table queries
+--   - sub-10 ms requires ENABLE_USE_STABLE_PATH, which is public preview and is
+--     disqualified by a join, a CTE, a GROUP BY, or running inside a stored
+--     procedure -- i.e. by most real query shapes
+--   - Snowflake's own published XSMALL benchmark: Avg 30 ms, MAX 1535 ms
+--
+-- A 1.5 second tail on a per-frame lookup is a visibly janky scroll. The
+-- in-process per-series manifest is both faster and simpler. Hybrid tables are
+-- still the right tool for the QIDO control plane and the PHI access log in
+-- later phases, where point-lookup semantics and synchronous index maintenance
+-- actually earn their constraints.
+--
+-- =============================================================================
+-- FRAME_NUMBER IS 1-BASED
+--
+-- DICOMweb addresses the first frame as /frames/1, and the DICOM standard
+-- numbers frames from 1. This table matches that, so no translation happens in
+-- the frame server. An off-by-one here does not error -- it serves the
+-- neighbouring frame at HTTP 200, which on a CT series is a different slice of
+-- anatomy. That is why it is stated here and asserted in CHECKS rather than
+-- left to a comment in application code.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+CREATE TABLE IF NOT EXISTS DICOM_FRAME_OFFSET (
+    SOP_INSTANCE_UID   VARCHAR       NOT NULL,
+    FRAME_NUMBER       NUMBER(38,0)  NOT NULL,   -- 1-based. See header.
+    FRAME_OFFSET       NUMBER(38,0)  NOT NULL,   -- absolute byte offset in the file
+    FRAME_LENGTH       NUMBER(38,0)  NOT NULL,
+
+    -- How this offset was obtained. Only EOT and ITEM_SCAN ever appear;
+    -- ARITHMETIC never lands here by definition, because arithmetic offsets are
+    -- not stored. Keeping the column makes the provenance explicit in the data
+    -- rather than implied by absence.
+    OFFSET_SOURCE      VARCHAR       NOT NULL,
+
+    -- The md5 of the file these offsets were computed from. This is what makes
+    -- "these offsets are stale" a joinable predicate instead of a guess, and it
+    -- is what INVARIANT-0001 checks. Without it, a re-sent file with the same
+    -- name silently keeps serving the old byte ranges.
+    FILE_MD5           VARCHAR,
+
+    COMPUTED_AT        TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+
+    CONSTRAINT PK_DICOM_FRAME_OFFSET PRIMARY KEY (SOP_INSTANCE_UID, FRAME_NUMBER)
+)
+COMMENT = 'Voxel: per-frame byte offsets for ENCAPSULATED instances only. Native uncompressed instances resolve offsets by arithmetic and are deliberately absent.';
+
+
+-- =============================================================================
+-- V_FRAME_COVERAGE
+--
+-- Answers "can this instance serve frames, and how?" for every catalogued
+-- instance. This is the view the frame server consults on series open and the
+-- one CHECKS reconciles against.
+--
+-- RESOLUTION is the interesting column:
+--   ARITHMETIC   native syntax, offsets computed on the fly, no rows needed
+--   STORED       encapsulated, offsets present and count matches
+--   INCOMPLETE   encapsulated, offsets present but FEWER than NUMBER_OF_FRAMES
+--                -> INVARIANT-0004. Must NOT serve a partial frame set.
+--   MISSING      encapsulated, no offsets at all (extraction failed or pending)
+--   UNSUPPORTED  transfer syntax absent from DICOM_CAPABILITY -> CAPABILITY-0001
+--   NO_PIXELS    non-image SOP class -> CAPABILITY-0003, correctly frameless
+--
+-- LEFT JOIN on DICOM_CAPABILITY, not INNER: an unknown transfer syntax must
+-- still appear in this view as UNSUPPORTED. An inner join would make unknown
+-- syntaxes vanish from coverage entirely, which is precisely the silent gap the
+-- capability table exists to prevent.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_FRAME_COVERAGE AS
+WITH offsets AS (
+    SELECT SOP_INSTANCE_UID,
+           COUNT(*)          AS STORED_FRAMES,
+           MIN(FRAME_NUMBER) AS MIN_FRAME,
+           MAX(FRAME_NUMBER) AS MAX_FRAME,
+           ANY_VALUE(OFFSET_SOURCE) AS OFFSET_SOURCE,
+           ANY_VALUE(FILE_MD5)      AS OFFSET_FILE_MD5
+    FROM DICOM_FRAME_OFFSET
+    GROUP BY SOP_INSTANCE_UID
+)
+SELECT
+    i.SOP_INSTANCE_UID,
+    i.SERIES_INSTANCE_UID,
+    i.STUDY_INSTANCE_UID,
+    i.SOURCE_NAME,
+    i.FILE_NAME,
+    i.TRANSFER_SYNTAX_UID,
+    c.SYNTAX_NAME,
+    c.IS_ENCAPSULATED,
+    COALESCE(i.NUMBER_OF_FRAMES, 1) AS EXPECTED_FRAMES,
+    COALESCE(o.STORED_FRAMES, 0)    AS STORED_FRAMES,
+    o.OFFSET_SOURCE,
+
+    CASE
+        WHEN c.TRANSFER_SYNTAX_UID IS NULL          THEN 'UNSUPPORTED'
+        WHEN i.PIXEL_DATA_START IS NULL             THEN 'NO_PIXELS'
+        WHEN c.IS_ENCAPSULATED = FALSE              THEN 'ARITHMETIC'
+        WHEN o.STORED_FRAMES IS NULL                THEN 'MISSING'
+        WHEN o.STORED_FRAMES < COALESCE(i.NUMBER_OF_FRAMES, 1) THEN 'INCOMPLETE'
+        ELSE 'STORED'
+    END AS RESOLUTION,
+
+    -- Servable only when the syntax is known AND marked servable AND the
+    -- offsets (if needed) are complete. Everything else demotes rather than
+    -- serving bytes we are not confident about.
+    (c.FRAMES_SERVABLE = TRUE
+     AND i.PIXEL_DATA_START IS NOT NULL
+     AND (c.IS_ENCAPSULATED = FALSE
+          OR COALESCE(o.STORED_FRAMES, 0) >= COALESCE(i.NUMBER_OF_FRAMES, 1))
+    ) AS IS_SERVABLE,
+
+    -- INVARIANT-0001 in view form: offsets computed from a file version that no
+    -- longer matches the catalogued file. This is the stale-offset condition
+    -- that would otherwise serve wrong pixels at HTTP 200.
+    (o.OFFSET_FILE_MD5 IS NOT NULL
+     AND i.FILE_MD5 IS NOT NULL
+     AND o.OFFSET_FILE_MD5 <> i.FILE_MD5) AS IS_STALE,
+
+    -- INVARIANT-0004 in view form: frame numbering must be a contiguous 1-based
+    -- run. A gap means a partial extraction, and serving it would silently
+    -- return the wrong frame for every index past the gap.
+    (o.STORED_FRAMES IS NOT NULL
+     AND (o.MIN_FRAME <> 1 OR o.MAX_FRAME <> o.STORED_FRAMES)) AS HAS_FRAME_GAP
+
+FROM DICOM_INSTANCE i
+LEFT JOIN DICOM_CAPABILITY c ON c.TRANSFER_SYNTAX_UID = i.TRANSFER_SYNTAX_UID
+LEFT JOIN offsets           o ON o.SOP_INSTANCE_UID   = i.SOP_INSTANCE_UID;
+
+
+-- =============================================================================
+-- V_CAPABILITY_GAPS
+--
+-- "What is new in my environment this week", ranked by how much of the corpus
+-- it affects. Simultaneously the operator's novel-input report and the
+-- engineer's prioritised backlog.
+--
+-- Referenced by the CAPABILITY-0001 runbook step in DICOM_ERROR_CATALOG.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_CAPABILITY_GAPS AS
+SELECT
+    i.TRANSFER_SYNTAX_UID,
+    i.SOP_CLASS_UID,
+    COUNT(*)                                AS INSTANCE_COUNT,
+    COUNT(DISTINCT i.SERIES_INSTANCE_UID)   AS SERIES_COUNT,
+    COUNT(DISTINCT i.SOURCE_NAME)           AS SOURCE_COUNT,
+    LISTAGG(DISTINCT i.SOURCE_NAME, ', ')   AS SOURCES,
+    SUM(i.FILE_SIZE)                        AS TOTAL_BYTES,
+    MIN(i.LOADED_AT)                        AS FIRST_SEEN,
+    MAX(i.LOADED_AT)                        AS LAST_SEEN,
+    'CAPABILITY-0001'                       AS ERR_CODE
+FROM DICOM_INSTANCE i
+LEFT JOIN DICOM_CAPABILITY c ON c.TRANSFER_SYNTAX_UID = i.TRANSFER_SYNTAX_UID
+WHERE c.TRANSFER_SYNTAX_UID IS NULL
+GROUP BY i.TRANSFER_SYNTAX_UID, i.SOP_CLASS_UID
+ORDER BY INSTANCE_COUNT DESC;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+--
+-- On a fresh deploy everything is zero. After the backfill, the distribution
+-- across RESOLUTION is the interesting output: a healthy IDC CT corpus should
+-- be overwhelmingly ARITHMETIC, which is the whole cost argument -- those
+-- instances need no offset storage, no cache, and no warming job.
+-- -----------------------------------------------------------------------------
+SELECT COUNT(*) AS STORED_OFFSET_ROWS FROM DICOM_FRAME_OFFSET;
+
+SELECT RESOLUTION,
+       COUNT(*)                AS INSTANCES,
+       SUM(EXPECTED_FRAMES)    AS FRAMES,
+       COUNT_IF(IS_SERVABLE)   AS SERVABLE,
+       COUNT_IF(IS_STALE)      AS STALE,
+       COUNT_IF(HAS_FRAME_GAP) AS WITH_GAPS
+FROM V_FRAME_COVERAGE
+GROUP BY RESOLUTION
+ORDER BY INSTANCES DESC;

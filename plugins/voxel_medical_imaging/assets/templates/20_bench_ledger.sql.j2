@@ -1,0 +1,279 @@
+-- =============================================================================
+-- 20: Cost ledger
+--
+-- Turns this deployment's credit consumption into an auditable, per-component,
+-- currency-denominated ledger.
+--
+-- =============================================================================
+-- WHY THIS EXISTS
+--
+-- The incumbent publishes NO cost or throughput benchmarks anywhere in its
+-- repository -- no files/sec, no $/study, no GB/hr, no sizing table. That cuts
+-- both ways. It means a "we are cheaper" claim is unfalsifiable in both
+-- directions and therefore worth nothing in a bake-off, and it means the first
+-- party to publish a REPRODUCIBLE ledger owns the ground.
+--
+-- So this is not a dashboard. It is evidence: every number traces to a
+-- first-party billing view, with the raw rows retained.
+--
+-- =============================================================================
+-- THREE BILLING CAVEATS, ENCODED RATHER THAN PAPERED OVER
+--
+-- 1. BILLED IS NOT CONSUMED.
+--    Cloud-services credits are only billed above a daily threshold of 10% of
+--    that day's warehouse credits, and serverless credits are excluded from that
+--    adjustment entirely. Summing raw ACCOUNT_USAGE therefore OVERSTATES the
+--    invoice. METERING_DAILY_HISTORY is what was actually billed. Both are
+--    reported here, and the gap between them is a column
+--    (V_COST_BILLED_VS_CONSUMED) rather than a footnote, because a FinOps team
+--    will find that gap and ask about it.
+--
+-- 2. SPCS HISTORY LAGS UP TO 180 MINUTES.
+--    A zero-user measurement that reads the ledger too soon reports a
+--    misleadingly low number. V_COST_FRESHNESS reports the observed lag per
+--    source so a bench run can refuse to conclude until the data has landed.
+--
+-- 3. CREDITS ARE NOT COMPARABLE ACROSS CONTRACTS.
+--    A credit figure means nothing to a customer whose rate differs. Everything
+--    is converted through USAGE_IN_CURRENCY_DAILY at the organization's own
+--    effective daily rate. Where that view is not readable, the ledger reports
+--    credits and says so rather than inventing a rate.
+--
+-- =============================================================================
+-- THIS SCHEMA SURVIVES TEARDOWN
+--
+-- The headline compete number is POST-TEARDOWN RESIDUAL COST, which cannot be
+-- measured by a ledger that teardown deleted. So the bench objects live in their
+-- own schema and teardown.sql explicitly does not drop it. That is also the
+-- direct answer to a teardown that leaves a managed Postgres instance, app
+-- services, model serving endpoints, a vector index, and a BI space behind:
+-- we can prove what we removed.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+
+CREATE SCHEMA IF NOT EXISTS BENCH
+  COMMENT = 'Voxel cost ledger and benchmark results. Deliberately NOT dropped by teardown -- residual cost cannot be measured by a deleted ledger.';
+
+USE SCHEMA BENCH;
+
+-- =============================================================================
+-- Object tagging
+--
+-- Two tags so a multi-deployment account can attribute cost per deployment AND
+-- per component. Without deployment_tag, two Voxel installs in one account are
+-- indistinguishable in the ledger.
+-- =============================================================================
+CREATE TAG IF NOT EXISTS VOXEL_COMPONENT
+  COMMENT = 'Which Voxel component owns this object: INGEST | FRAME_PLANE | DICOMWEB | SEGMENTATION | BENCH';
+CREATE TAG IF NOT EXISTS VOXEL_DEPLOYMENT
+  COMMENT = 'Deployment identifier, so several Voxel installs in one account can be told apart.';
+
+-- Warehouse and pools are the objects that actually consume credits, so they are
+-- the ones that must be tagged. Tagging tables matters only for storage.
+ALTER WAREHOUSE {{ warehouse }}
+  SET TAG {{ db }}.BENCH.VOXEL_COMPONENT = 'INGEST',
+          {{ db }}.BENCH.VOXEL_DEPLOYMENT = '{{ cfg.deployment_tag }}';
+
+ALTER COMPUTE POOL {{ cfg.dicomweb_pool }}
+  SET TAG {{ db }}.BENCH.VOXEL_COMPONENT = 'DICOMWEB',
+          {{ db }}.BENCH.VOXEL_DEPLOYMENT = '{{ cfg.deployment_tag }}';
+
+ALTER COMPUTE POOL {{ cfg.gpu_pool }}
+  SET TAG {{ db }}.BENCH.VOXEL_COMPONENT = 'SEGMENTATION',
+          {{ db }}.BENCH.VOXEL_DEPLOYMENT = '{{ cfg.deployment_tag }}';
+
+-- =============================================================================
+-- V_COST_HOURLY -- every credit-consuming surface, one shape
+--
+-- UNION ALL rather than a join, because each source has its own grain and
+-- forcing them into one join would either fan out or drop rows. A component with
+-- zero cost in an hour is simply absent, and V_COST_DAILY fills that in.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_HOURLY AS
+-- Warehouse: the ingest path.
+SELECT
+    DATE_TRUNC('hour', START_TIME)      AS HOUR_UTC,
+    'WAREHOUSE'                          AS COST_SOURCE,
+    'INGEST'                             AS COMPONENT,
+    WAREHOUSE_NAME                       AS OBJECT_NAME,
+    SUM(CREDITS_USED_COMPUTE)            AS CREDITS_COMPUTE,
+    SUM(CREDITS_USED_CLOUD_SERVICES)     AS CREDITS_CLOUD_SERVICES,
+    SUM(CREDITS_USED)                    AS CREDITS_TOTAL
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE WAREHOUSE_NAME = '{{ warehouse }}'
+GROUP BY 1,2,3,4
+
+UNION ALL
+
+-- SPCS compute pools: the DICOMweb service and Vista3D.
+-- Pools bill in IDLE, ACTIVE, STOPPING and RESIZING -- but NOT in STARTING or
+-- SUSPENDED. That is exactly why every pool is created INITIALLY_SUSPENDED, and
+-- it is why the zero-user profile can legitimately report near-zero.
+SELECT
+    DATE_TRUNC('hour', START_TIME),
+    'COMPUTE_POOL',
+    CASE WHEN COMPUTE_POOL_NAME = '{{ cfg.gpu_pool }}' THEN 'SEGMENTATION'
+         ELSE 'DICOMWEB' END,
+    COMPUTE_POOL_NAME,
+    SUM(CREDITS_USED),
+    0,
+    SUM(CREDITS_USED)
+FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
+WHERE COMPUTE_POOL_NAME IN ('{{ cfg.dicomweb_pool }}', '{{ cfg.gpu_pool }}')
+GROUP BY 1,2,3,4
+
+UNION ALL
+
+-- Serverless tasks: the scan and extract DAG. Per-second billed with no
+-- minimum, which is the whole reason the DAG is serverless rather than
+-- warehouse-backed.
+SELECT
+    DATE_TRUNC('hour', START_TIME),
+    'SERVERLESS_TASK',
+    'INGEST',
+    TASK_NAME,
+    SUM(CREDITS_USED),
+    0,
+    SUM(CREDITS_USED)
+FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+WHERE DATABASE_NAME = '{{ db }}' AND SCHEMA_NAME = '{{ schema }}'
+GROUP BY 1,2,3,4;
+
+-- =============================================================================
+-- V_COST_TRANSFER -- the two meters that are easy to forget
+--
+-- Warehouse-to-compute-pool movement is billed as INTERNAL_DATA_TRANSFER.
+-- Pool-to-browser movement is billed as outbound egress under
+-- transfer_type = SNOWPARK_CONTAINER_SERVICES.
+--
+-- These matter specifically for the frame-serving path, which is chatty by
+-- nature. Serving compressed transfer syntaxes as byte-range passthrough
+-- (no server-side decode, no re-encode) reduces BOTH meters with one decision:
+-- fewer bytes leave, and no CPU is spent transcoding.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_TRANSFER AS
+SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_UTC,
+       'EGRESS_OUTBOUND'              AS TRANSFER_KIND,
+       TRANSFER_TYPE,
+       SUM(BYTES_TRANSFERRED)         AS BYTES
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
+GROUP BY 1,2,3
+UNION ALL
+SELECT DATE_TRUNC('hour', START_TIME),
+       'INTERNAL',
+       TRANSFER_TYPE,
+       SUM(BYTES_TRANSFERRED)
+FROM SNOWFLAKE.ACCOUNT_USAGE.INTERNAL_DATA_TRANSFER_HISTORY
+GROUP BY 1,2,3;
+
+-- =============================================================================
+-- V_COST_STORAGE -- including the multiplier people miss
+--
+-- Table storage carries Time Travel and Fail-safe BEHIND it. For data that is
+-- deterministically reproducible from the source DICOM -- frame offsets,
+-- previews, embeddings -- paying retention insurance is paying twice. This view
+-- separates ACTIVE from TIME_TRAVEL and FAILSAFE so that decision is visible
+-- instead of buried in a single "storage" number.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_STORAGE AS
+SELECT
+    TABLE_CATALOG || '.' || TABLE_SCHEMA || '.' || TABLE_NAME AS FQ_TABLE,
+    TABLE_NAME,
+    ROUND(ACTIVE_BYTES        / POWER(1024,3), 4) AS ACTIVE_GB,
+    ROUND(TIME_TRAVEL_BYTES   / POWER(1024,3), 4) AS TIME_TRAVEL_GB,
+    ROUND(FAILSAFE_BYTES      / POWER(1024,3), 4) AS FAILSAFE_GB,
+    ROUND((ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES)
+          / POWER(1024,3), 4)                     AS TOTAL_GB,
+    -- The multiplier itself. A value near 1.0 means retention is not inflating
+    -- this table; well above 1.0 on a reproducible derived table is waste.
+    IFF(ACTIVE_BYTES = 0, NULL,
+        ROUND((ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES)
+              / NULLIF(ACTIVE_BYTES, 0), 2))      AS RETENTION_MULTIPLIER
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
+WHERE TABLE_CATALOG = '{{ db }}' AND NOT DELETED;
+
+-- =============================================================================
+-- V_COST_RATE -- credits to currency at the org's own effective rate
+--
+-- Derived rather than hardcoded. A hardcoded $/credit is wrong for every
+-- customer except the one it was written for, and quietly so.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_RATE AS
+SELECT
+    USAGE_DATE,
+    CURRENCY,
+    SUM(USAGE)          AS CREDITS,
+    SUM(USAGE_IN_CURRENCY) AS CURRENCY_AMOUNT,
+    IFF(SUM(USAGE) = 0, NULL,
+        ROUND(SUM(USAGE_IN_CURRENCY) / NULLIF(SUM(USAGE), 0), 6)) AS RATE_PER_CREDIT
+FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+WHERE ACCOUNT_LOCATOR = CURRENT_ACCOUNT()
+  AND USAGE_TYPE ILIKE '%compute%'
+GROUP BY 1,2;
+
+-- =============================================================================
+-- V_COST_BILLED_VS_CONSUMED -- caveat 1, as data
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_BILLED_VS_CONSUMED AS
+WITH consumed AS (
+    SELECT DATE_TRUNC('day', HOUR_UTC) AS D, SUM(CREDITS_TOTAL) AS CREDITS_CONSUMED
+    FROM V_COST_HOURLY GROUP BY 1
+),
+billed AS (
+    SELECT USAGE_DATE AS D, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+    FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+    GROUP BY 1
+)
+SELECT COALESCE(c.D, b.D)                        AS USAGE_DATE,
+       c.CREDITS_CONSUMED,
+       b.CREDITS_BILLED,
+       ROUND(COALESCE(c.CREDITS_CONSUMED,0) - COALESCE(b.CREDITS_BILLED,0), 4) AS OVERSTATEMENT,
+       'Raw ACCOUNT_USAGE sums consumption; METERING_DAILY_HISTORY is the invoice. '
+       || 'Cloud-services credits bill only above 10% of daily warehouse credits.' AS NOTE
+FROM consumed c
+FULL OUTER JOIN billed b ON b.D = c.D;
+
+-- =============================================================================
+-- V_COST_FRESHNESS -- caveat 2, as a gate
+--
+-- A bench run reads this BEFORE concluding. Reporting a zero-user cost from a
+-- ledger that has not caught up is how you publish a number you have to retract.
+--
+-- LAG uses MAX(START_TIME), not MAX(END_TIME). The metering views bucket by
+-- hour, so END_TIME is the end of the CURRENT bucket and is legitimately in the
+-- future -- measuring against it produced a NEGATIVE lag (-56 minutes observed),
+-- which reads as "fresher than now" and would let a bench run conclude early.
+-- GREATEST(0, ...) additionally clamps clock skew.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_COST_FRESHNESS AS
+SELECT 'WAREHOUSE_METERING_HISTORY' AS SRC,
+       MAX(START_TIME)               AS LATEST_DATA,
+       GREATEST(0, DATEDIFF('minute', MAX(START_TIME), CURRENT_TIMESTAMP())) AS LAG_MINUTES,
+       180                           AS DOCUMENTED_MAX_LAG_MIN
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+UNION ALL
+SELECT 'SNOWPARK_CONTAINER_SERVICES_HISTORY', MAX(START_TIME),
+       GREATEST(0, DATEDIFF('minute', MAX(START_TIME), CURRENT_TIMESTAMP())), 180
+FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
+UNION ALL
+SELECT 'SERVERLESS_TASK_HISTORY', MAX(START_TIME),
+       GREATEST(0, DATEDIFF('minute', MAX(START_TIME), CURRENT_TIMESTAMP())), 180
+FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+UNION ALL
+SELECT 'METERING_DAILY_HISTORY', MAX(USAGE_DATE)::TIMESTAMP_LTZ,
+       GREATEST(0, DATEDIFF('minute', MAX(USAGE_DATE)::TIMESTAMP_LTZ, CURRENT_TIMESTAMP())), 1440
+FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT * FROM V_COST_FRESHNESS ORDER BY SRC;
+
+SELECT COMPONENT, COST_SOURCE, ROUND(SUM(CREDITS_TOTAL), 4) AS CREDITS
+FROM V_COST_HOURLY
+WHERE HOUR_UTC > DATEADD('day', -1, CURRENT_TIMESTAMP())
+GROUP BY 1,2 ORDER BY 1,2;
+
+SELECT TABLE_NAME, ACTIVE_GB, TOTAL_GB, RETENTION_MULTIPLIER
+FROM V_COST_STORAGE ORDER BY TOTAL_GB DESC LIMIT 15;

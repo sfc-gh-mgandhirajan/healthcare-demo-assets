@@ -1,0 +1,102 @@
+-- =============================================================================
+-- 13: Initial backfill
+--
+-- One synchronous pass through the SAME procedures the task DAG calls. There is
+-- no separate backfill code path, deliberately: a backfill that behaves
+-- differently from steady state is a backfill that hides bugs until the first
+-- real task run.
+--
+-- Also materializes the pread subset (see the second section), which is what the
+-- dicomweb phase mounts as a stage volume.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- -----------------------------------------------------------------------------
+-- Discover, then parse. BATCH_LIMIT is deliberately large here
+-- ({{ cfg.backfill_batch_limit }}) because a backfill is a one-time, attended
+-- operation -- unlike the task run, which is bounded to keep any single
+-- scheduled execution cheap and interruptible.
+-- -----------------------------------------------------------------------------
+CALL SP_SCAN_ALL_SOURCES();
+CALL SP_LOAD_METADATA({{ cfg.backfill_batch_limit }});
+
+-- =============================================================================
+-- PREAD SUBSET
+--
+-- Copies a bounded number of complete SERIES into the internal stage so the
+-- DICOMweb frame server can read them with os.pread through a mounted stage
+-- volume. Necessary because SPCS stage volumes mount INTERNAL STAGES ONLY.
+--
+-- Bounded by pread_series_limit ({{ cfg.pread_series_limit }}) because this is a
+-- real copy of pixel data and therefore real storage cost. The bench phase
+-- reports it as a separate line rather than burying it.
+--
+-- WHOLE SERIES, not a sample of files. A viewer opening a series needs every
+-- slice; a random file sample produces a series that appears present and then
+-- fails mid-scroll, which is worse than not having it.
+--
+-- THE COPY MUST BE SCOPED BY PREFIX, AND THAT IS NOT A STYLE PREFERENCE.
+--
+-- This previously selected the smallest series and copied them with an explicit
+-- file list:
+--   COPY FILES INTO @dst/ FROM @src FILES = (SELECT LISTAGG(...) FROM PREAD_TARGET)
+-- which had two independent defects:
+--
+--   1. FILES = takes a LITERAL list, never a subquery, so it did not compile:
+--      001003 (42000): syntax error line 4 at position 2 unexpected 'SELECT'
+--   2. Fixing that (materialize the list, EXECUTE IMMEDIATE) still fails, because
+--      an explicit FILES list does NOT stop the source stage from being ENUMERATED.
+--      Against the real IDC bucket, @{{ cfg.source_stage }} at its root is
+--      ~3.7 MILLION objects:
+--        001057 (0A000): Total size (>=1,073,741,904 bytes) for the list of file
+--        descriptors returned from the stage exceeded limit (1,073,741,824 bytes);
+--        Number of file descriptors returned is >=3,728,112. Please use a prefix
+--        in the stage location or pattern option to reduce the number of files.
+--
+-- SP_SYNC_PREAD_STAGE copies per registered prefix -- INTO @dst/<prefix> FROM
+-- @src/<prefix> -- so each statement lists one prefix instead of the bucket. That
+-- is the only route that works at bucket scale, which is why it is the one call
+-- here rather than one of two interchangeable options.
+--
+-- Path preservation is still load-bearing: the gateway resolves a frame as
+-- os.pread(MOUNT + '/' + FILE_NAME), so the relative path on the internal stage
+-- must equal DICOM_INSTANCE.FILE_NAME byte for byte. Copying per prefix into the
+-- matching prefix preserves that. The trap to avoid is flattening to basenames --
+-- it would still copy, still report success, and every frame request would 404
+-- against a mount whose paths no longer match the catalog.
+--
+-- Selection is therefore by PREFIX, not by smallest series. pread_series_limit
+-- bounds the number of prefixes.
+-- =============================================================================
+CALL SP_SYNC_PREAD_STAGE({{ cfg.pread_series_limit }});
+
+ALTER STAGE {{ cfg.pread_stage }} REFRESH;
+
+-- Which series a viewer or a segmentation run can actually read. Anything not
+-- COMPLETE here 404s every frame, and segmentation fails volume assembly with
+-- 253006 "the file does not exist".
+SELECT PREAD_STATE, COUNT(*) AS SERIES, SUM(N_PRESENT) AS FILES_PRESENT
+FROM V_PREAD_COVERAGE
+GROUP BY PREAD_STATE
+ORDER BY SERIES DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT * FROM V_PIPELINE_STATUS;
+
+SELECT RESOLUTION,
+       COUNT(*)                AS INSTANCES,
+       SUM(EXPECTED_FRAMES)    AS FRAMES,
+       COUNT_IF(IS_SERVABLE)   AS SERVABLE,
+       COUNT_IF(IS_STALE)      AS STALE,
+       COUNT_IF(HAS_FRAME_GAP) AS WITH_GAPS
+FROM V_FRAME_COVERAGE
+GROUP BY RESOLUTION
+ORDER BY INSTANCES DESC;
+
+SELECT * FROM V_ERROR_SUMMARY ORDER BY ERR_CLASS, ERR_CODE;

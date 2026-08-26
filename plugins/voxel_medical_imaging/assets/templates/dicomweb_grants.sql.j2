@@ -1,0 +1,198 @@
+-- =============================================================================
+-- DICOMWEB_GRANTS
+--
+-- The authorization boundary for the DICOMweb service.
+--
+-- =============================================================================
+-- RESTRICTED CALLER'S RIGHTS: BOTH PRIVILEGES ARE REQUIRED
+--
+-- With `executeAsCaller: true` the service runs its queries as the end user. But
+-- caller's rights alone would let the service reach anything the caller can
+-- reach, from any code path, which is more than a DICOMweb server should have.
+--
+-- GRANT CALLER narrows it. An operation needs BOTH:
+--   * the CALLER's own privilege on the object, AND
+--   * the service owner's CALLER grant exposing that object through the service
+--
+-- So the service cannot reach anything the radiologist could not reach directly,
+-- and the radiologist cannot reach anything the owner has not deliberately
+-- exposed. Neither side alone is sufficient. That is the property a security
+-- reviewer is looking for and it is provable by reading two grant statements.
+--
+-- =============================================================================
+-- THE ROW ACCESS POLICY IS THE FILTER, NOT APPLICATION CODE
+--
+-- The incumbent enforces row-level access by caching results under a SHA-256 of the
+-- caller's sorted group list, truncated to 12 hex characters. Three problems:
+--   * revocation does not take effect until the cache entry expires
+--   * two users with different entitlements that happen to resolve to the same
+--     group set share results correctly only by accident
+--   * the decision lives in a Python dict, so no audit view can see it
+--
+-- Here the decision is a policy evaluated by the query engine on every query.
+-- Revocation is immediate because there is no cached decision to invalidate, and
+-- every access lands in ACCESS_HISTORY without the application doing anything.
+--
+-- The reviewer's question changes from "show me your caching code" to "show me
+-- the policy body and the entitlement table" -- which has a one-query answer.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- =============================================================================
+-- Entitlement table
+--
+-- One row per (user, site, department) the user may read. Deliberately a TABLE
+-- rather than role membership, because imaging entitlement is usually
+-- finer-grained than roles: a cardiologist at one site is not automatically
+-- entitled to another site's studies, and modelling that as roles produces a role
+-- explosion.
+--
+-- This is the object the Privacy team reviews and signs off on.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS USER_STUDY_SCOPE (
+    USER_NAME    VARCHAR       NOT NULL,
+    SITE         VARCHAR       NOT NULL,
+    DEPARTMENT   VARCHAR       NOT NULL,
+    GRANTED_BY   VARCHAR       DEFAULT CURRENT_USER(),
+    GRANTED_AT   TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    EXPIRES_AT   TIMESTAMP_LTZ,
+    CONSTRAINT PK_USER_STUDY_SCOPE PRIMARY KEY (USER_NAME, SITE, DEPARTMENT)
+)
+COMMENT = 'Voxel: per-user imaging entitlement. Read by the row access policy on DICOM_INSTANCE. The reviewable artifact for who may see which studies.';
+
+-- =============================================================================
+-- Where SITE and DEPARTMENT come from
+--
+-- DICOM has no site or department tag. InstitutionName (0008,0080) is the closest
+-- thing and it is free text, inconsistent across scanners, and PHI-adjacent.
+--
+-- So scope is derived from SOURCE_NAME, which IS governed: it is a row in
+-- DICOM_SOURCE_CONFIG that an operator deliberately registered. A customer with
+-- one stage per site gets site scoping for free; a customer with one stage for
+-- everything needs to either split stages or extend this mapping.
+--
+-- Stating that limitation here rather than pretending InstitutionName is reliable.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS SOURCE_SCOPE_MAP (
+    SOURCE_NAME  VARCHAR NOT NULL,
+    SITE         VARCHAR NOT NULL,
+    DEPARTMENT   VARCHAR NOT NULL,
+    CONSTRAINT PK_SOURCE_SCOPE_MAP PRIMARY KEY (SOURCE_NAME)
+)
+COMMENT = 'Voxel: maps a registered source to a (site, department) scope. DICOM has no reliable site tag, so scope comes from governed config rather than free-text InstitutionName.';
+
+MERGE INTO SOURCE_SCOPE_MAP t
+USING (SELECT '{{ cfg.source_name }}' AS SOURCE_NAME,
+              'DEMO' AS SITE, 'RESEARCH' AS DEPARTMENT) s
+ON t.SOURCE_NAME = s.SOURCE_NAME
+WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, SITE, DEPARTMENT)
+    VALUES (s.SOURCE_NAME, s.SITE, s.DEPARTMENT);
+
+-- =============================================================================
+-- The policy
+--
+-- Attached to SOURCE_NAME because that is the column the scope maps from. A
+-- policy on a UID column would need the mapping inside the policy body, which is
+-- evaluated per row and would be far more expensive.
+--
+-- The owner and ACCOUNTADMIN carve-out is what keeps the pipeline working: the
+-- ingest procedures run as owner_role and must see everything to reconcile the
+-- manifest. Without it, a backfill would silently write rows it then cannot read
+-- back, and the reconciliation check would fail for a reason that has nothing to
+-- do with ingestion.
+-- =============================================================================
+CREATE ROW ACCESS POLICY IF NOT EXISTS STUDY_SCOPE_POLICY
+AS (SOURCE_NAME VARCHAR) RETURNS BOOLEAN ->
+    -- The pipeline and the platform admin see everything.
+    CURRENT_ROLE() IN ('{{ owner_role }}', 'ACCOUNTADMIN')
+    -- Everyone else sees only what the entitlement table says.
+    OR EXISTS (
+        SELECT 1
+        FROM {{ db }}.{{ schema }}.SOURCE_SCOPE_MAP m
+        JOIN {{ db }}.{{ schema }}.USER_STUDY_SCOPE u
+          ON u.SITE = m.SITE AND u.DEPARTMENT = m.DEPARTMENT
+        WHERE m.SOURCE_NAME = SOURCE_NAME
+          AND u.USER_NAME = CURRENT_USER()
+          -- An expired grant stops working on its own. A time-bounded
+          -- entitlement that requires someone to remember to revoke it is not
+          -- time-bounded.
+          AND (u.EXPIRES_AT IS NULL OR u.EXPIRES_AT > CURRENT_TIMESTAMP())
+    )
+COMMENT = 'Voxel: scopes DICOM_INSTANCE by (site, department) via SOURCE_SCOPE_MAP and USER_STUDY_SCOPE.';
+
+-- ADD ... IF it is not already attached. Snowflake rejects a second ADD on the
+-- same column, so a re-deploy would fail without this guard, and DROP-then-ADD
+-- would leave a window where the table is unprotected.
+EXECUTE IMMEDIATE $$
+DECLARE
+    already NUMBER DEFAULT 0;
+BEGIN
+    SELECT COUNT(*) INTO already
+    FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+        REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+        REF_ENTITY_DOMAIN => 'TABLE'))
+    WHERE POLICY_KIND = 'ROW_ACCESS_POLICY';
+
+    IF (already = 0) THEN
+        ALTER TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE
+          ADD ROW ACCESS POLICY STUDY_SCOPE_POLICY ON (SOURCE_NAME);
+        RETURN 'row access policy attached to DICOM_INSTANCE(SOURCE_NAME)';
+    END IF;
+    RETURN 'row access policy already attached; left as-is';
+END;
+$$;
+
+-- =============================================================================
+-- Service role grants
+--
+-- The ROLE ITSELF is created in 00_ACCOUNT_SETUP, not here. CREATE ROLE is an
+-- account-level privilege SYSADMIN does not hold by default -- attempting it here
+-- fails with "your primary role SYSADMIN must have CREATE ROLE granted on
+-- ACCOUNT", which would force a platform admin into every viewer deployment.
+-- Object grants belong with the objects, so they stay here where owner_role can
+-- grant on what it owns.
+--
+-- VOXEL_RADIOLOGIST holds SELECT, but the row access policy above means SELECT
+-- returns only entitled rows. The role is a key to the door, not a view of the
+-- room.
+-- =============================================================================
+GRANT USAGE ON DATABASE {{ db }} TO ROLE VOXEL_RADIOLOGIST;
+GRANT USAGE ON SCHEMA {{ db }}.{{ schema }} TO ROLE VOXEL_RADIOLOGIST;
+GRANT SELECT ON TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE TO ROLE VOXEL_RADIOLOGIST;
+GRANT SELECT ON TABLE {{ db }}.{{ schema }}.DICOM_FRAME_OFFSET TO ROLE VOXEL_RADIOLOGIST;
+GRANT SELECT ON VIEW  {{ db }}.{{ schema }}.V_FRAME_COVERAGE TO ROLE VOXEL_RADIOLOGIST;
+GRANT SELECT ON VIEW  {{ db }}.{{ schema }}.V_DICOM_SERIES TO ROLE VOXEL_RADIOLOGIST;
+GRANT USAGE ON WAREHOUSE {{ warehouse }} TO ROLE VOXEL_RADIOLOGIST;
+
+-- Caller grants: the second half of the double requirement. Without these the
+-- service cannot touch these objects even when the caller could.
+GRANT CALLER USAGE ON DATABASE {{ db }} TO ROLE {{ owner_role }};
+GRANT CALLER USAGE ON SCHEMA {{ db }}.{{ schema }} TO ROLE {{ owner_role }};
+GRANT CALLER USAGE ON WAREHOUSE {{ warehouse }} TO ROLE {{ owner_role }};
+GRANT INHERITED CALLER SELECT ON ALL TABLES IN SCHEMA {{ db }}.{{ schema }}
+  TO ROLE {{ owner_role }};
+GRANT INHERITED CALLER SELECT ON ALL VIEWS IN SCHEMA {{ db }}.{{ schema }}
+  TO ROLE {{ owner_role }};
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT POLICY_NAME, POLICY_KIND, REF_COLUMN_NAME
+FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+    REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+    REF_ENTITY_DOMAIN => 'TABLE'))
+ORDER BY POLICY_KIND, REF_COLUMN_NAME;
+
+SELECT 'SOURCE_SCOPE_MAP' AS T, COUNT(*) AS N FROM SOURCE_SCOPE_MAP
+UNION ALL SELECT 'USER_STUDY_SCOPE', COUNT(*) FROM USER_STUDY_SCOPE;
+
+-- To entitle a radiologist:
+--   GRANT ROLE VOXEL_RADIOLOGIST TO USER "someone@example.com";
+--   INSERT INTO USER_STUDY_SCOPE (USER_NAME, SITE, DEPARTMENT)
+--     VALUES ('SOMEONE@EXAMPLE.COM', 'DEMO', 'RESEARCH');
+--
+-- USER_NAME must match CURRENT_USER() exactly, which is UPPERCASE for a normal
+-- Snowflake user. A lowercase row silently matches nothing, and the symptom is an
+-- empty study list rather than an error.

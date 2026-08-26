@@ -1,0 +1,975 @@
+-- =============================================================================
+-- 06: UDFs
+--
+--   EXTRACT_DICOM_HEADER_AND_FRAMES  vectorized UDTF. The core of the pipeline.
+--   EXTRACT_DICOM_METADATA           scalar, row-wise. Kept for A/B benchmarking.
+--   RENDER_DICOM_SLICE               base64 PNG for previews and thumbnails.
+--
+-- =============================================================================
+-- WHY end_partition AND NOT process
+--
+-- Snowflake offers two vectorized UDTF shapes and only one of them can do this
+-- job:
+--
+--   vectorized process        batches rows WITHOUT explicit partitioning, but
+--                             is documented as a 1-to-1 mapping -- "returns one
+--                             output row for each input row". One DICOM file
+--                             yields one header row plus N frame rows, so 1-to-1
+--                             is disqualifying.
+--
+--   vectorized end_partition  receives a partition as a pandas DataFrame and may
+--                             return many rows. This is the one that fits, and
+--                             it REQUIRES a PARTITION BY clause.
+--
+-- =============================================================================
+-- PARTITION SIZING IS LOAD-BEARING. READ THIS BEFORE CHANGING BATCH LIMITS.
+--
+-- A vectorized end_partition handler receives an ENTIRE PARTITION in ONE call,
+-- and a handler call must finish inside the 180-second limit. So partition size
+-- directly controls whether this works at all:
+--
+--   PARTITION BY 1            -> one call for the whole batch -> ZERO
+--                                parallelism and a guaranteed timeout at scale.
+--                                This is the trap.
+--   PARTITION BY <source>     -> partition count = number of sources, which is
+--                                usually 1-3. Nearly as bad.
+--   PARTITION BY hash bucket  -> partition count is CHOSEN, so partition size is
+--                                bounded. This is what SP_LOAD_METADATA does.
+--
+-- SP_LOAD_METADATA computes bucket count as CEIL(batch_size / udtf_max_batch_size)
+-- so each partition holds about udtf_max_batch_size files
+-- (currently {{ cfg.udtf_max_batch_size }}) regardless of how large BATCH_LIMIT is.
+-- With {{ cfg.udtf_io_threads }} I/O threads and typical header-read latency that
+-- is a small fraction of the time budget, and it leaves many partitions for the
+-- warehouse to spread across workers.
+--
+-- Raising udtf_max_batch_size trades safety margin for fewer, larger partitions.
+-- Timeout shows up as CAPACITY-0004.
+--
+-- =============================================================================
+-- WHERE THE PARALLELISM COMES FROM
+--
+-- Two levels, multiplied:
+--   outer  the warehouse schedules many partitions across many Python workers
+--   inner  each handler call runs a ThreadPoolExecutor over its partition's
+--          files, because the cost here is BLOCKING OBJECT-STORAGE LATENCY, not
+--          CPU. Threads hide that latency despite the GIL, exactly as the incumbent
+--          does with 32 threads per Arrow batch.
+--
+-- The reference DICOM plugin had only the outer level -- one open + one
+-- dcmread per row -- and measured 2,848 files in ~90s on a MEDIUM warehouse
+-- (~32 files/sec). The inner level is the difference.
+--
+-- =============================================================================
+-- ONE FILE OPEN, ONE FORWARD PASS, TWO OUTPUTS
+--
+-- The incumbent reads every file at least TWICE: once in the mapInPandas metadata pass,
+-- again in a separate BOTCacheBuilder Spark job to compute frame offsets. This
+-- handler reads the header and continues on the SAME OPEN HANDLE to resolve
+-- frame offsets, then emits both a HEADER row and N FRAME rows. The second full
+-- read of every file does not happen.
+--
+-- require_scoped_url=False is what makes this practical: it accepts a plain
+-- '@db.schema.stage/path' string, so the path can come from a COLUMN. The
+-- reference plugin used BUILD_SCOPED_FILE_URL, which requires a LITERAL stage
+-- name and therefore forced every call site into EXECUTE IMMEDIATE string
+-- building. That whole layer disappears.
+--
+-- =============================================================================
+-- CALL SITE CONTRACT -- three constraints, all found by running this, none
+-- obvious from the docs. Violating any of them is a compile error or, worse,
+-- silent NULLs.
+--
+-- 1. PARTITION BY MUST BE A COLUMN, NOT AN EXPRESSION.
+--        OVER (PARTITION BY MOD(ABS(HASH(FILE_NAME)), 4))
+--    fails with: "Invalid partitioning expression ...; must be a column."
+--    So the bucket has to be MATERIALIZED as a column in the driving table.
+--    SP_LOAD_METADATA computes a BUCKET column in the CTAS for exactly this
+--    reason -- it is not incidental.
+--
+-- 2. THE TABLE FUNCTION MUST BE ALIASED.
+--    The UDTF returns FILE_NAME, and the driving table also has FILE_NAME, so
+--    an unaliased call fails with "ambiguous column name 'FILE_NAME'". Alias it
+--    (AS f) and qualify every reference.
+--
+-- 3. OUTER TABLE COLUMNS COME BACK NULL ON UDTF OUTPUT ROWS.
+--    This is documented behaviour for a partitioned table function, and it is
+--    the sharpest of the three because it does NOT error -- it silently yields
+--    NULL. Selecting s.FILE_SIZE alongside f.* returns NULL for every row.
+--    Therefore the UDTF emits everything needed to identify its own rows, and
+--    any enrichment from the source table must be a JOIN BACK on f.FILE_NAME
+--    after the fact, never a projection of s.* in the same SELECT.
+--
+-- Correct shape:
+--    CREATE TEMPORARY TABLE batch AS
+--      SELECT FILE_NAME, FILE_SIZE, FILE_MD5,
+--             MOD(ABS(HASH(FILE_NAME)), <n>) AS BUCKET   -- (1) materialized
+--      FROM ...;
+--    CREATE TEMPORARY TABLE extracted AS
+--      SELECT f.* FROM batch b,                          -- f.* only, see (3)
+--        TABLE(EXTRACT_DICOM_HEADER_AND_FRAMES(
+--                '@db.schema.stage/' || b.FILE_NAME, b.FILE_NAME)
+--              OVER (PARTITION BY b.BUCKET)) f;          -- (2) aliased
+--    -- then JOIN extracted back to batch ON FILE_NAME for FILE_SIZE/FILE_MD5
+--
+-- =============================================================================
+-- VERIFIED ON REAL DATA
+--
+-- Against IDC collection 7e1bcefd (Explicit VR Little Endian, 512x512, 16-bit,
+-- 1 sample, single frame), the closed-form identity holds exactly:
+--
+--     PIXEL_DATA_START + ROWS * COLS * (BITS_ALLOCATED/8) * SAMPLES * FRAMES
+--       = FILE_SIZE
+--     3222 + 512*512*(16/8)*1*1 = 3222 + 524288 = 527510   (= listed size)
+--     3218 + 524288             = 527506                    (= listed size)
+--
+-- 8 of 8 files produced a HEADER row and ZERO frame rows, which is the design
+-- working as intended: native syntax needs no stored offsets at all. Across the
+-- full 2,848-file corpus: 2,848 instances, 0 stored frame offsets, 0 errors.
+-- CHECKS asserts this identity continuously rather than trusting one observation.
+-- =============================================================================
+-- =============================================================================
+-- MEASURED: WHERE THE SPEEDUP ACTUALLY COMES FROM
+--
+-- Full IDC corpus, 2,848 files, MEDIUM warehouse, measured from
+-- SNOWFLAKE.INFORMATION_SCHEMA.QUERY_HISTORY (not wall clock, which includes
+-- CLI startup and warehouse resume):
+--
+--   partitions   files/partition   elapsed   files/sec
+--        45            63           53.3 s      53
+--       178            16           50.8 s      56
+--       356             8           44.5 s      64   <-- default
+--      1563             1.8         50.1 s      57
+--
+-- Reference scalar-UDF plugin, same corpus, same warehouse size: ~90 s, ~32
+-- files/sec.
+--
+-- HONEST ATTRIBUTION. The ~2x improvement is NOT mainly the in-handler thread
+-- pool -- the curve above only spans ~20%, and 1563 partitions of 1.8 files each
+-- (where threading can do essentially nothing) still hit 57 files/sec. The
+-- dominant win is that this handler NEVER READS PIXEL DATA:
+--
+--   reference:  f.read()  -> pulls the whole 527 KB file, then dcmread(BytesIO)
+--   here:       dcmread(fp, stop_before_pixels=True) -> ~3 KB of header
+--
+-- That is roughly 175x fewer bytes off object storage per file. Threading and
+-- partition sizing are a secondary ~20% on top.
+--
+-- Stating this correctly matters: a benchmark claim attributed to the wrong
+-- mechanism does not survive a customer asking why.
+--
+-- TUNING NOTE. The optimum tracks I/O concurrency, not CPU. 356 x 8 = 2,848,
+-- i.e. the best point had every file in flight at once. On a larger warehouse
+-- (more UDTF worker slots) or a larger corpus, expect the optimum to stay near
+-- "partitions x threads >= files in the batch". Raising udtf_max_batch_size
+-- above the thread count is counterproductive -- the extra files queue behind
+-- the threads inside one handler call and eat the 180-second budget
+-- (CAPACITY-0004).
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- The signature changed from any earlier iteration. Snowflake identifies
+-- functions by name AND signature, so CREATE OR REPLACE leaves older arities in
+-- place as overloads, and a stale call site would silently resolve to one.
+DROP FUNCTION IF EXISTS EXTRACT_DICOM_HEADER_AND_FRAMES(VARCHAR);
+DROP FUNCTION IF EXISTS EXTRACT_DICOM_HEADER_AND_FRAMES(VARCHAR, VARCHAR);
+
+CREATE OR REPLACE FUNCTION EXTRACT_DICOM_HEADER_AND_FRAMES(
+    FILE_PATH  VARCHAR,   -- '@db.schema.stage/relative/path.dcm'
+    FILE_NAME  VARCHAR    -- carried through so output rows are self-identifying
+)
+RETURNS TABLE (
+    ROW_KIND             VARCHAR,      -- 'HEADER' | 'FRAME'
+    FILE_NAME            VARCHAR,
+    SOP_INSTANCE_UID     VARCHAR,
+    META                 VARIANT,      -- HEADER rows only: DICOM JSON model
+    TRANSFER_SYNTAX_UID  VARCHAR,
+    IS_ENCAPSULATED      BOOLEAN,
+    PIXEL_DATA_START     NUMBER(38,0),
+    NUMBER_OF_FRAMES     NUMBER(38,0),
+    FRAME_NUMBER         NUMBER(38,0), -- FRAME rows only. 1-based.
+    FRAME_OFFSET         NUMBER(38,0),
+    FRAME_LENGTH         NUMBER(38,0),
+    OFFSET_SOURCE        VARCHAR,      -- 'EOT' | 'BOT' | 'ITEM_SCAN'
+    ERR_CODE             VARCHAR,
+    ERR_DETAIL           VARCHAR
+)
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom', 'pandas')
+HANDLER = 'DicomHeaderAndFrames'
+AS $$
+import io
+import json
+import struct
+import pandas
+from concurrent.futures import ThreadPoolExecutor
+from _snowflake import vectorized
+
+# -----------------------------------------------------------------------------
+# Native (non-encapsulated) transfer syntaxes. Pixel data is one contiguous
+# block, so frame offsets are closed-form arithmetic and NO offset rows are
+# emitted for these at all -- that is the entire cost argument of the frame
+# plane.
+#
+# This set is intentionally duplicated from DICOM_CAPABILITY.IS_ENCAPSULATED. A
+# UDF cannot query a table, and the encapsulation of a transfer syntax is a fact
+# from the DICOM standard rather than a tunable policy, so duplicating it here is
+# safe. Policy decisions (servable, size ceilings) stay in SQL where the
+# capability table can drive them.
+# -----------------------------------------------------------------------------
+NATIVE_SYNTAXES = {
+    '1.2.840.10008.1.2',      # Implicit VR Little Endian
+    '1.2.840.10008.1.2.1',    # Explicit VR Little Endian
+    '1.2.840.10008.1.2.2',    # Explicit VR Big Endian
+}
+
+# Whole-DATASET deflate. Pixel data is nominally native, but the bytes on disk
+# are compressed, so a file byte offset does not address a frame. Computing
+# closed-form offsets here would produce confidently wrong values and serve the
+# wrong pixels at HTTP 200, so this syntax is refused explicitly rather than
+# guessed at.
+DEFLATED_SYNTAX = '1.2.840.10008.1.2.1.99'
+
+# Explicit-VR value representations that use a 12-byte element header
+# (tag 4 + VR 2 + reserved 2 + length 4) instead of the usual 8.
+LONG_VR = {b'OB', b'OW', b'OF', b'OD', b'OL', b'OV', b'SQ', b'UT', b'UN', b'o'}
+
+# Sequence expansion bounds. A DICOM-SEG with 2295 frames needs ~2300 items for
+# PerFrameFunctionalGroupsSequence alone, so the budget has to clear that with
+# room to spare. Structured reports are what this guards against: deeply nested
+# content trees that would otherwise push the VARIANT toward its 16 MB ceiling.
+MAX_SQ_ITEMS = 40000
+MAX_SQ_DEPTH = 6
+
+ITEM_TAG      = b'\xfe\xff\x00\xe0'   # (FFFE,E000) little endian
+SEQ_DELIM_TAG = b'\xfe\xff\xdd\xe0'   # (FFFE,E0DD) sequence delimiter
+UNDEFINED_LEN = 0xFFFFFFFF
+
+OUT_COLUMNS = [
+    'ROW_KIND', 'FILE_NAME', 'SOP_INSTANCE_UID', 'META',
+    'TRANSFER_SYNTAX_UID', 'IS_ENCAPSULATED', 'PIXEL_DATA_START',
+    'NUMBER_OF_FRAMES', 'FRAME_NUMBER', 'FRAME_OFFSET', 'FRAME_LENGTH',
+    'OFFSET_SOURCE', 'ERR_CODE', 'ERR_DETAIL',
+]
+INT_COLUMNS = ['PIXEL_DATA_START', 'NUMBER_OF_FRAMES',
+               'FRAME_NUMBER', 'FRAME_OFFSET', 'FRAME_LENGTH']
+
+
+def _blank():
+    return {c: None for c in OUT_COLUMNS}
+
+
+def _err(file_name, code, detail):
+    """A failure is a ROW with a code, never a poisoned cell and never silence.
+
+    The incumbent writes parse failures into the metadata VARIANT as
+    {'ERROR': ...}. Under that pattern the job is green, the bad file is
+    invisible unless somebody thinks to query for it, nothing pages, and the
+    failure count is unknown. Emitting a coded row instead makes
+    COUNT(*) GROUP BY ERR_CODE a working SLO.
+    """
+    r = _blank()
+    r['ROW_KIND'] = 'HEADER'
+    r['FILE_NAME'] = file_name
+    r['ERR_CODE'] = code
+    r['ERR_DETAIL'] = (detail or '')[:900]
+    return r
+
+
+class DicomHeaderAndFrames:
+
+    # -------------------------------------------------------------------------
+    # Header extraction
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _to_dicom_json(ds):
+        """Build the DICOM JSON model: keys are 8 hex digits, e.g. '00100010'.
+
+        Deliberately NOT keyword-keyed ('PATIENTNAME') the way the reference
+        plugin does it. Two reasons:
+          1. QIDO-RS responses are specified in this exact form, so the catalog
+             can serve metadata without a translation layer.
+          2. It makes the incumbent-compatibility view a projection rather than a
+             rewrite -- an existing incumbent query using
+             meta:['00100010'].Value[0]::STRING keeps working.
+
+        Binary VRs are dropped rather than stringified. Besides being useless in
+        a catalog, a long InlineBinary value is the specific thing that breaks
+        VARIANT construction (DATA-0004) and forced the incumbent to add try_parse_json
+        plus a _corrupt_record column.
+
+        ==================================================================
+        NUMERIC VRs MUST BE JSON NUMBERS, NOT STRINGS
+        ==================================================================
+        An earlier version emitted str(x) for EVERY value, producing
+            {"vr": "US", "Value": ["512"]}
+        which has the right SHAPE but the wrong TYPE. DICOM PS3.18 F.2.3
+        requires integer VRs (US, UL, SS, SL, IS) and decimal VRs (DS, FL, FD)
+        to be JSON numbers.
+
+        The consequence was not a parse error -- it was worse. OHIF read the
+        metadata happily and then failed comparisons that depend on type:
+
+            samplesPerPixel !== 1     ->  "1" !== 1  ->  true
+            => "Display set has frames with inconsistent number of components"
+
+            slice spacing computed from ImagePositionPatient strings -> NaN
+            => "Display set is not a reconstructable 3D volume"
+
+        So the viewer rendered images but silently DISABLED MPR and 3D volume
+        reconstruction -- which is exactly what the segmentation story depends on.
+        Two warnings, one root cause, no error anywhere.
+        ==================================================================
+        """
+        # Integer and decimal VRs per PS3.18 F.2.3. Everything else stays a string.
+        INT_VR = ('US', 'UL', 'SS', 'SL', 'IS', 'UV', 'SV')
+        DEC_VR = ('DS', 'FL', 'FD')
+
+        def _coerce(vr, x):
+            """Return x typed per its VR, falling back to str on bad data.
+
+            Falling back rather than raising is deliberate: a single malformed
+            numeric value in one file must not fail the whole extraction. A
+            string in a numeric field is visible and debuggable; a failed batch
+            is not.
+            """
+            if x is None:
+                return None
+            try:
+                if vr in INT_VR:
+                    return int(x)
+                if vr in DEC_VR:
+                    return float(x)
+            except (TypeError, ValueError):
+                return str(x)
+            return str(x)
+
+        # -------------------------------------------------------------------
+        # SEQUENCES ARE EXPANDED. They used to be stored present-but-empty.
+        #
+        # The original reasoning was sound for the endpoint it was written for:
+        # expanding sequences can blow up the VARIANT on structured reports, and
+        # nothing in QIDO-RS study/series/instance matching needs them.
+        #
+        # But WADO-RS /metadata is served from this SAME column, and a DICOM-SEG
+        # is defined ENTIRELY by sequences -- SegmentSequence carries the segment
+        # labels and codes, PerFrameFunctionalGroupsSequence maps each frame to a
+        # segment and a position. Emitting them as `"Value": []` produced a
+        # segmentation that a viewer parsed successfully and rendered as nothing.
+        #
+        # Present-but-empty is the worst encoding available: it satisfies every
+        # existence check and carries no information. This codebase already has
+        # that exact bug documented in the OHIF config, where `oidc: []` passes a
+        # key check and then throws. Same shape, found twice.
+        #
+        # So: expand, but bounded. A budget on total expanded items protects the
+        # VARIANT ceiling, and exhausting it sets 'sq_truncated' rather than
+        # silently yielding an empty array -- a caller can detect the difference.
+        # -------------------------------------------------------------------
+        budget = [MAX_SQ_ITEMS]
+
+        def _element_json(elem, depth):
+            vr = str(elem.VR)
+            entry = {'vr': vr}
+            if elem.VR == 'SQ':
+                items = elem.value if elem.value is not None else []
+                entry['sq_length'] = len(items)
+                if depth >= MAX_SQ_DEPTH:
+                    entry['Value'] = []
+                    entry['sq_truncated'] = 'depth'
+                    return entry
+                expanded = []
+                for item in items:
+                    if budget[0] <= 0:
+                        entry['sq_truncated'] = 'budget'
+                        break
+                    budget[0] -= 1
+                    expanded.append(_dataset_json(item, depth + 1))
+                entry['Value'] = expanded
+                return entry
+            v = elem.value
+            if v is None:
+                entry['Value'] = []
+            elif isinstance(v, (list, tuple)) or type(v).__name__ == 'MultiValue':
+                entry['Value'] = [_coerce(vr, x) for x in v]
+            else:
+                entry['Value'] = [_coerce(vr, v)]
+            return entry
+
+        def _dataset_json(dataset, depth):
+            acc = {}
+            for elem in dataset:
+                if elem.VR in ('OB', 'OW', 'OF', 'OD', 'OL', 'OV', 'UN'):
+                    continue
+                key = f"{elem.tag.group:04X}{elem.tag.element:04X}"
+                acc[key] = _element_json(elem, depth)
+            return acc
+
+        return _dataset_json(ds, 0)
+
+    @staticmethod
+    def _first(ds, name, cast=None):
+        v = getattr(ds, name, None)
+        if v is None:
+            return None
+        # WindowCenter/WindowWidth and friends are legitimately multi-valued.
+        if not isinstance(v, (str, bytes)) and hasattr(v, '__iter__'):
+            try:
+                v = v[0]
+            except (IndexError, TypeError):
+                return None
+        if cast is None:
+            return v
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            return None
+
+    # -------------------------------------------------------------------------
+    # Pixel data element location
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _locate_pixel_data(fp, is_explicit_vr, is_little_endian):
+        """Given fp positioned at the (7FE0,0010) element, return
+        (value_offset, declared_length).
+
+        pydicom's stop_before_pixels leaves the handle at the START of the pixel
+        data element, so this only has to parse the element header. Layout:
+
+          implicit VR : tag(4) + length(4)                       ->  8 bytes
+          explicit VR : tag(4) + VR(2) + length(2)               ->  8 bytes
+          explicit VR : tag(4) + VR(2) + reserved(2) + length(4)  -> 12 bytes
+                        (for OB/OW/OF/SQ/UT/UN and friends -- which is always
+                         the case for real PixelData)
+
+        A declared length of 0xFFFFFFFF means undefined, i.e. encapsulated.
+        """
+        tag_pos = fp.tell()
+        head = fp.read(4)
+        if len(head) < 4:
+            return None, None
+
+        if is_explicit_vr:
+            vr = fp.read(2)
+            if len(vr) < 2:
+                return None, None
+            if vr in LONG_VR:
+                fp.read(2)                       # reserved
+                raw = fp.read(4)
+                if len(raw) < 4:
+                    return None, None
+                length = struct.unpack('<I' if is_little_endian else '>I', raw)[0]
+                return tag_pos + 12, length
+            raw = fp.read(2)
+            if len(raw) < 2:
+                return None, None
+            length = struct.unpack('<H' if is_little_endian else '>H', raw)[0]
+            return tag_pos + 8, length
+
+        raw = fp.read(4)
+        if len(raw) < 4:
+            return None, None
+        length = struct.unpack('<I' if is_little_endian else '>I', raw)[0]
+        return tag_pos + 8, length
+
+    # -------------------------------------------------------------------------
+    # Frame offset resolution -- cheapest strategy first
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _offsets_from_eot(ds, first_item_pos):
+        """Tier A: Extended Offset Table, tags (7FE0,0001) and (7FE0,0002).
+
+        Zero extra I/O -- these are ordinary elements already read with the
+        header. Values are 64-bit offsets relative to the first byte of the first
+        item AFTER the Basic Offset Table item.
+        """
+        eot = ds.get(0x7FE00001, None)
+        eot_len = ds.get(0x7FE00002, None)
+        if eot is None or eot.value is None:
+            return None
+        raw = eot.value
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) < 8:
+            return None
+        n = len(raw) // 8
+        offs = list(struct.unpack('<%dQ' % n, bytes(raw[:n * 8])))
+
+        lens = None
+        if eot_len is not None and isinstance(eot_len.value, (bytes, bytearray)):
+            rl = bytes(eot_len.value)
+            if len(rl) >= 8 * n:
+                lens = list(struct.unpack('<%dQ' % n, rl[:n * 8]))
+
+        out = []
+        for i, off in enumerate(offs):
+            if lens is not None:
+                ln = lens[i]
+            elif i + 1 < n:
+                # Successive EOT offsets both point at ITEM TAGS, so the gap
+                # includes one 8-byte item header. Subtract it to get the payload
+                # length.
+                ln = offs[i + 1] - off - 8
+            else:
+                ln = 0          # trailing frame length unknown from EOT alone
+            # ==============================================================
+            # + 8 IS LOAD-BEARING.
+            #
+            # PS3.5 A.4: Extended Offset Table values are byte offsets to the
+            # first byte of the ITEM TAG of each frame's first fragment, measured
+            # from the first byte of the first item after the BOT item.
+            #
+            # DICOM_FRAME_OFFSET stores the offset of the PAYLOAD, because that is
+            # what os.pread must be handed. So the 8-byte item header
+            # (4-byte tag FFFE,E000 + 4-byte length) has to be skipped.
+            #
+            # Omitting it made every EOT frame start 8 bytes early: the decoder
+            # received 8 bytes of item header followed by a truncated frame. It
+            # does not raise during ingest -- it corrupts at render time.
+            #
+            # Caught by tests/verify_frame_offsets.py, which compared stored
+            # offsets against independently computed ground truth and showed a
+            # uniform -8 delta on exactly the two EOT files while BOT and
+            # ITEM_SCAN were byte-exact. The BOT and item-scan paths add this
+            # correctly; only this one did not.
+            # ==============================================================
+            out.append((first_item_pos + off + 8, ln))
+        return out
+
+    @staticmethod
+    def _offsets_from_bot(bot_bytes, first_item_pos, fp):
+        """Tier B: Basic Offset Table, the first item of encapsulated pixel data.
+
+        32-bit offsets relative to the first byte after the BOT item. Lengths are
+        not carried, so each frame's length is derived from the next offset; the
+        final frame needs its item header read to know where it ends.
+        """
+        if not bot_bytes or len(bot_bytes) < 4:
+            return None
+        n = len(bot_bytes) // 4
+        offs = list(struct.unpack('<%dI' % n, bot_bytes[:n * 4]))
+        out = []
+        for i, off in enumerate(offs):
+            abs_off = first_item_pos + off
+            if i + 1 < n:
+                ln = offs[i + 1] - off - 8      # minus the next item header
+            else:
+                # Read the final item's own header for its length rather than
+                # guessing from file size, which would include any trailing
+                # sequence delimiter.
+                try:
+                    fp.seek(abs_off)
+                    hdr = fp.read(8)
+                    ln = struct.unpack('<I', hdr[4:8])[0] if len(hdr) == 8 else 0
+                except Exception:
+                    ln = 0
+            # +8 skips the item header so the offset points at frame BYTES, not
+            # at the item tag. Getting this wrong returns 8 bytes of item header
+            # as the start of the image, which most decoders reject -- but some
+            # tolerate, which is worse.
+            out.append((abs_off + 8, max(ln, 0)))
+        return out
+
+    @staticmethod
+    def _offsets_from_item_scan(fp, first_item_pos, expected_frames):
+        """Tier C: forward scan reading only 8-byte item headers.
+
+        Never reads pixel payloads -- it seeks past them. Memory is O(items).
+        This is the only genuinely expensive path, it runs ONCE per file ever,
+        and its results are what DICOM_FRAME_OFFSET exists to persist.
+
+        Returns None when the item count does not match NumberOfFrames, i.e.
+        frames are split across multiple fragments. Grouping fragments into
+        frames REQUIRES a BOT or EOT; guessing would mis-assign frames silently.
+        """
+        fp.seek(first_item_pos)
+        items = []
+        while True:
+            hdr = fp.read(8)
+            if len(hdr) < 8:
+                break
+            tag = hdr[0:4]
+            if tag == SEQ_DELIM_TAG:
+                break
+            if tag != ITEM_TAG:
+                break
+            ln = struct.unpack('<I', hdr[4:8])[0]
+            if ln == UNDEFINED_LEN:
+                break
+            pos = fp.tell()
+            items.append((pos, ln))
+            fp.seek(pos + ln)
+            if len(items) > 100000:      # runaway guard on a malformed file
+                break
+
+        if not items:
+            return None
+        if expected_frames and len(items) != expected_frames:
+            return None
+        return items
+
+    # -------------------------------------------------------------------------
+    # Per-file work
+    # -------------------------------------------------------------------------
+    def _process_one(self, file_path, file_name):
+        import pydicom
+        from snowflake.snowpark.files import SnowflakeFile
+
+        rows = []
+        try:
+            # require_scoped_url=False accepts '@db.schema.stage/path' from a
+            # COLUMN, which is what removes BUILD_SCOPED_FILE_URL and its
+            # literal-stage-name restriction from every call site.
+            fp = SnowflakeFile.open(file_path, 'rb', require_scoped_url=False)
+        except Exception as exc:
+            return [_err(file_name, 'DATA-0001', f'open failed: {exc}')]
+
+        try:
+            try:
+                # stop_before_pixels leaves the handle at the start of the pixel
+                # data element, which is exactly where _locate_pixel_data needs
+                # it. This is the hinge that makes one pass sufficient.
+                ds = pydicom.dcmread(fp, stop_before_pixels=True, force=False)
+            except Exception as exc:
+                return [_err(file_name, 'DATA-0001', f'not DICOM: {exc}')]
+
+            sop_uid = self._first(ds, 'SOPInstanceUID')
+            if not sop_uid:
+                # Without (0008,0018) the instance has no DICOMweb address.
+                return [_err(file_name, 'DATA-0003',
+                             'no SOPInstanceUID; instance is not addressable')]
+
+            fm = getattr(ds, 'file_meta', None)
+            tsyntax = str(getattr(fm, 'TransferSyntaxUID', '') or '') if fm else ''
+            is_explicit = bool(getattr(fm, 'TransferSyntaxUID', None)
+                               and getattr(fm.TransferSyntaxUID, 'is_implicit_VR', True) is False) \
+                if fm else True
+            is_little = True
+            if fm is not None and getattr(fm, 'TransferSyntaxUID', None) is not None:
+                is_little = bool(getattr(fm.TransferSyntaxUID, 'is_little_endian', True))
+
+            n_frames = self._first(ds, 'NumberOfFrames', int) or 1
+            is_encap = tsyntax not in NATIVE_SYNTAXES
+
+            try:
+                meta = self._to_dicom_json(ds)
+                json.dumps(meta)     # fail here, not inside Snowflake's parser
+            except Exception as exc:
+                return [_err(file_name, 'DATA-0004', f'VARIANT build failed: {exc}')]
+
+            pixel_start, declared_len = (None, None)
+            try:
+                pixel_start, declared_len = self._locate_pixel_data(
+                    fp, is_explicit, is_little)
+            except Exception:
+                pixel_start, declared_len = (None, None)
+
+            header = _blank()
+            header.update({
+                'ROW_KIND': 'HEADER',
+                'FILE_NAME': file_name,
+                'SOP_INSTANCE_UID': sop_uid,
+                'META': meta,
+                'TRANSFER_SYNTAX_UID': tsyntax or None,
+                'IS_ENCAPSULATED': is_encap,
+                'PIXEL_DATA_START': pixel_start,
+                'NUMBER_OF_FRAMES': n_frames,
+            })
+
+            # No pixel data at all: a structured report, key object selection,
+            # presentation state. Correctly frameless, not an error.
+            if pixel_start is None:
+                header['ERR_CODE'] = 'CAPABILITY-0003'
+                header['ERR_DETAIL'] = 'no PixelData element; non-image SOP class'
+                rows.append(header)
+                return rows
+
+            # Deflated: refuse rather than guess. See DEFLATED_SYNTAX above.
+            if tsyntax == DEFLATED_SYNTAX:
+                header['ERR_CODE'] = 'DATA-0005'
+                header['ERR_DETAIL'] = ('deflated dataset: file byte offsets do not '
+                                        'address frames; ranged frame serving is '
+                                        'not possible for this syntax')
+                rows.append(header)
+                return rows
+
+            # Native: offsets are ARITHMETIC. Emit the header and stop. No frame
+            # rows are stored, by design.
+            if not is_encap:
+                rows.append(header)
+                return rows
+
+            # ---------------- encapsulated ----------------
+            if declared_len != UNDEFINED_LEN:
+                header['ERR_CODE'] = 'DATA-0005'
+                header['ERR_DETAIL'] = (
+                    f'encapsulated syntax {tsyntax} but PixelData declares a '
+                    f'defined length ({declared_len}); encapsulation is malformed')
+                rows.append(header)
+                return rows
+
+            # First item at pixel_start is the Basic Offset Table (possibly
+            # empty). first_item_pos is the byte after that BOT item, and both
+            # EOT and BOT offsets are relative to it.
+            fp.seek(pixel_start)
+            bot_hdr = fp.read(8)
+            if len(bot_hdr) < 8 or bot_hdr[0:4] != ITEM_TAG:
+                header['ERR_CODE'] = 'DATA-0005'
+                header['ERR_DETAIL'] = 'expected Basic Offset Table item at PixelData start'
+                rows.append(header)
+                return rows
+            bot_len = struct.unpack('<I', bot_hdr[4:8])[0]
+            bot_bytes = fp.read(bot_len) if bot_len else b''
+            first_item_pos = pixel_start + 8 + bot_len
+
+            offsets, source = None, None
+            try:
+                offsets = self._offsets_from_eot(ds, first_item_pos)
+                if offsets:
+                    source = 'EOT'
+            except Exception:
+                offsets = None
+            if not offsets and bot_bytes:
+                try:
+                    offsets = self._offsets_from_bot(bot_bytes, first_item_pos, fp)
+                    if offsets:
+                        source = 'BOT'
+                except Exception:
+                    offsets = None
+            if not offsets:
+                try:
+                    offsets = self._offsets_from_item_scan(fp, first_item_pos, n_frames)
+                    if offsets:
+                        source = 'ITEM_SCAN'
+                except Exception:
+                    offsets = None
+
+            if not offsets:
+                header['ERR_CODE'] = 'DATA-0005'
+                header['ERR_DETAIL'] = (
+                    'no EOT, empty BOT, and item count did not match '
+                    f'NumberOfFrames={n_frames}; frames are multi-fragment and '
+                    'cannot be grouped without an offset table')
+                rows.append(header)
+                return rows
+
+            rows.append(header)
+            for i, (off, ln) in enumerate(offsets):
+                fr = _blank()
+                fr.update({
+                    'ROW_KIND': 'FRAME',
+                    'FILE_NAME': file_name,
+                    'SOP_INSTANCE_UID': sop_uid,
+                    'TRANSFER_SYNTAX_UID': tsyntax or None,
+                    'IS_ENCAPSULATED': True,
+                    'FRAME_NUMBER': i + 1,     # 1-based, matching DICOMweb
+                    'FRAME_OFFSET': off,
+                    'FRAME_LENGTH': ln,
+                    'OFFSET_SOURCE': source,
+                })
+                rows.append(fr)
+            return rows
+
+        except Exception as exc:
+            return [_err(file_name, 'DATA-0002', f'unexpected: {exc}')]
+        finally:
+            try:
+                fp.close()
+            except Exception:
+                pass
+
+    # -------------------------------------------------------------------------
+    # Vectorized entry point
+    # -------------------------------------------------------------------------
+    @vectorized(input=pandas.DataFrame)
+    def end_partition(self, df):
+        # Column names follow the SQL signature, uppercased because the
+        # identifiers are unquoted.
+        paths = df['FILE_PATH'].tolist()
+        names = df['FILE_NAME'].tolist()
+
+        n_threads = min({{ cfg.udtf_io_threads }}, max(1, len(paths)))
+
+        # Threads hide blocking object-storage latency. The GIL is not the
+        # constraint here -- waiting on the network is.
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            results = pool.map(
+                lambda pn: self._process_one(pn[0], pn[1]),
+                zip(paths, names),
+            )
+
+            # YIELD per file rather than accumulating and concatenating at the
+            # end. Snowflake's own guidance for vectorized end_partition is to
+            # avoid pandas.concat over partial results, and yielding also means a
+            # partition that runs long still returns what it finished.
+            for rows in results:
+                if not rows:
+                    continue
+                out = pandas.DataFrame(rows, columns=OUT_COLUMNS)
+                for c in INT_COLUMNS:
+                    out[c] = out[c].astype('Int64')
+                yield out
+$$;
+
+
+-- =============================================================================
+-- EXTRACT_DICOM_METADATA -- scalar, row-wise, ported unchanged in spirit
+--
+-- Kept deliberately. It is the A/B control for the vectorized UDTF: the bench
+-- phase runs both over the same file set and reports files/sec and $/study for
+-- each. Without a control, "the vectorized path is faster" is an assertion.
+--
+-- It also means a bad benchmark is a one-line revert in SP_LOAD_METADATA rather
+-- than a redeploy.
+--
+-- Note this returns the DICOM JSON model, matching the UDTF, so the two are
+-- directly comparable. The reference plugin returned a keyword-keyed dict.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION EXTRACT_DICOM_METADATA(FILE_PATH VARCHAR)
+RETURNS VARIANT
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom')
+HANDLER = 'extract_metadata'
+AS $$
+import pydicom
+from snowflake.snowpark.files import SnowflakeFile
+
+SKIP_VR = ('OB', 'OW', 'OF', 'OD', 'OL', 'OV', 'UN')
+
+
+def extract_metadata(file_path):
+    try:
+        with SnowflakeFile.open(file_path, 'rb', require_scoped_url=False) as f:
+            ds = pydicom.dcmread(f, stop_before_pixels=True)
+        # Numeric VRs must be JSON numbers per PS3.18 F.2.3. Kept identical to the
+        # UDTF's serialization so the A/B comparison stays apples to apples -- if
+        # only one side emitted conformant types, the two would produce different
+        # VARIANTs and the control would stop being a control.
+        INT_VR = ('US', 'UL', 'SS', 'SL', 'IS', 'UV', 'SV')
+        DEC_VR = ('DS', 'FL', 'FD')
+
+        def _coerce(vr, x):
+            if x is None:
+                return None
+            try:
+                if vr in INT_VR:
+                    return int(x)
+                if vr in DEC_VR:
+                    return float(x)
+            except (TypeError, ValueError):
+                return str(x)
+            return str(x)
+
+        out = {}
+        for elem in ds:
+            if elem.VR in SKIP_VR or elem.VR == 'SQ':
+                continue
+            key = f"{elem.tag.group:04X}{elem.tag.element:04X}"
+            vr = str(elem.VR)
+            v = elem.value
+            if v is None:
+                vals = []
+            elif not isinstance(v, (str, bytes)) and hasattr(v, '__iter__'):
+                vals = [_coerce(vr, x) for x in v]
+            else:
+                vals = [_coerce(vr, v)]
+            out[key] = {'vr': vr, 'Value': vals}
+        return out
+    except Exception as e:
+        # Error-as-value, matching the reference plugin, precisely so the A/B
+        # comparison is apples to apples. The UDTF's coded-row behaviour is the
+        # improvement being measured.
+        return {'ERROR': str(e)}
+$$;
+
+
+-- =============================================================================
+-- RENDER_DICOM_SLICE -- base64 PNG preview
+--
+-- Pixel handling is deliberate and must not be "improved" into a per-slice
+-- min/max stretch:
+--   1. rescale slope/intercept to Hounsfield units
+--   2. clip to the DICOM window
+--   3. FIXED (x - lower) / (upper - lower) mapping
+--
+-- A per-slice stretch gives every slice its own contrast curve, so identical
+-- anatomy renders differently depending on what else is in the slice. It
+-- degrades silently -- no error, just subtly wrong images and, once embeddings
+-- are added in a later phase, subtly wrong retrieval.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION RENDER_DICOM_SLICE(
+    FILE_PATH     VARCHAR,
+    WINDOW_CENTER FLOAT,
+    WINDOW_WIDTH  FLOAT
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pydicom', 'Pillow', 'numpy')
+HANDLER = 'render_slice'
+AS $$
+import io
+import base64
+import numpy as np
+import pydicom
+from PIL import Image
+from snowflake.snowpark.files import SnowflakeFile
+
+DEFAULT_WC = {{ cfg.window_center }}.0
+DEFAULT_WW = {{ cfg.window_width }}.0
+
+
+def render_slice(file_path, window_center, window_width):
+    try:
+        with SnowflakeFile.open(file_path, 'rb', require_scoped_url=False) as f:
+            ds = pydicom.dcmread(io.BytesIO(f.read()))
+        arr = ds.pixel_array.astype(np.float64)
+
+        slope = float(getattr(ds, 'RescaleSlope', 1) or 1)
+        intercept = float(getattr(ds, 'RescaleIntercept', 0) or 0)
+        arr = arr * slope + intercept
+
+        # The file's OWN window wins; the caller's value is the fallback for
+        # files carrying no window tags.
+        wc = getattr(ds, 'WindowCenter', None)
+        ww = getattr(ds, 'WindowWidth', None)
+        if wc is not None and not isinstance(wc, (str, bytes)) and hasattr(wc, '__iter__'):
+            wc = wc[0]
+        if ww is not None and not isinstance(ww, (str, bytes)) and hasattr(ww, '__iter__'):
+            ww = ww[0]
+        try:
+            wc = float(wc)
+            ww = float(ww)
+        except (TypeError, ValueError):
+            wc, ww = None, None
+        if wc is None or ww is None or ww <= 0:
+            try:
+                wc = float(window_center)
+                ww = float(window_width)
+            except (TypeError, ValueError):
+                wc, ww = DEFAULT_WC, DEFAULT_WW
+            if ww <= 0:
+                wc, ww = DEFAULT_WC, DEFAULT_WW
+
+        lower = wc - ww / 2.0
+        upper = wc + ww / 2.0
+        arr = np.clip(arr, lower, upper)
+        arr = ((arr - lower) / (upper - lower) * 255.0).astype(np.uint8)
+
+        buf = io.BytesIO()
+        Image.fromarray(arr, mode='L').save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        return f'ERROR:{e}'
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SHOW USER FUNCTIONS LIKE 'EXTRACT_DICOM%';
+SELECT "name", "arguments" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+SHOW USER FUNCTIONS LIKE 'RENDER_DICOM_SLICE';
+SELECT "name", "arguments" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));

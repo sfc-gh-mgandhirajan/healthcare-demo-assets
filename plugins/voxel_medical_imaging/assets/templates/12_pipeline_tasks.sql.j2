@@ -1,0 +1,160 @@
+-- =============================================================================
+-- 12: Task DAG
+--
+--   TASK_VOXEL_SCAN     root, every {{ cfg.scan_schedule }} -> SP_SCAN_ALL_SOURCES
+--     └── TASK_VOXEL_EXTRACT      -> SP_LOAD_METADATA({{ cfg.batch_limit_metadata }})
+--           └── TASK_VOXEL_RECONCILE -> SP_RECONCILE_DELETES({{ cfg.reconcile_max_delete_pct }})
+--
+-- =============================================================================
+-- EVERY TASK IS CREATED SUSPENDED
+--
+-- A deploy must not silently start consuming credits. Resuming is an explicit
+-- act: CALL SP_RESUME_PIPELINE(). This also means a deploy into a customer
+-- account can be reviewed before anything runs.
+--
+-- =============================================================================
+-- WHY SERVERLESS AND NOT A WAREHOUSE
+--
+-- A warehouse-backed task pays a 60-SECOND MINIMUM on every resume. A MEDIUM
+-- woken every 5 minutes just to discover there is no work runs at roughly a 20%
+-- duty cycle doing nothing. Serverless bills per second with no minimum, and
+-- both procedures early-return in about a second when idle -- roughly a 0.3%
+-- duty cycle. On a 5-minute schedule that difference is the entire idle cost of
+-- the pipeline.
+--
+-- USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE is a starting hint; Snowflake adjusts
+-- from observed runs. XSMALL for the scan (it is LIST plus a MERGE) and MEDIUM
+-- for extract (it runs the UDTF over object storage).
+--
+-- =============================================================================
+-- NO 'WHEN' CLAUSE ON THE CHILD
+--
+-- The obvious optimization -- skip extract when nothing is pending -- is not
+-- available. A task WHEN condition accepts only SYSTEM$STREAM_HAS_DATA, not a
+-- count subquery; anything else fails with "Invalid expression for task
+-- condition". A stream would not help either, because SP_LOAD_METADATA does not
+-- consume one, so the stream would report data forever.
+--
+-- Instead the child runs and early-returns. That is cheap precisely BECAUSE the
+-- task is serverless (see above) -- the no-op costs about a second of
+-- per-second-billed compute.
+--
+-- =============================================================================
+-- SUSPEND_TASK_AFTER_NUM_FAILURES IS ROOT-ONLY
+--
+-- Setting it on a child fails outright:
+--   Cannot set parameter SUSPEND_TASK_AFTER_NUM_FAILURES on non-root task ...
+--   Non-root tasks use the parameter setting from their root task.
+--
+-- So it is declared once on TASK_VOXEL_SCAN and the whole graph inherits it.
+-- Bounded automatic disabling: a genuinely broken pipeline stops instead of
+-- retrying every 5 minutes forever. This is also why procedures return
+-- 'SKIPPED' strings rather than raising on expected-unavailable conditions -- a
+-- raise would count toward this limit and eventually disable a healthy pipeline
+-- for a purely environmental reason.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+CREATE OR REPLACE TASK TASK_VOXEL_SCAN
+  SCHEDULE = '{{ cfg.scan_schedule }}'
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
+  COMMENT = 'Voxel root: discover files, detect md5 changes and deletes.'
+AS
+  CALL SP_SCAN_ALL_SOURCES();
+
+-- Clause ORDER matters. AFTER must follow the task parameters, not precede
+-- them: putting AFTER immediately after the task name fails with
+-- "syntax error ... unexpected". The grammar is
+--   CREATE TASK <name> [params...] [AFTER <predecessor>] AS <sql>
+--
+-- Note NO SUSPEND_TASK_AFTER_NUM_FAILURES here -- it is root-only and inherited
+-- from TASK_VOXEL_SCAN. See the header.
+CREATE OR REPLACE TASK TASK_VOXEL_EXTRACT
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM'
+  COMMENT = 'Voxel: parse NEW files into DICOM_INSTANCE + DICOM_FRAME_OFFSET.'
+  AFTER TASK_VOXEL_SCAN
+AS
+  CALL SP_LOAD_METADATA({{ cfg.batch_limit_metadata }});
+
+-- =============================================================================
+-- TASK_VOXEL_RECONCILE
+--
+-- Removes derived rows for files the scan no longer sees. This used to be a
+-- manual verb on purpose, so that a mistyped prefix showed up as DELETED in the
+-- manifest before anything was destroyed.
+--
+-- It is scheduled now because the UID dedupe introduced an ordering hazard that a
+-- manual verb cannot close: dedupe keeps the most recent load, so the surviving
+-- catalog row can point at a path that no longer exists. The row is present, the
+-- frame plane resolves it, and the gateway 503s on bytes nobody reconciled. There
+-- is no error anywhere in that sequence.
+--
+-- The protection that automation gave up is replaced inside the procedure by a
+-- blast-radius guard rather than abandoned -- see the header in 11. A mistyped
+-- prefix trips the guard and the task returns a REFUSED string; it does not raise,
+-- so a refusal cannot count toward SUSPEND_TASK_AFTER_NUM_FAILURES and disable a
+-- healthy pipeline.
+--
+-- Third in the chain, not parallel with extract: reconciling while extract is
+-- writing rows for the same files is a race with no upside.
+-- =============================================================================
+CREATE OR REPLACE TASK TASK_VOXEL_RECONCILE
+  USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+  COMMENT = 'Voxel: drop derived rows for DELETED files, guarded against a mass-delete from a bad prefix.'
+  AFTER TASK_VOXEL_EXTRACT
+AS
+  CALL SP_RECONCILE_DELETES({{ cfg.reconcile_max_delete_pct }});
+
+-- Deliberately NOT resumed here. See the header.
+
+-- =============================================================================
+-- V_TASK_HEALTH
+--
+-- One row per task, always. A task that has never run still appears, because
+-- "never ran" is the state an operator most needs to see and is exactly what a
+-- filtered join would hide.
+--
+-- The state worth naming: a SUSPENDED root means the pipeline has silently
+-- stopped and NOTHING IS ERRORING. That is the failure mode this view exists
+-- for.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_TASK_HEALTH AS
+WITH last_run AS (
+    SELECT NAME,
+           MAX(COMPLETED_TIME)                                     AS LAST_COMPLETED,
+           MAX_BY(STATE, COMPLETED_TIME)                           AS LAST_STATE,
+           MAX_BY(ERROR_MESSAGE, COMPLETED_TIME)                   AS LAST_ERROR,
+           COUNT_IF(STATE = 'FAILED')                              AS FAILURES_7D
+    FROM TABLE({{ db }}.INFORMATION_SCHEMA.TASK_HISTORY(
+                 SCHEDULED_TIME_RANGE_START => DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                 RESULT_LIMIT => 10000))
+    WHERE DATABASE_NAME = '{{ db }}' AND SCHEMA_NAME = '{{ schema }}'
+    GROUP BY NAME
+)
+SELECT
+    t.NAME                       AS TASK_NAME,
+    r.LAST_STATE,
+    r.LAST_COMPLETED,
+    DATEDIFF('minute', r.LAST_COMPLETED, CURRENT_TIMESTAMP()) AS MINUTES_SINCE_RUN,
+    COALESCE(r.FAILURES_7D, 0)   AS FAILURES_7D,
+    r.LAST_ERROR
+FROM (SELECT 'TASK_VOXEL_SCAN' AS NAME
+      UNION ALL SELECT 'TASK_VOXEL_EXTRACT'
+      UNION ALL SELECT 'TASK_VOXEL_RECONCILE') t
+LEFT JOIN last_run r ON r.NAME = t.NAME;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+--
+-- Both tasks MUST report state = suspended. Anything else means the deploy
+-- started billing without being asked to.
+-- -----------------------------------------------------------------------------
+SHOW TASKS LIKE 'TASK_VOXEL%' IN SCHEMA {{ db }}.{{ schema }};
+SELECT "name", "state", "schedule", "predecessors",
+       IFF("state" = 'suspended', 'OK (resume with CALL SP_RESUME_PIPELINE())',
+           'WARNING: task is already running') AS DEPLOY_CHECK
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+ORDER BY "name";

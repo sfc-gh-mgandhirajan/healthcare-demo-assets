@@ -1,0 +1,336 @@
+-- =============================================================================
+-- CHECKS
+--
+-- One row per invariant: CHECK_NAME | STATUS | DETAIL, with STATUS in
+-- PASS / WARN / FAIL. Safe to run any time; reads only.
+--
+-- =============================================================================
+-- THE POINT OF THIS FILE IS THE QUIET FAILURES
+--
+-- Loud failures already surface: a bad DDL fails the deploy, a parse error lands
+-- in DICOM_LOAD_ERRORS with a code. What needs continuous assertion is the class
+-- of problem that produces NO ERROR AT ALL:
+--
+--   * offsets computed from a file version that no longer exists (serves WRONG
+--     PIXELS at HTTP 200)
+--   * a file that is neither done nor failed
+--   * the closed-form frame arithmetic silently drifting from reality
+--   * a masking policy that looks present but is bypassable via VARIANT
+--   * a compute pool quietly provisioning nodes after deploy
+--
+-- Every check below exists because the corresponding failure would otherwise be
+-- invisible until a clinician saw the wrong anatomy or a reviewer ran one query.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+WITH checks AS (
+
+-- ---------------------------------------------------------------------------
+-- 1. Reference data seeded
+-- ---------------------------------------------------------------------------
+SELECT 1 AS SEQ, 'CAPABILITY_SEEDED' AS CHECK_NAME,
+       IFF(COUNT(*) >= 16, 'PASS', 'FAIL') AS STATUS,
+       COUNT(*)::STRING || ' transfer syntaxes, '
+       || COUNT_IF(NOT IS_ENCAPSULATED)::STRING || ' native (arithmetic offsets)' AS DETAIL
+FROM DICOM_CAPABILITY
+
+UNION ALL
+SELECT 2, 'ERROR_CATALOG_SEEDED',
+       IFF(COUNT(*) >= 19, 'PASS', 'FAIL'),
+       COUNT(*)::STRING || ' codes across '
+       || COUNT(DISTINCT ERR_CLASS)::STRING || ' classes'
+FROM DICOM_ERROR_CATALOG
+
+-- ---------------------------------------------------------------------------
+-- 2. INVARIANT-0001: stale derived rows.
+--    Offsets whose FILE_MD5 no longer matches the catalogued file. This is the
+--    bug that serves data computed from PREVIOUS file contents forever.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 3, 'INVARIANT_0001_NO_STALE_OFFSETS',
+       IFF(COUNT_IF(IS_STALE) = 0, 'PASS', 'FAIL'),
+       COUNT_IF(IS_STALE)::STRING || ' instance(s) have offsets computed from a '
+       || 'different file version. These would serve WRONG PIXELS at HTTP 200. '
+       || 'Remedy: CALL SP_REPLAY_FILE(source, file).'
+FROM V_FRAME_COVERAGE
+
+-- ---------------------------------------------------------------------------
+-- 3. INVARIANT-0002: neither done nor failed.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 4, 'INVARIANT_0002_NO_LIMBO_FILES',
+       IFF(COUNT(*) = 0, 'PASS', 'FAIL'),
+       COUNT(*)::STRING || ' file(s) are LOADED but have no catalog row and no '
+       || 'unresolved error. "Neither done nor failed" is itself the incident.'
+FROM DICOM_FILE_MANIFEST m
+WHERE m.STATUS = 'LOADED'
+  AND NOT EXISTS (SELECT 1 FROM DICOM_INSTANCE i
+                   WHERE i.SOURCE_NAME = m.SOURCE_NAME AND i.FILE_NAME = m.FILE_NAME)
+  AND NOT EXISTS (SELECT 1 FROM DICOM_LOAD_ERRORS e
+                   WHERE e.SOURCE_NAME = m.SOURCE_NAME AND e.FILE_NAME = m.FILE_NAME
+                     AND NOT e.RESOLVED)
+
+-- ---------------------------------------------------------------------------
+-- 4. INVARIANT-0004: frame numbering must be a contiguous 1-based run.
+--    A gap means partial extraction, and every index past the gap returns the
+--    WRONG FRAME with no error.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 5, 'INVARIANT_0004_NO_FRAME_GAPS',
+       IFF(COUNT_IF(HAS_FRAME_GAP) = 0, 'PASS', 'FAIL'),
+       COUNT_IF(HAS_FRAME_GAP)::STRING || ' instance(s) have non-contiguous or '
+       || 'non-1-based frame numbering'
+FROM V_FRAME_COVERAGE
+
+UNION ALL
+SELECT 6, 'INVARIANT_0004_OFFSET_COUNT_MATCHES',
+       IFF(COUNT_IF(RESOLUTION = 'INCOMPLETE') = 0, 'PASS', 'FAIL'),
+       COUNT_IF(RESOLUTION = 'INCOMPLETE')::STRING
+       || ' encapsulated instance(s) have FEWER stored offsets than NUMBER_OF_FRAMES'
+FROM V_FRAME_COVERAGE
+
+-- ---------------------------------------------------------------------------
+-- 5. THE ARITHMETIC IDENTITY.
+--
+--    For a single-frame NATIVE instance, pixel data must run from
+--    PIXEL_DATA_START to exactly the end of the file:
+--
+--      PIXEL_DATA_START + ROWS*COLS*(BITS/8)*SAMPLES = FILE_SIZE
+--
+--    This is the check that keeps the entire sparse-frame-plane design honest.
+--    If it drifts, every native frame offset is wrong and nothing else in the
+--    system objects -- the viewer just renders garbage. Verified at 3222 + 524288
+--    = 527510 on the IDC corpus; asserted continuously here.
+--
+--    Restricted to single-frame instances because a multiframe native object may
+--    carry trailing padding or sequence elements after pixel data, which makes
+--    exact file-size equality the wrong assertion for them.
+-- ---------------------------------------------------------------------------
+-- ASSERTS "NEVER READS PAST EOF", NOT "PIXEL DATA ENDS AT EOF".
+--
+-- The original form of this check required
+--   PIXEL_DATA_START + ROWS*COLS*(BITS/8)*SAMPLES = FILE_SIZE
+-- i.e. that pixel data runs exactly to the end of the file. That holds for the
+-- CT and MR in this corpus and failed on 36 SM (slide microscopy) instances once
+-- the corpus grew past a single modality.
+--
+-- Those 36 were investigated rather than suppressed. Every one had FILE_SIZE
+-- LARGER than the computed end, by 324-325 bytes, and none had a computed end
+-- beyond EOF. They carry DICOM elements after PixelData, which is legal. The
+-- arithmetic was right and the assertion was wrong.
+--
+-- The property actually worth checking is one-directional: a computed end BEYOND
+-- EOF means os.pread would read past the file and serve short or garbage frames.
+-- A computed end BEFORE EOF just means the file has a trailer. So this now fails
+-- only on the direction that can corrupt a frame, and trailing bytes are reported
+-- separately as information.
+UNION ALL
+SELECT 7, 'FRAME_ARITHMETIC_PAST_EOF',
+       IFF(COUNT(*) = 0, 'PASS', 'FAIL'),
+       COUNT(*)::STRING || ' single-frame native instance(s) where '
+       || 'PIXEL_DATA_START + ROWS*COLS*(BITS/8)*SAMPLES > FILE_SIZE. '
+       || 'Non-zero means the closed-form path would os.pread past end of file.'
+FROM DICOM_INSTANCE i
+JOIN DICOM_CAPABILITY c ON c.TRANSFER_SYNTAX_UID = i.TRANSFER_SYNTAX_UID
+WHERE c.IS_ENCAPSULATED = FALSE
+  AND COALESCE(i.NUMBER_OF_FRAMES, 1) = 1
+  AND i.PIXEL_DATA_START IS NOT NULL
+  AND i.IMAGE_ROWS IS NOT NULL AND i.IMAGE_COLUMNS IS NOT NULL
+  AND i.BITS_ALLOCATED IS NOT NULL AND i.SAMPLES_PER_PIXEL IS NOT NULL
+  AND i.FILE_SIZE IS NOT NULL
+  AND i.PIXEL_DATA_START
+      + i.IMAGE_ROWS * i.IMAGE_COLUMNS * (i.BITS_ALLOCATED / 8) * i.SAMPLES_PER_PIXEL
+      > i.FILE_SIZE
+
+UNION ALL
+SELECT 8, 'FRAME_ARITHMETIC_TRAILER_INFO',
+       'PASS',
+       COUNT(*)::STRING || ' native instance(s) carry bytes after PixelData '
+       || '(legal trailing elements; frames are unaffected). Modalities: '
+       || COALESCE(LISTAGG(DISTINCT i.MODALITY, ',') WITHIN GROUP (ORDER BY i.MODALITY), 'none')
+FROM DICOM_INSTANCE i
+JOIN DICOM_CAPABILITY c ON c.TRANSFER_SYNTAX_UID = i.TRANSFER_SYNTAX_UID
+WHERE c.IS_ENCAPSULATED = FALSE
+  AND COALESCE(i.NUMBER_OF_FRAMES, 1) = 1
+  AND i.PIXEL_DATA_START IS NOT NULL
+  AND i.IMAGE_ROWS IS NOT NULL AND i.IMAGE_COLUMNS IS NOT NULL
+  AND i.BITS_ALLOCATED IS NOT NULL AND i.SAMPLES_PER_PIXEL IS NOT NULL
+  AND i.FILE_SIZE IS NOT NULL
+  AND i.PIXEL_DATA_START
+      + i.IMAGE_ROWS * i.IMAGE_COLUMNS * (i.BITS_ALLOCATED / 8) * i.SAMPLES_PER_PIXEL
+      < i.FILE_SIZE
+
+-- ---------------------------------------------------------------------------
+-- 6. CONFIG-0002: one SOPInstanceUID must map to one file.
+--    Frame offsets key on the UID, so two files claiming one UID means one
+--    silently wins.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 9, 'CONFIG_0002_UID_UNIQUENESS',
+       IFF(COUNT(*) = 0, 'PASS', 'FAIL'),
+       COUNT(*)::STRING || ' SOPInstanceUID(s) appear on more than one catalog row'
+-- COUNT(*) > 1, NOT COUNT(DISTINCT FILE_NAME) > 1.
+--
+-- This check was written to catch one instance arriving under two paths, and it
+-- did exactly that when a segmentation was re-ingested at a second stage prefix.
+-- But keying on DISTINCT FILE_NAME means duplicate rows sharing ONE path are
+-- invisible, and the loader's reprocess cleanup is what guarantees that cannot
+-- happen -- so the check was trusting the very code it exists to police.
+--
+-- Counting rows tests the invariant itself: one SOPInstanceUID, one row.
+FROM (SELECT SOP_INSTANCE_UID FROM DICOM_INSTANCE
+      GROUP BY SOP_INSTANCE_UID HAVING COUNT(*) > 1)
+
+-- ---------------------------------------------------------------------------
+-- 7. Frame numbering is 1-based, not 0-based.
+--    An off-by-one here does not error; it serves the neighbouring slice.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 10, 'FRAME_NUMBERING_IS_1_BASED',
+       IFF(COALESCE(MIN(FRAME_NUMBER), 1) >= 1, 'PASS', 'FAIL'),
+       'min FRAME_NUMBER = ' || COALESCE(MIN(FRAME_NUMBER), 1)::STRING
+       || ' (DICOMweb addresses the first frame as /frames/1)'
+FROM DICOM_FRAME_OFFSET
+
+-- ---------------------------------------------------------------------------
+-- 8. THE KNOWN PHI GAP. WARN until the deid phase is applied, and loud either way.
+--
+--    Phase 1 masks typed identifier columns but NOT RAW_METADATA, so
+--    SELECT RAW_METADATA:"00100010" returns PatientName in cleartext. Shipping
+--    that silently would create the appearance of a control that does not hold.
+--    Closed by the deid phase; asserted here every run so it cannot be forgotten.
+--
+--    THE DETAIL IS CONDITIONAL, and it has to be. It used to be one static string
+--    describing the gap, emitted regardless of STATUS -- so once the deid phase
+--    attached MASK_RAW_METADATA the row read
+--      PASS | RAW_METADATA has no masking policy ... returns cleartext
+--    which is a check contradicting itself in its own output. Nobody reading a
+--    green suite would notice, and anybody reading the detail would conclude the
+--    PHI control was broken. A check that reports the wrong reason for the right
+--    verdict is worse than no detail at all.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 11, 'PHI_RAW_METADATA_UNMASKED',
+       IFF(masked, 'PASS', 'WARN'),
+       IFF(masked,
+           'RAW_METADATA carries a masking policy. Non-identified roles receive '
+           || 'an OBJECT_PICK of the DICOM_TAG_POLICY allowlist. Verify the '
+           || 'allowlist is current with SELECT * FROM V_TAG_POLICY_DRIFT.',
+           'RAW_METADATA has no masking policy. SELECT RAW_METADATA:"00100010" '
+           || 'returns PatientName in cleartext to any role with SELECT. Expected '
+           || 'before the deid phase; closed by it (VARIANT masking policy + '
+           || 'governed tag allowlist that drops non-SAFE tags at ingest).')
+FROM (
+    SELECT EXISTS (
+             SELECT 1 FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+                       REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+                       REF_ENTITY_DOMAIN => 'TABLE'))
+              WHERE REF_COLUMN_NAME = 'RAW_METADATA') AS masked
+)
+
+UNION ALL
+-- 7 typed identifier columns, plus RAW_METADATA once the deid phase has run, so
+-- the floor is 7 and 8 is the fully-deployed state. The message names both rather
+-- than asserting a single expected number that is correct in only one of the two
+-- supported configurations.
+SELECT 12, 'PHI_TYPED_COLUMNS_MASKED',
+       IFF(COUNT(*) >= 7, 'PASS', 'FAIL'),
+       COUNT(*)::STRING || ' column(s) carry a masking policy. Floor is 7 '
+       || '(patient id/name/birth date, accession, physician, institution, '
+       || 'device serial); 8 once the deid phase adds RAW_METADATA.'
+FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+             REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+             REF_ENTITY_DOMAIN => 'TABLE'))
+WHERE POLICY_KIND = 'MASKING_POLICY'
+
+-- ---------------------------------------------------------------------------
+-- 9. Capability gaps -- a backlog item with a count, not an incident.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 13, 'CAPABILITY_0001_UNKNOWN_SYNTAXES',
+       IFF(COUNT(*) = 0, 'PASS', 'WARN'),
+       COUNT(*)::STRING || ' transfer syntax/SOP class pair(s) not in '
+       || 'DICOM_CAPABILITY. Metadata is catalogued; frames unservable. '
+       || 'Rank with SELECT * FROM V_CAPABILITY_GAPS.'
+FROM V_CAPABILITY_GAPS
+
+-- ---------------------------------------------------------------------------
+-- 10. Quarantine health, split by whether retrying can possibly help.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 14, 'QUARANTINE_UNRESOLVED',
+       IFF(COALESCE(SUM(N_UNRESOLVED), 0) = 0, 'PASS', 'WARN'),
+       COALESCE(SUM(N_UNRESOLVED), 0)::STRING || ' unresolved error(s); '
+       || COALESCE(SUM(IFF(RETRYABLE, N_UNRESOLVED, 0)), 0)::STRING
+       || ' retryable. Detail in V_ERROR_SUMMARY.'
+FROM V_ERROR_SUMMARY
+
+-- ---------------------------------------------------------------------------
+-- 11. Deploy hygiene: tasks must be SUSPENDED until explicitly resumed.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 15, 'TASKS_CREATED_SUSPENDED',
+       IFF(COUNT_IF(LAST_STATE IS NULL OR MINUTES_SINCE_RUN > 60) = COUNT(*)
+             OR COUNT(*) = 0, 'PASS', 'WARN'),
+       COUNT(*)::STRING || ' task(s) tracked. A running DAG is fine if you '
+       || 'resumed it deliberately; if you did not, CALL SP_SUSPEND_PIPELINE().'
+FROM V_TASK_HEALTH
+
+-- ---------------------------------------------------------------------------
+-- 12. Pipeline reconciliation: manifest LOADED count must equal catalog rows.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 16, 'MANIFEST_CATALOG_RECONCILES',
+       IFF((SELECT COUNT_IF(STATUS = 'LOADED') FROM DICOM_FILE_MANIFEST)
+           = (SELECT COUNT(*) FROM DICOM_INSTANCE), 'PASS', 'WARN'),
+       'manifest LOADED = '
+       || (SELECT COUNT_IF(STATUS = 'LOADED') FROM DICOM_FILE_MANIFEST)::STRING
+       || ', DICOM_INSTANCE rows = '
+       || (SELECT COUNT(*) FROM DICOM_INSTANCE)::STRING
+       || '. A gap means files parsed to multiple or zero instances.'
+
+-- ---------------------------------------------------------------------------
+-- 13. Sequences in RAW_METADATA must be expanded, not present-but-empty.
+--
+-- The parser used to store every SQ element as {"vr":"SQ","Value":[]} because
+-- QIDO matching never reads sequence content. WADO-RS /metadata is served from
+-- the SAME column, and a DICOM-SEG is defined entirely by its sequences, so a
+-- valid segmentation arrived at the viewer describing nothing and rendered as
+-- nothing -- at HTTP 200, with the test suite green.
+--
+-- ProcedureCodeSequence is the probe because it is common across CT and MR and
+-- is always non-empty when present. An instance that records sq_length > 0 while
+-- carrying zero expanded items was parsed by the old code and needs re-ingest.
+-- ---------------------------------------------------------------------------
+UNION ALL
+SELECT 17, 'RAW_METADATA_SEQUENCES_EXPANDED',
+       IFF(COUNT(*) = 0, 'PASS', 'WARN'),
+       IFF(COUNT(*) = 0,
+           'no instance carries a non-empty sequence stored as an empty array',
+           COUNT(*)::STRING || ' instance(s) have sq_length > 0 but no expanded '
+             || 'items -- parsed before sequence expansion, re-ingest to fix')
+  FROM DICOM_INSTANCE
+ WHERE RAW_METADATA:"00081032":"sq_length" > 0
+   AND COALESCE(ARRAY_SIZE(RAW_METADATA:"00081032":"Value"), 0) = 0
+
+-- ---------------------------------------------------------------------------
+-- NOT CHECKED HERE: segmentation overlay coverage.
+--
+-- "A series has SEG_RESULT rows but no catalogued DICOM-SEG" is a real quiet
+-- failure -- the numbers are queryable and the viewer shows nothing -- but
+-- asserting it here would make this file read SEG_RESULT, which only exists
+-- after the seg phase. CHECKS deliberately depends on core + pipeline objects
+-- only, so it stays runnable on a minimal install. Reaching forward into an
+-- optional phase would mean a core-only deploy could not run its own checks:
+-- the same self-defeating shape as a drift detector that fails to compile.
+--
+-- The assertion lives in the seg phase instead, under the same check name
+-- SEG_RESULTS_HAVE_OVERLAYS, backed by V_SEG_OVERLAY_COVERAGE.
+-- ---------------------------------------------------------------------------
+
+)
+SELECT CHECK_NAME, STATUS, DETAIL
+FROM checks
+ORDER BY IFF(STATUS = 'FAIL', 0, IFF(STATUS = 'WARN', 1, 2)), SEQ;

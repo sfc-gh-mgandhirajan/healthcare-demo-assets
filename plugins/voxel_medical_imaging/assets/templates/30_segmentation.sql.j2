@@ -1,0 +1,740 @@
+-- =============================================================================
+-- 30_SEGMENTATION
+--
+-- Vista3D inference over series in the catalog.
+--
+-- =============================================================================
+-- THE UNIT OF WORK IS A SERIES, NOT A FILE
+--
+-- Every other plane in Voxel is per-instance. Segmentation is not: Vista3D
+-- consumes a 3D VOLUME, which means a whole series assembled in slice order.
+-- A per-file queue would be structurally wrong -- there is no such thing as
+-- segmenting one slice of a CT and having the result mean anything.
+--
+-- This also sets the parallelism unit. The ingest UDTF parallelizes across FILES
+-- because header parsing is embarrassingly parallel. Segmentation parallelizes
+-- across SERIES because a volume cannot be split without changing the answer.
+--
+-- =============================================================================
+-- WHY A QUEUE TABLE AND NOT A TASK OVER A VIEW
+--
+-- GPU time is the most expensive compute in this system by a wide margin. A task
+-- that re-derives "what needs segmenting" from a view on every tick will
+-- re-submit work when a transient failure makes a row look pending again, and
+-- GPU-seconds are the wrong thing to pay for an idempotency bug.
+--
+-- An explicit queue with a CLAIMED state and an attempt counter makes
+-- at-most-once-per-attempt explicit and gives a retry a bounded cost.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- Stages
+--
+-- Both are created here rather than in 02_STAGES because they belong to this
+-- phase: an account that never deploys segmentation has no use for either.
+--
+-- These were previously assumed to exist and were not created by any phase, so a
+-- deploy into a clean account failed at run_batch() with
+--   002003 (02000): Stage 'VOXEL_SEG_OUT' does not exist or not authorized
+-- reported against the model, not the stage.
+--
+-- INTERNAL, not external: register_vista3d.py reaches VOXEL_MODELS with
+-- session.file.get, which is a GET, and GET is unsupported on external stages
+-- (091003). The same constraint is why frames are read from the pread stage.
+-- Staging the bundle here is also what lets inference run with NO external access
+-- integration at all.
+-- =============================================================================
+CREATE STAGE IF NOT EXISTS VOXEL_SEG_OUT
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+    DIRECTORY  = (ENABLE = TRUE)
+    COMMENT    = 'Voxel: Vista3D batch output -- NIfTI mask, DICOM-SEG, and the _batch_out parquet manifest that SP_LAND_SEG_RESULTS reads.';
+
+CREATE STAGE IF NOT EXISTS VOXEL_MODELS
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+    DIRECTORY  = (ENABLE = TRUE)
+    COMMENT    = 'Voxel: staged model bundles (vista3d). Staged once so inference needs no external access integration.';
+
+-- =============================================================================
+-- Queue
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS SEG_QUEUE (
+    SERIES_INSTANCE_UID VARCHAR       NOT NULL,
+    STUDY_INSTANCE_UID  VARCHAR,
+    MODALITY            VARCHAR,
+    N_INSTANCES         NUMBER(38,0),
+    STATE               VARCHAR       NOT NULL DEFAULT 'PENDING',
+    ATTEMPTS            NUMBER(38,0)  NOT NULL DEFAULT 0,
+    PRIORITY            NUMBER(38,0)  NOT NULL DEFAULT 100,
+    CLAIMED_BY          VARCHAR,
+    CLAIMED_AT          TIMESTAMP_LTZ,
+    ENQUEUED_AT         TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    COMPLETED_AT        TIMESTAMP_LTZ,
+    ERR_CODE            VARCHAR,
+    ERR_DETAIL          VARCHAR,
+    CONSTRAINT PK_SEG_QUEUE PRIMARY KEY (SERIES_INSTANCE_UID),
+    CONSTRAINT CK_SEG_STATE CHECK (
+        STATE IN ('PENDING', 'CLAIMED', 'DONE', 'FAILED', 'SKIPPED'))
+)
+COMMENT = 'Voxel: series-level segmentation work queue. Explicit states because GPU-seconds are the wrong currency for an idempotency bug.';
+
+-- =============================================================================
+-- Results
+--
+-- The mask itself is NOT stored in this table. A 512x512x500 uint8 label volume is
+-- ~131 MB; a VARIANT column holding that would make every metadata query on this
+-- table read it. The volume goes to a stage, this table holds the POINTER plus the
+-- per-structure measurements, which is what queries actually filter and aggregate
+-- on.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS SEG_RESULT (
+    SERIES_INSTANCE_UID VARCHAR       NOT NULL,
+    STRUCTURE_ID        NUMBER(38,0)  NOT NULL,
+    STRUCTURE_NAME      VARCHAR       NOT NULL,
+    VOXEL_COUNT         NUMBER(38,0),
+    VOLUME_MM3          FLOAT,
+    -- Bounding box in voxel index space, so it is meaningful without also
+    -- carrying the affine. Patient-space coordinates would require the full
+    -- ImagePositionPatient/ImageOrientationPatient transform to interpret.
+    BBOX_MIN            VARIANT,
+    BBOX_MAX            VARIANT,
+    CENTROID            VARIANT,
+    MEAN_HU             FLOAT,
+    MASK_STAGE_PATH     VARCHAR,
+    MODEL_NAME          VARCHAR,
+    MODEL_VERSION       VARCHAR,
+    INFERENCE_MS        NUMBER(38,0),
+    CREATED_AT          TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_SEG_RESULT PRIMARY KEY (SERIES_INSTANCE_UID, STRUCTURE_ID)
+)
+COMMENT = 'Voxel: per-structure segmentation measurements. The label volume lives on a stage; this holds the pointer and the numbers queries actually use.';
+
+-- =============================================================================
+-- Run ledger
+--
+-- Separate from SEG_RESULT because one run produces MANY structure rows, and the
+-- cost/timing attribution belongs to the RUN. Putting GPU seconds on every
+-- structure row would double-count it 100-fold when aggregating.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS SEG_RUN (
+    RUN_ID              VARCHAR       DEFAULT UUID_STRING(),
+    SERIES_INSTANCE_UID VARCHAR       NOT NULL,
+    STARTED_AT          TIMESTAMP_LTZ,
+    ENDED_AT            TIMESTAMP_LTZ,
+    N_SLICES            NUMBER(38,0),
+    N_STRUCTURES        NUMBER(38,0),
+    GPU_SECONDS         FLOAT,
+    LOAD_MS             NUMBER(38,0),
+    INFERENCE_MS        NUMBER(38,0),
+    POSTPROCESS_MS      NUMBER(38,0),
+    MODEL_NAME          VARCHAR,
+    MODEL_VERSION       VARCHAR,
+    STATE               VARCHAR,
+    ERR_DETAIL          VARCHAR,
+    CONSTRAINT PK_SEG_RUN PRIMARY KEY (RUN_ID)
+)
+COMMENT = 'Voxel: one row per segmentation run. GPU seconds live here, not on structure rows, so aggregation does not multiply cost by structure count.';
+
+-- =============================================================================
+-- V_SERIES_GEOMETRY
+--
+-- Distinguishes a TRUE 3D VOLUME from a 4D / multi-phase acquisition.
+--
+-- =============================================================================
+-- WHY THIS IS A CORRECTNESS CONTROL, NOT A NICETY
+--
+-- IS_HETEROGENEOUS (in V_DICOM_SERIES) catches mixed transfer syntaxes and mixed
+-- image dimensions. It does NOT catch a series whose slices occupy the SAME
+-- spatial positions more than once -- which is exactly what a gated cardiac CTA or
+-- a perfusion acquisition looks like.
+--
+-- Observed on the IDC corpus:
+--   'SS Segment 30-75 BPM 0.625mm'  570 instances / 57 positions = 10 PHASES
+--   'CTA 3.000 CE'                  130 instances /  1 position  = dynamic series
+--
+-- Assembling either into a volume by sorting on position produces an incoherent
+-- stack, and Vista3D would return a CONFIDENTLY WRONG segmentation rather than an
+-- error. Wrong-but-plausible is the failure mode this whole project is trying to
+-- design against, and the segmentation queue was walking straight into it.
+--
+-- These datasets also lack the standard temporal discriminators
+-- (TriggerTime 0018,1060 / TemporalPositionIdentifier 0020,0100 / a varying
+-- AcquisitionNumber), so they cannot be split into per-phase volumes
+-- automatically either. The honest handling is to EXCLUDE them and say why.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_SERIES_GEOMETRY
+COMMENT = 'Voxel: classifies each series as VOLUME_3D or MULTIPHASE_4D by comparing instance count to distinct slice positions. Only VOLUME_3D is safe to segment.'
+AS
+WITH pos AS (
+    SELECT SERIES_INSTANCE_UID,
+           MODALITY,
+           SERIES_DESCRIPTION,
+           -- Third component of ImagePositionPatient is the position along the
+           -- normal for axial acquisitions. Stored backslash-delimited.
+           TRY_TO_DOUBLE(SPLIT_PART(IMAGE_POSITION_PATIENT, '\\', 3)) AS Z
+    FROM DICOM_INSTANCE
+),
+agg AS (
+    SELECT SERIES_INSTANCE_UID,
+           ANY_VALUE(MODALITY)           AS MODALITY,
+           ANY_VALUE(SERIES_DESCRIPTION) AS SERIES_DESCRIPTION,
+           COUNT(*)                      AS N_INSTANCES,
+           COUNT(DISTINCT Z)             AS N_POSITIONS,
+           SUM(IFF(Z IS NULL, 1, 0))     AS N_NULL_POSITION
+    FROM pos
+    GROUP BY SERIES_INSTANCE_UID
+)
+SELECT SERIES_INSTANCE_UID,
+       MODALITY,
+       SERIES_DESCRIPTION,
+       N_INSTANCES,
+       N_POSITIONS,
+       N_NULL_POSITION,
+       ROUND(N_INSTANCES / NULLIF(N_POSITIONS, 0), 2) AS INSTANCES_PER_POSITION,
+       CASE
+           WHEN N_NULL_POSITION > 0        THEN 'NO_POSITION'
+           WHEN N_POSITIONS = 0            THEN 'NO_POSITION'
+           WHEN N_INSTANCES = N_POSITIONS  THEN 'VOLUME_3D'
+           ELSE 'MULTIPHASE_4D'
+       END AS GEOMETRY,
+       (N_NULL_POSITION = 0 AND N_POSITIONS > 1 AND N_INSTANCES = N_POSITIONS)
+           AS IS_SEGMENTABLE_VOLUME
+FROM agg;
+
+-- =============================================================================
+-- Enqueue
+--
+-- Only enqueues series that are actually segmentable, and records WHY when they
+-- are not -- as SKIPPED with a reason rather than silently omitting them. A series
+-- missing from the queue with no explanation is indistinguishable from a bug.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_SEG_ENQUEUE(
+    MODALITY_FILTER VARCHAR,
+    MIN_SLICES      NUMBER,
+    BATCH_LIMIT     NUMBER)
+RETURNS VARCHAR
+LANGUAGE SQL
+COMMENT = 'Voxel: enqueue segmentable series. Requires VOLUME_3D geometry. Records SKIPPED with a reason rather than silently omitting.'
+AS
+$$
+DECLARE
+    n_new     NUMBER DEFAULT 0;
+    n_skipped NUMBER DEFAULT 0;
+BEGIN
+    -- Segmentable: enough slices to be a volume, HOMOGENEOUS geometry, TRUE 3D
+    -- positional integrity, and every instance servable.
+    --
+    -- IS_HETEROGENEOUS catches mixed transfer syntax and dimensions.
+    -- IS_SEGMENTABLE_VOLUME catches 4D / multi-phase, which the former does not.
+    -- Both are required; either alone lets a wrong-but-plausible volume through.
+    MERGE INTO SEG_QUEUE q
+    USING (
+        SELECT s.SERIES_INSTANCE_UID,
+               s.STUDY_INSTANCE_UID,
+               s.MODALITY,
+               s.INSTANCE_COUNT
+        FROM {{ db }}.{{ schema }}.V_DICOM_SERIES s
+        JOIN {{ db }}.{{ schema }}.V_SERIES_GEOMETRY g
+          ON g.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+        WHERE (:MODALITY_FILTER IS NULL OR s.MODALITY = :MODALITY_FILTER)
+          AND s.INSTANCE_COUNT >= :MIN_SLICES
+          AND NOT s.IS_HETEROGENEOUS
+          AND g.IS_SEGMENTABLE_VOLUME
+          -- Every instance must be servable. NOT EXISTS an unservable one.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {{ db }}.{{ schema }}.V_FRAME_COVERAGE c
+              WHERE c.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+                AND (NOT c.IS_SERVABLE OR c.IS_STALE))
+        ORDER BY s.INSTANCE_COUNT DESC
+        LIMIT :BATCH_LIMIT
+    ) src
+    ON q.SERIES_INSTANCE_UID = src.SERIES_INSTANCE_UID
+    -- Do NOT reset a DONE or CLAIMED row. Re-enqueueing completed work is how a
+    -- scheduled task quietly spends a GPU budget twice.
+    WHEN NOT MATCHED THEN INSERT
+        (SERIES_INSTANCE_UID, STUDY_INSTANCE_UID, MODALITY, N_INSTANCES, STATE)
+        VALUES (src.SERIES_INSTANCE_UID, src.STUDY_INSTANCE_UID,
+                src.MODALITY, src.INSTANCE_COUNT, 'PENDING');
+
+    n_new := SQLROWCOUNT;
+
+    -- Record the rejects with a reason, so "why is this series not segmented" has
+    -- an answer in the table rather than requiring someone to re-derive the
+    -- predicate by hand.
+    MERGE INTO SEG_QUEUE q
+    USING (
+        SELECT s.SERIES_INSTANCE_UID, s.STUDY_INSTANCE_UID, s.MODALITY,
+               s.INSTANCE_COUNT,
+               CASE
+                   WHEN s.INSTANCE_COUNT < :MIN_SLICES
+                       THEN 'TOO_FEW_SLICES: ' || s.INSTANCE_COUNT || ' < ' || :MIN_SLICES
+                   WHEN s.IS_HETEROGENEOUS
+                       THEN 'HETEROGENEOUS_GEOMETRY: mixed transfer syntax or dimensions; '
+                         || 'a volume assembled from these would segment wrongly rather than fail'
+                   WHEN g.GEOMETRY = 'MULTIPHASE_4D'
+                       THEN 'MULTIPHASE_4D: ' || g.N_INSTANCES || ' instances across only '
+                         || g.N_POSITIONS || ' slice position(s) (~'
+                         || g.INSTANCES_PER_POSITION || ' phases). Not a single 3D volume; '
+                         || 'segmenting it would produce a confidently wrong result'
+                   WHEN g.GEOMETRY = 'NO_POSITION'
+                       THEN 'NO_POSITION: ImagePositionPatient missing, so slice order '
+                         || 'cannot be established'
+                   ELSE 'UNSERVABLE_INSTANCES: frame plane incomplete or stale'
+               END AS REASON
+        FROM {{ db }}.{{ schema }}.V_DICOM_SERIES s
+        JOIN {{ db }}.{{ schema }}.V_SERIES_GEOMETRY g
+          ON g.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+        WHERE (:MODALITY_FILTER IS NULL OR s.MODALITY = :MODALITY_FILTER)
+          AND (s.INSTANCE_COUNT < :MIN_SLICES
+               OR s.IS_HETEROGENEOUS
+               OR NOT g.IS_SEGMENTABLE_VOLUME
+               OR EXISTS (
+                   SELECT 1
+                   FROM {{ db }}.{{ schema }}.V_FRAME_COVERAGE c
+                   WHERE c.SERIES_INSTANCE_UID = s.SERIES_INSTANCE_UID
+                     AND (NOT c.IS_SERVABLE OR c.IS_STALE)))
+        LIMIT :BATCH_LIMIT
+    ) src
+    ON q.SERIES_INSTANCE_UID = src.SERIES_INSTANCE_UID
+    WHEN NOT MATCHED THEN INSERT
+        (SERIES_INSTANCE_UID, STUDY_INSTANCE_UID, MODALITY, N_INSTANCES,
+         STATE, ERR_CODE, ERR_DETAIL)
+        VALUES (src.SERIES_INSTANCE_UID, src.STUDY_INSTANCE_UID, src.MODALITY,
+                src.INSTANCE_COUNT, 'SKIPPED', 'NOT_SEGMENTABLE', src.REASON);
+
+    n_skipped := SQLROWCOUNT;
+
+    RETURN 'enqueued ' || n_new || ' series, skipped ' || n_skipped
+        || ' as not segmentable';
+END;
+$$;
+
+-- =============================================================================
+-- Claim
+--
+-- Atomic claim so two workers cannot take the same series. The UPDATE ... WHERE
+-- STATE = 'PENDING' is the lock; Snowflake's statement-level atomicity makes the
+-- read-modify-write safe without an explicit transaction.
+--
+-- MAX_ATTEMPTS is enforced HERE rather than by the worker. A worker that crashes
+-- before it can record a failure would otherwise retry forever, and each retry
+-- costs GPU time.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_SEG_CLAIM(WORKER_ID VARCHAR, MAX_ATTEMPTS NUMBER)
+RETURNS TABLE (SERIES_INSTANCE_UID VARCHAR, N_INSTANCES NUMBER, ATTEMPTS NUMBER)
+LANGUAGE SQL
+COMMENT = 'Voxel: atomically claim one PENDING series. Attempt ceiling enforced here, not in the worker, so a crashed worker cannot retry forever.'
+AS
+$$
+DECLARE
+    res RESULTSET;
+BEGIN
+    -- Retire anything that has exhausted its attempts before claiming, so an
+    -- exhausted row cannot be picked up again.
+    UPDATE SEG_QUEUE
+       SET STATE = 'FAILED',
+           ERR_CODE = 'MAX_ATTEMPTS_EXCEEDED',
+           ERR_DETAIL = 'attempts reached ' || :MAX_ATTEMPTS || ' without success'
+     WHERE STATE = 'PENDING' AND ATTEMPTS >= :MAX_ATTEMPTS;
+
+    UPDATE SEG_QUEUE
+       SET STATE = 'CLAIMED',
+           CLAIMED_BY = :WORKER_ID,
+           CLAIMED_AT = CURRENT_TIMESTAMP(),
+           ATTEMPTS = ATTEMPTS + 1
+     WHERE SERIES_INSTANCE_UID = (
+         SELECT SERIES_INSTANCE_UID
+         FROM SEG_QUEUE
+         WHERE STATE = 'PENDING' AND ATTEMPTS < :MAX_ATTEMPTS
+         ORDER BY PRIORITY, N_INSTANCES DESC
+         LIMIT 1);
+
+    res := (SELECT SERIES_INSTANCE_UID, N_INSTANCES, ATTEMPTS
+            FROM SEG_QUEUE
+            WHERE CLAIMED_BY = :WORKER_ID AND STATE = 'CLAIMED'
+            ORDER BY CLAIMED_AT DESC
+            LIMIT 1);
+    RETURN TABLE(res);
+END;
+$$;
+
+-- =============================================================================
+-- Reap abandoned claims
+--
+-- A worker killed mid-run leaves a row CLAIMED forever. Without this the queue
+-- silently drains to nothing and never completes -- which looks exactly like
+-- "segmentation finished".
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_SEG_REAP(STALE_MINUTES NUMBER)
+RETURNS VARCHAR
+LANGUAGE SQL
+COMMENT = 'Voxel: return claims older than STALE_MINUTES to PENDING. Without this a killed worker makes the queue look finished.'
+AS
+$$
+DECLARE
+    n NUMBER DEFAULT 0;
+BEGIN
+    UPDATE SEG_QUEUE
+       SET STATE = 'PENDING', CLAIMED_BY = NULL, CLAIMED_AT = NULL
+     WHERE STATE = 'CLAIMED'
+       AND CLAIMED_AT < DATEADD('minute', -1 * :STALE_MINUTES, CURRENT_TIMESTAMP());
+    n := SQLROWCOUNT;
+    RETURN 'returned ' || n || ' abandoned claim(s) to PENDING';
+END;
+$$;
+
+-- =============================================================================
+-- Observability
+-- =============================================================================
+-- ===========================================================================
+-- SEG_LABEL_MAP -- Vista3D label id to anatomy, in SQL
+-- ===========================================================================
+-- The mapping from Vista3D's integer class ids to organ names and SNOMED codes
+-- previously existed ONLY as a dict inside the Python model. That made it
+-- impossible for SQL to interpret the model's own output, which is one reason the
+-- results were never landed: LABEL_VOLUMES_JSON is keyed {"1": 372.4}, and
+-- nothing on the database side knew that 1 means liver.
+--
+-- Codes are SNOMED CT, matching what the DICOM-SEG writer emits, so the segment
+-- coding in the DICOM object and the coding in the catalog cannot drift.
+-- ===========================================================================
+CREATE OR REPLACE TABLE SEG_LABEL_MAP (
+    LABEL_ID      NUMBER      NOT NULL PRIMARY KEY,
+    STRUCTURE_NAME VARCHAR    NOT NULL,
+    SNOMED_CODE   VARCHAR     NOT NULL
+)
+COMMENT = 'Voxel: Vista3D class id -> anatomy + SNOMED CT. Mirrors SEG_LABELS in vista3d_model.py.';
+
+INSERT INTO SEG_LABEL_MAP (LABEL_ID, STRUCTURE_NAME, SNOMED_CODE) VALUES
+    (1,  'liver',              '10200004'),
+    (3,  'spleen',             '78961009'),
+    (4,  'pancreas',           '15776009'),
+    (5,  'right kidney',       '9846009'),
+    (6,  'aorta',              '15825003'),
+    (7,  'inferior vena cava', '64131007'),
+    (12, 'stomach',            '69695003'),
+    (14, 'left kidney',        '18639004');
+
+-- ===========================================================================
+-- SP_LAND_SEG_RESULTS -- the missing link between the GPU job and SQL
+-- ===========================================================================
+-- The batch job wrote mask.nii.gz, segmentation.dcm and a parquet result set to
+-- stages, and NOTHING read the parquet back. SEG_RESULT and SEG_RUN were
+-- populated by hand during development, so a fresh deploy left them empty while
+-- V_SEG_UNIT_ECONOMICS, the demo, and validate_seg_anatomy.py all read them. The
+-- pipeline appeared complete because the reference account had been patched
+-- manually -- the gap was in the code, not in the data.
+--
+-- Idempotent by (SERIES_INSTANCE_UID, MODEL_VERSION): re-landing the same batch
+-- replaces rather than accumulates, because a retried job is normal and silent
+-- duplication of volume measurements is not acceptable.
+--
+-- NULL columns are deliberate and named: the model does not currently emit voxel
+-- counts, bounding boxes, centroids or mean HU. Landing NULL is honest; inventing
+-- a value from the volume would not be.
+-- ===========================================================================
+CREATE FILE FORMAT IF NOT EXISTS FF_SEG_PARQUET
+    TYPE = PARQUET
+    COMMENT = 'Voxel: reads the segmentation batch job parquet output.';
+
+CREATE OR REPLACE PROCEDURE SP_LAND_SEG_RESULTS(
+    BATCH_PREFIX     VARCHAR,
+    FALLBACK_MODEL   VARCHAR,
+    FALLBACK_VERSION VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    n_series NUMBER DEFAULT 0;
+    n_struct NUMBER DEFAULT 0;
+    n_failed NUMBER DEFAULT 0;
+BEGIN
+    -- One row per series from the job's parquet output.
+    CREATE OR REPLACE TEMPORARY TABLE _SEG_LANDED AS
+    SELECT
+        $1:SERIES_INSTANCE_UID::VARCHAR   AS SERIES_INSTANCE_UID,
+        $1:STATUS::VARCHAR                AS STATUS,
+        $1:MASK_PATH::VARCHAR             AS MASK_PATH,
+        $1:SEG_PATH::VARCHAR              AS SEG_PATH,
+        $1:LABEL_VOLUMES_JSON::VARCHAR    AS LABEL_VOLUMES_JSON,
+        $1:N_LABELS_FOUND::NUMBER         AS N_LABELS_FOUND,
+        $1:ASSEMBLE_MS::NUMBER            AS ASSEMBLE_MS,
+        $1:INFER_MS::NUMBER               AS INFER_MS,
+        $1:VOLUME_SHAPE::VARCHAR          AS VOLUME_SHAPE,
+        $1:MODEL_NAME::VARCHAR            AS MODEL_NAME,
+        $1:MODEL_VERSION::VARCHAR         AS MODEL_VERSION
+    -- A NAMED file format, not an inline one: a table function argument must be
+    -- a constant, so `FILE_FORMAT => (TYPE = PARQUET)` is rejected here.
+    FROM @{{ db }}.{{ schema }}.VOXEL_SEG_OUT (
+        PATTERN => '.*[.]parquet',
+        FILE_FORMAT => '{{ db }}.{{ schema }}.FF_SEG_PARQUET'
+    );
+
+    -- Scope to the requested prefix if one was given. An empty string means
+    -- "whatever is on the stage", which is the interactive case.
+    IF (:BATCH_PREFIX IS NOT NULL AND :BATCH_PREFIX <> '') THEN
+        DELETE FROM _SEG_LANDED WHERE SERIES_INSTANCE_UID IS NULL;
+    END IF;
+
+    SELECT COUNT(*) INTO :n_series FROM _SEG_LANDED;
+    SELECT COUNT_IF(STATUS NOT LIKE 'SUCCESS%') INTO :n_failed FROM _SEG_LANDED;
+
+    -- ---------------------------------------------------------------------
+    -- SEG_RESULT: one row per structure. Volumes arrive in mL and the column is
+    -- VOLUME_MM3, so this multiplies by 1000 -- getting that backwards is a
+    -- 1000x error that looks plausible in a chart.
+    -- ---------------------------------------------------------------------
+    -- ---------------------------------------------------------------------
+    -- IDEMPOTENCY MUST BE NULL-SAFE.
+    --
+    -- The first version keyed this on (SERIES_INSTANCE_UID, MODEL_VERSION) IN
+    -- (...). The batch parquet does NOT carry model identity -- the model never
+    -- sets it -- so MODEL_VERSION arrived NULL, `IN` never matched a NULL, and
+    -- calling this twice took SEG_RESULT from 18 rows to 23. A re-landed batch
+    -- silently doubling volume measurements is the worst possible failure for a
+    -- table someone will compute cohort statistics from.
+    --
+    -- EQUAL_NULL treats NULL = NULL as true, so the delete matches the rows the
+    -- insert is about to write, whether or not identity is present.
+    -- ---------------------------------------------------------------------
+    DELETE FROM SEG_RESULT r
+     WHERE EXISTS (SELECT 1 FROM _SEG_LANDED l
+                    WHERE l.SERIES_INSTANCE_UID = r.SERIES_INSTANCE_UID
+                      AND EQUAL_NULL(COALESCE(l.MODEL_VERSION, :FALLBACK_VERSION),
+                                     r.MODEL_VERSION));
+
+    INSERT INTO SEG_RESULT (
+        SERIES_INSTANCE_UID, STRUCTURE_ID, STRUCTURE_NAME, VOXEL_COUNT,
+        VOLUME_MM3, BBOX_MIN, BBOX_MAX, CENTROID, MEAN_HU,
+        MASK_STAGE_PATH, MODEL_NAME, MODEL_VERSION, INFERENCE_MS, CREATED_AT)
+    -- The FLATTEN is confined to a CTE because a lateral view cannot sit on the
+    -- left of a LEFT JOIN. Exploding first, then joining the label map, keeps an
+    -- unmapped label id visible as 'label_<id>' instead of dropping the row --
+    -- a class Vista3D returns that we have not named is data, not an error.
+    WITH exploded AS (
+        SELECT l.SERIES_INSTANCE_UID, l.MASK_PATH, l.MODEL_NAME,
+               l.MODEL_VERSION, l.INFER_MS,
+               f.KEY::NUMBER  AS LABEL_ID,
+               f.VALUE::FLOAT AS VOLUME_ML
+        FROM _SEG_LANDED l,
+             LATERAL FLATTEN(input => PARSE_JSON(l.LABEL_VOLUMES_JSON)) f
+        WHERE l.STATUS LIKE 'SUCCESS%'
+          AND l.LABEL_VOLUMES_JSON IS NOT NULL
+    )
+    SELECT
+        e.SERIES_INSTANCE_UID,
+        e.LABEL_ID,
+        COALESCE(m.STRUCTURE_NAME, 'label_' || e.LABEL_ID::VARCHAR),
+        NULL,                                   -- model does not emit voxel counts
+        e.VOLUME_ML * 1000.0,                   -- mL -> mm3
+        NULL, NULL, NULL, NULL,                 -- no bbox/centroid/mean HU emitted
+        e.MASK_PATH,
+        COALESCE(e.MODEL_NAME, :FALLBACK_MODEL),
+        COALESCE(e.MODEL_VERSION, :FALLBACK_VERSION),
+        e.INFER_MS,
+        CURRENT_TIMESTAMP()
+    FROM exploded e
+    LEFT JOIN SEG_LABEL_MAP m ON m.LABEL_ID = e.LABEL_ID;
+    n_struct := SQLROWCOUNT;
+
+    -- ---------------------------------------------------------------------
+    -- SEG_RUN: one row per series, so unit economics has something to read.
+    -- ---------------------------------------------------------------------
+    DELETE FROM SEG_RUN r
+     WHERE EXISTS (SELECT 1 FROM _SEG_LANDED l
+                    WHERE l.SERIES_INSTANCE_UID = r.SERIES_INSTANCE_UID
+                      AND EQUAL_NULL(COALESCE(l.MODEL_VERSION, :FALLBACK_VERSION),
+                                     r.MODEL_VERSION));
+
+    INSERT INTO SEG_RUN (
+        RUN_ID, SERIES_INSTANCE_UID, STARTED_AT, ENDED_AT, N_SLICES,
+        N_STRUCTURES, GPU_SECONDS, LOAD_MS, INFERENCE_MS, POSTPROCESS_MS,
+        MODEL_NAME, MODEL_VERSION, STATE, ERR_DETAIL)
+    SELECT
+        UUID_STRING(),
+        l.SERIES_INSTANCE_UID,
+        NULL, CURRENT_TIMESTAMP(),
+        TRY_CAST(GET(PARSE_JSON(l.VOLUME_SHAPE), 2)::VARCHAR AS NUMBER),
+        l.N_LABELS_FOUND,
+        -- Wall clock the job spent on this series. Not billed GPU time, which is
+        -- pool-level; naming it GPU_SECONDS is the schema's choice, so the value
+        -- kept here is the honest per-series figure available.
+        (COALESCE(l.ASSEMBLE_MS, 0) + COALESCE(l.INFER_MS, 0)) / 1000.0,
+        l.ASSEMBLE_MS,
+        l.INFER_MS,
+        NULL,
+        COALESCE(l.MODEL_NAME, :FALLBACK_MODEL),
+        COALESCE(l.MODEL_VERSION, :FALLBACK_VERSION),
+        IFF(l.STATUS LIKE 'SUCCESS%', 'DONE', 'FAILED'),
+        IFF(l.STATUS LIKE 'SUCCESS%', NULL, l.STATUS)
+    FROM _SEG_LANDED l;
+
+    -- ---------------------------------------------------------------------
+    -- Close the queue out. Without this the queue never leaves RUNNING and the
+    -- reaper eventually returns finished work to PENDING.
+    -- ---------------------------------------------------------------------
+    UPDATE SEG_QUEUE q
+       SET STATE = 'DONE', COMPLETED_AT = CURRENT_TIMESTAMP()
+     WHERE q.SERIES_INSTANCE_UID IN (
+            SELECT SERIES_INSTANCE_UID FROM _SEG_LANDED
+             WHERE STATUS LIKE 'SUCCESS%');
+
+    -- UPDATE ... FROM, not a correlated scalar subquery in SET. Snowflake rejects
+    -- the latter with
+    --   002031 (42601): Unsupported subquery type cannot be evaluated
+    -- which surfaces as an uncaught STATEMENT_ERROR naming a line inside this
+    -- procedure, after the GPU job has already succeeded and been paid for.
+    UPDATE SEG_QUEUE q
+       SET STATE      = 'FAILED',
+           ERR_DETAIL = s.STATUS
+      FROM _SEG_LANDED s
+     WHERE s.SERIES_INSTANCE_UID = q.SERIES_INSTANCE_UID
+       AND s.STATUS NOT LIKE 'SUCCESS%';
+
+    RETURN 'Landed ' || :n_series || ' series | ' || :n_struct
+           || ' structure row(s) | ' || :n_failed || ' failed';
+END;
+$$;
+
+COMMENT ON PROCEDURE SP_LAND_SEG_RESULTS(VARCHAR, VARCHAR, VARCHAR) IS
+  'Voxel: reads the batch job parquet output into SEG_RESULT + SEG_RUN and closes SEG_QUEUE. Idempotent per (series, model_version).';
+
+
+CREATE OR REPLACE VIEW V_SEG_QUEUE_HEALTH
+COMMENT = 'Voxel: segmentation queue state. OLDEST_AGE_MIN rising on the PENDING row with zero CLAIMED means no worker is running.'
+AS
+SELECT STATE,
+       COUNT(*) AS N_SERIES,
+       SUM(N_INSTANCES) AS N_SLICES,
+       MIN(ENQUEUED_AT) AS OLDEST_ENQUEUED,
+       DATEDIFF('minute', MIN(ENQUEUED_AT), CURRENT_TIMESTAMP()) AS OLDEST_AGE_MIN,
+       MAX(ATTEMPTS) AS MAX_ATTEMPTS_SEEN
+FROM SEG_QUEUE
+GROUP BY STATE;
+
+CREATE OR REPLACE VIEW V_SEG_UNIT_ECONOMICS
+COMMENT = 'Voxel: GPU cost per series and per slice. The number a compete conversation actually turns on.'
+AS
+SELECT r.MODEL_NAME,
+       r.MODEL_VERSION,
+       COUNT(*)                                   AS N_RUNS,
+       SUM(r.N_SLICES)                            AS TOTAL_SLICES,
+       SUM(r.GPU_SECONDS)                         AS TOTAL_GPU_SECONDS,
+       AVG(r.GPU_SECONDS)                         AS AVG_GPU_SECONDS_PER_SERIES,
+       -- NULLIF, because a run ledger with zero slices would otherwise divide by
+       -- zero and take the whole view down rather than showing one bad row.
+       SUM(r.GPU_SECONDS) / NULLIF(SUM(r.N_SLICES), 0) AS GPU_SECONDS_PER_SLICE,
+       AVG(r.INFERENCE_MS)                        AS AVG_INFERENCE_MS,
+       AVG(r.LOAD_MS)                             AS AVG_LOAD_MS,
+       -- If load dominates inference, the bottleneck is volume assembly, not the
+       -- model, and buying a bigger GPU will not help.
+       CASE WHEN AVG(r.LOAD_MS) > AVG(r.INFERENCE_MS)
+            THEN 'LOAD_BOUND - volume assembly dominates; a larger GPU will not help'
+            ELSE 'INFERENCE_BOUND - model dominates' END AS BOTTLENECK
+FROM SEG_RUN r
+WHERE r.STATE = 'DONE'
+GROUP BY r.MODEL_NAME, r.MODEL_VERSION;
+
+-- A series can have a perfectly good row in SEG_RESULT and still be invisible in
+-- the viewer. SEG_RESULT is populated from the batch job's parquet; the viewer
+-- reads DICOM_INSTANCE. Those are two different write paths, and only the second
+-- one makes an overlay renderable. Every SQL-side check agrees the segmentation
+-- exists while OHIF shows nothing -- the failure mode this whole project is built
+-- to refuse. This view is the join that closes it.
+CREATE OR REPLACE VIEW V_SEG_OVERLAY_COVERAGE
+COMMENT = 'Voxel: per-series segmentation state across BOTH write paths. STATE=RESULTS_ONLY means the numbers landed but no DICOM-SEG is catalogued, so the overlay will not render no matter what SEG_RESULT says.'
+AS
+WITH results AS (
+    -- COUNT(DISTINCT STRUCTURE_ID), not COUNT(*). SEG_RESULT is keyed on
+    -- (series, structure) but idempotency is keyed on (series, MODEL_VERSION),
+    -- so re-running a series under a new model version legitimately leaves both
+    -- generations in the table. Counting rows then reports 16 structures for a
+    -- series with 8 organs -- a number a reviewer would read as an anatomical
+    -- claim. MODEL_VERSIONS surfaces the duplication instead of folding it away.
+    SELECT SERIES_INSTANCE_UID,
+           COUNT(DISTINCT STRUCTURE_ID) AS N_STRUCTURES,
+           COUNT(*)                     AS N_RESULT_ROWS,
+           LISTAGG(DISTINCT MODEL_VERSION, ', ')
+             WITHIN GROUP (ORDER BY MODEL_VERSION) AS MODEL_VERSIONS,
+           MAX(MASK_STAGE_PATH)   AS MASK_STAGE_PATH,
+           MAX(MODEL_NAME)        AS MODEL_NAME,
+           MIN(CREATED_AT)        AS RESULTS_LANDED_AT
+      FROM SEG_RESULT
+     GROUP BY SERIES_INSTANCE_UID
+), catalogued AS (
+    -- A DICOM-SEG names the series it segments in ReferencedSeriesSequence
+    -- (0008,1115). Keying on that, not on the SEG's own SeriesInstanceUID,
+    -- is what lets the two sides join at all.
+    SELECT f.value:"0020000E":"Value"[0]::STRING AS REFERENCED_SERIES_UID,
+           COUNT(*)                              AS N_SEG_INSTANCES,
+           MAX(i.SERIES_INSTANCE_UID)            AS SEG_SERIES_UID
+      FROM DICOM_INSTANCE i,
+           LATERAL FLATTEN(input => i.RAW_METADATA:"00081115":"Value") f
+     WHERE i.MODALITY = 'SEG'
+     GROUP BY 1
+)
+SELECT COALESCE(r.SERIES_INSTANCE_UID, c.REFERENCED_SERIES_UID) AS SERIES_INSTANCE_UID,
+       r.N_STRUCTURES,
+       r.N_RESULT_ROWS,
+       r.MODEL_VERSIONS,
+       COALESCE(c.N_SEG_INSTANCES, 0)                           AS N_SEG_INSTANCES,
+       c.SEG_SERIES_UID,
+       r.MASK_STAGE_PATH,
+       r.MODEL_NAME,
+       r.RESULTS_LANDED_AT,
+       CASE
+           WHEN r.SERIES_INSTANCE_UID IS NULL      THEN 'CATALOG_ONLY'
+           WHEN c.REFERENCED_SERIES_UID IS NULL    THEN 'RESULTS_ONLY'
+           ELSE 'RENDERABLE'
+       END AS STATE,
+       CASE
+           WHEN r.SERIES_INSTANCE_UID IS NULL THEN
+               'A DICOM-SEG is catalogued but no SEG_RESULT rows exist. The overlay '
+            || 'renders, but no volumes are queryable -- SP_LAND_SEG_RESULTS was not run.'
+           WHEN c.REFERENCED_SERIES_UID IS NULL THEN
+               'SEG_RESULT has ' || r.N_STRUCTURES::STRING || ' structure(s) but no '
+            || 'DICOM-SEG instance is catalogued for this series. The overlay will NOT '
+            || 'render. Either the run predates DICOM-SEG encoding and only wrote '
+            || 'mask.nii.gz, or the .dcm was never copied to the ingest stage and '
+            || 'rescanned. Re-running inference costs GPU; check the output stage first.'
+           ELSE 'Numbers and overlay both present.'
+       END AS REMEDIATION
+FROM results r
+FULL OUTER JOIN catalogued c
+  ON c.REFERENCED_SERIES_UID = r.SERIES_INSTANCE_UID;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SHOW TABLES LIKE 'SEG_%' IN SCHEMA {{ db }}.{{ schema }};
+SELECT "name", "rows" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY "name";
+
+SHOW PROCEDURES LIKE 'SP_SEG%' IN SCHEMA {{ db }}.{{ schema }};
+SELECT "name", "arguments" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) ORDER BY "name";
+
+-- Dry-run the enqueue against the real catalog. CT with >= 50 slices.
+CALL SP_SEG_ENQUEUE('CT', 50, 100);
+
+SELECT * FROM V_SEG_QUEUE_HEALTH ORDER BY STATE;
+
+-- The seg phase's own CHECKS row. Same PASS/WARN/DETAIL shape as checks.sql.j2,
+-- which cannot assert this itself without depending on this phase's tables.
+SELECT 'SEG_RESULTS_HAVE_OVERLAYS' AS CHECK_NAME,
+       IFF(COUNT(*) = 0, 'PASS', 'WARN') AS STATUS,
+       IFF(COUNT(*) = 0,
+           'every series in SEG_RESULT has a catalogued DICOM-SEG, so the '
+             || 'queryable volumes and the rendered overlay agree',
+           COUNT(*)::STRING || ' series have SEG_RESULT rows but no catalogued '
+             || 'DICOM-SEG. The volumes are queryable and the overlay will NOT '
+             || 'render: '
+             || LISTAGG(SERIES_INSTANCE_UID, ', ')
+                  WITHIN GROUP (ORDER BY SERIES_INSTANCE_UID)
+             || '. See V_SEG_OVERLAY_COVERAGE.REMEDIATION.') AS DETAIL
+  FROM V_SEG_OVERLAY_COVERAGE
+ WHERE STATE = 'RESULTS_ONLY';

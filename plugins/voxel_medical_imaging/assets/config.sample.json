@@ -1,0 +1,39 @@
+{
+  "target_database": "VOXEL_DB",
+  "target_schema": "IMAGING",
+  "warehouse": "VOXEL_WH",
+  "warehouse_size": "MEDIUM",
+  "owner_role": "SYSADMIN",
+
+  "deployment_tag": "voxel-dev",
+
+  "source_name": "IDC_OPEN_DATA",
+  "source_stage": "IDC_OPEN_DATA_STG",
+  "source_url": "s3://idc-open-data",
+  "include_demo_series": true,
+
+  "pread_stage": "VOXEL_PREAD_STG",
+  "pread_series_limit": 3,
+
+  "scan_schedule": "5 MINUTE",
+  "batch_limit_metadata": 5000,
+  "backfill_batch_limit": 100000,
+  "udtf_max_batch_size": 8,
+  "udtf_io_threads": 8,
+  "max_object_bytes": 536870912,
+  "reconcile_max_delete_pct": 5.0,
+
+  "window_center": 40,
+  "window_width": 400,
+
+  "dicomweb_service": "VOXEL_DICOMWEB_SVC",
+  "dicomweb_pool": "VOXEL_WEB_POOL",
+  "dicomweb_pool_family": "CPU_X64_M",
+  "image_repo": "VOXEL_IMAGES",
+  "hotring_size_gi": 12,
+
+  "gpu_pool": "VOXEL_GPU_POOL",
+  "gpu_pool_family": "GPU_NV_S",
+  "eai_name": "VOXEL_BUILD_EAI",
+  "network_rule": "VOXEL_BUILD_EGRESS_RULE"
+}

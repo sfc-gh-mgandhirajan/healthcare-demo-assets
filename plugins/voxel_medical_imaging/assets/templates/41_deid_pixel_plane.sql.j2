@@ -1,0 +1,295 @@
+-- =============================================================================
+-- 41_DEID_PIXEL_PLANE
+--
+-- Burned-in text is the part of DICOM de-identification that tag-level rules
+-- cannot touch. Ultrasound, screen captures, and dose reports routinely render
+-- patient name, MRN, and date INTO THE PIXELS. Every masking policy in
+-- 40_DEID_TAG_PLANE is irrelevant to those bytes.
+--
+-- =============================================================================
+-- THE DESIGN DECISION: DEFAULT DENY ON UNKNOWN, NOT DEFAULT ALLOW
+--
+-- The natural implementation runs OCR, flags what it finds, and lets everything
+-- else through. That is backwards. An instance that has NOT been examined is not
+-- "clean", it is UNKNOWN -- and unknown must not be servable to an unidentified
+-- role.
+--
+-- So PIXEL_VERDICT starts as UNREVIEWED and an unidentified role cannot retrieve
+-- pixels until a verdict exists. The failure mode becomes "the viewer says this
+-- series is pending review", not "a name was visible in a research export".
+--
+-- =============================================================================
+-- WHY PROJECTION POLICIES WITH ENFORCEMENT => FAIL
+--
+-- A masking policy returns a masked VALUE, so a query still SUCCEEDS. For a
+-- verdict gate that is wrong: a research pipeline selecting a file path for an
+-- instance it may not read should ERROR, not receive '***MASKED***' and write it
+-- into a manifest.
+--
+-- ENFORCEMENT => FAIL makes the query fail outright. Loud beats subtle when the
+-- consequence is a disclosure.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+USE WAREHOUSE {{ warehouse }};
+
+-- =============================================================================
+-- Verdict table
+--
+-- Separate from DICOM_INSTANCE deliberately. The catalog is rewritten by ingest;
+-- a human or model review verdict must NOT be destroyed by a re-scan of the same
+-- file. Keeping it in its own table means a backfill cannot silently reset
+-- everything to UNREVIEWED.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS PIXEL_VERDICT (
+    SOP_INSTANCE_UID VARCHAR       NOT NULL,
+    VERDICT          VARCHAR       NOT NULL,
+    METHOD           VARCHAR       NOT NULL,
+    CONFIDENCE       FLOAT,
+    DETECTED_REGIONS VARIANT,
+    REVIEWED_BY      VARCHAR       DEFAULT CURRENT_USER(),
+    REVIEWED_AT      TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP(),
+    MODEL_VERSION    VARCHAR,
+    NOTES            VARCHAR,
+    CONSTRAINT PK_PIXEL_VERDICT PRIMARY KEY (SOP_INSTANCE_UID),
+    CONSTRAINT CK_VERDICT CHECK (
+        VERDICT IN ('CLEAN', 'BURNED_IN_TEXT', 'REDACTED', 'UNREVIEWED', 'INDETERMINATE')),
+    CONSTRAINT CK_METHOD CHECK (
+        METHOD IN ('OCR', 'HUMAN', 'MODALITY_RULE', 'IMPORTED', 'NOT_REVIEWED'))
+)
+COMMENT = 'Voxel: per-instance burned-in-text verdict. Absence of a row means UNREVIEWED, which is NOT the same as clean.';
+
+-- =============================================================================
+-- Modality-based presumption
+--
+-- Some modalities essentially never burn text in (CT, MR from a scanner); some
+-- essentially always can (US, XC, OT, SC secondary capture, dose reports).
+--
+-- This is a PRESUMPTION, not a finding, and it is recorded as such via
+-- METHOD = 'MODALITY_RULE' so an auditor can tell the difference between "a model
+-- looked at these pixels" and "we assumed based on the modality". Conflating those
+-- two is how a de-identification claim becomes indefensible.
+--
+-- The presumption only ever makes things MORE restrictive: it can mark a modality
+-- as needing review, never as clean.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS MODALITY_PIXEL_RISK (
+    MODALITY   VARCHAR NOT NULL,
+    RISK       VARCHAR NOT NULL,
+    RATIONALE  VARCHAR,
+    CONSTRAINT PK_MODALITY_PIXEL_RISK PRIMARY KEY (MODALITY),
+    CONSTRAINT CK_RISK CHECK (RISK IN ('LOW', 'HIGH'))
+)
+COMMENT = 'Voxel: per-modality burned-in-text risk presumption. Only ever tightens; never asserts clean.';
+
+MERGE INTO MODALITY_PIXEL_RISK t USING (
+    SELECT * FROM VALUES
+    ('CT','LOW','Reconstructed tomographic data. Scanner annotation is carried in tags, not pixels.'),
+    ('MR','LOW','As CT.'),
+    ('PT','LOW','As CT.'),
+    ('NM','LOW','As CT.'),
+    ('CR','HIGH','Computed radiography frequently carries burned-in laterality and demographics.'),
+    ('DX','HIGH','As CR.'),
+    ('MG','HIGH','Mammography routinely burns in laterality and technique text.'),
+    ('US','HIGH','Ultrasound overlays name, MRN, and date directly into the image.'),
+    ('XA','HIGH','Angiography overlays acquisition parameters and often demographics.'),
+    ('RF','HIGH','As XA.'),
+    ('SC','HIGH','Secondary capture is a screenshot. Assume everything is burned in.'),
+    ('OT','HIGH','Other. Unclassifiable, so treated as high risk.'),
+    ('XC','HIGH','External camera capture. Photographs of documents or patients.'),
+    ('SR','HIGH','Structured report rendered to pixels contains narrative text.'),
+    ('DOC','HIGH','Encapsulated document. Assume text.')
+    AS v (MODALITY, RISK, RATIONALE)
+) s ON t.MODALITY = s.MODALITY
+WHEN NOT MATCHED THEN INSERT (MODALITY, RISK, RATIONALE)
+    VALUES (s.MODALITY, s.RISK, s.RATIONALE);
+
+-- =============================================================================
+-- Effective servability
+--
+-- Resolves catalog + verdict + modality presumption into ONE answer, so no
+-- consumer has to reimplement the precedence rules and get them subtly wrong.
+--
+-- Precedence, most restrictive first:
+--   1. explicit BURNED_IN_TEXT  -> never servable unidentified
+--   2. explicit CLEAN/REDACTED  -> servable
+--   3. no verdict + HIGH risk   -> not servable (default deny)
+--   4. no verdict + LOW risk    -> servable, but flagged as PRESUMED
+--
+-- Rule 4 is the pragmatic compromise that makes the system usable on a CT corpus
+-- without a review pass. It is called PRESUMED_CLEAN rather than CLEAN precisely
+-- so nobody can mistake it for a finding.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_PIXEL_SERVABILITY
+COMMENT = 'Voxel: resolves verdict + modality presumption into one servability answer. PRESUMED_CLEAN is not a finding.'
+AS
+SELECT
+    i.SOP_INSTANCE_UID,
+    i.SERIES_INSTANCE_UID,
+    i.STUDY_INSTANCE_UID,
+    i.MODALITY,
+    COALESCE(v.VERDICT, 'UNREVIEWED')       AS VERDICT,
+    COALESCE(v.METHOD,  'NOT_REVIEWED')     AS METHOD,
+    COALESCE(r.RISK,    'HIGH')             AS MODALITY_RISK,
+    CASE
+        WHEN COALESCE(v.VERDICT,'UNREVIEWED') = 'BURNED_IN_TEXT'   THEN 'BLOCKED'
+        WHEN COALESCE(v.VERDICT,'UNREVIEWED') = 'INDETERMINATE'    THEN 'BLOCKED'
+        WHEN COALESCE(v.VERDICT,'UNREVIEWED') IN ('CLEAN','REDACTED') THEN 'CLEARED'
+        WHEN COALESCE(r.RISK,'HIGH') = 'HIGH'                      THEN 'BLOCKED'
+        ELSE 'PRESUMED_CLEAN'
+    END                                      AS PIXEL_STATE,
+    CASE
+        WHEN COALESCE(v.VERDICT,'UNREVIEWED') IN ('CLEAN','REDACTED') THEN TRUE
+        WHEN COALESCE(v.VERDICT,'UNREVIEWED') = 'UNREVIEWED'
+             AND COALESCE(r.RISK,'HIGH') = 'LOW'                      THEN TRUE
+        ELSE FALSE
+    END                                      AS SERVABLE_UNIDENTIFIED,
+    v.CONFIDENCE,
+    v.MODEL_VERSION,
+    v.REVIEWED_AT
+FROM DICOM_INSTANCE i
+LEFT JOIN PIXEL_VERDICT v       ON v.SOP_INSTANCE_UID = i.SOP_INSTANCE_UID
+LEFT JOIN MODALITY_PIXEL_RISK r ON r.MODALITY = i.MODALITY;
+
+-- =============================================================================
+-- The projection policy
+--
+-- Applied to FILE_NAME, which is the column that turns catalog access into BYTE
+-- access. Blocking projection of the path is what stops a role from assembling
+-- its own retrieval outside the service.
+--
+-- ENFORCEMENT => FAIL, so a query that projects it without entitlement ERRORS.
+-- The alternative (a masked path string) would be silently written into a
+-- downstream manifest and fail much later, somewhere less diagnosable.
+--
+-- =============================================================================
+-- VOXEL_RADIOLOGIST IS ALLOWED, AND THAT IS NOT AN OVERSIGHT
+--
+-- The first version of this policy omitted VOXEL_RADIOLOGIST and BROKE THE VIEWER.
+-- The gateway resolves frames with queries.series_frame_plan, which selects
+-- i.FILE_NAME under CALLER's rights, so as soon as the policy attached, every
+-- frame request failed with:
+--
+--   391876: The following columns are restricted by a Projection Policy.
+--   Please remove them from the list of projected columns: FILE_NAME
+--
+-- Found by deploying phase 4 on top of phase 2 and running the query the gateway
+-- runs. It is worth being precise about what this policy therefore does and does
+-- not do:
+--
+--   PROTECTS AGAINST: a role with SELECT on the catalog -- an analyst, a data
+--     scientist, a BI tool, a notebook -- enumerating storage paths and building
+--     its own bulk export that bypasses the service entirely, and with it the
+--     row access policy, the audit trail, and the pixel verdict gate.
+--
+--   DOES NOT PROTECT AGAINST: the viewer role itself. VOXEL_RADIOLOGIST must
+--     resolve paths to display images. Its access is constrained by the ROW
+--     ACCESS POLICY (which studies) and the verdict gate (which pixels), not by
+--     this policy.
+--
+-- Stating the boundary rather than implying the policy is a total seal.
+--
+-- SCOPE LIMIT: a projection policy governs PROJECTION, not predicates. A role that
+-- cannot project FILE_NAME can still FILTER on it. So this prevents exfiltration
+-- by SELECT, not confirmation by probing.
+-- =============================================================================
+-- Detach before replacing, for the same reason as MASK_RAW_METADATA:
+--   Policy PROTECT_FILE_PATH cannot be dropped/replaced as it is associated with
+--   one or more entities.
+-- Conditional, so a first deploy does not fail trying to unset nothing.
+EXECUTE IMMEDIATE $$
+DECLARE
+    attached NUMBER DEFAULT 0;
+BEGIN
+    SELECT COUNT(*) INTO attached
+    FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+        REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+        REF_ENTITY_DOMAIN => 'TABLE'))
+    WHERE POLICY_KIND = 'PROJECTION_POLICY'
+      AND POLICY_NAME = 'PROTECT_FILE_PATH'
+      AND REF_COLUMN_NAME = 'FILE_NAME';
+
+    IF (attached > 0) THEN
+        ALTER TABLE {{ db }}.{{ schema }}.DICOM_INSTANCE
+          MODIFY COLUMN FILE_NAME UNSET PROJECTION POLICY;
+        RETURN 'detached PROTECT_FILE_PATH for replacement';
+    END IF;
+    RETURN 'no existing projection policy attachment; first deploy';
+END;
+$$;
+
+CREATE OR REPLACE PROJECTION POLICY PROTECT_FILE_PATH
+AS () RETURNS PROJECTION_CONSTRAINT ->
+    CASE
+        WHEN CURRENT_ROLE() IN (
+                '{{ owner_role }}',
+                'ACCOUNTADMIN',
+                'VOXEL_IDENTIFIED',
+                -- The viewer. See the note above: required for frame resolution.
+                'VOXEL_RADIOLOGIST')
+            THEN PROJECTION_CONSTRAINT(ALLOW => TRUE)
+        ELSE PROJECTION_CONSTRAINT(ALLOW => FALSE, ENFORCEMENT => 'FAIL')
+    END
+COMMENT = 'Voxel: blocks projection of the storage path for roles that are not the viewer or an identified role. FAIL not mask, so a research pipeline errors rather than recording a masked path.';
+
+ALTER TABLE DICOM_INSTANCE MODIFY COLUMN FILE_NAME
+  SET PROJECTION POLICY PROTECT_FILE_PATH FORCE;
+
+-- =============================================================================
+-- Lineage sweep
+--
+-- A policy on a base table is worth nothing if a view derived from it exposes the
+-- same column unprotected. Snowflake propagates masking policies through views,
+-- but a view that RENAMES or DERIVES a column can break the association -- and
+-- CREATE VIEW does not warn you.
+--
+-- This enumerates every object referencing the protected columns so the gap is
+-- discoverable by query rather than by incident.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_PHI_LINEAGE_SWEEP
+COMMENT = 'Voxel: every object referencing a PHI-bearing column, with whether a policy is attached. Rows with POLICY_ATTACHED = FALSE are the audit queue.'
+AS
+WITH protected AS (
+    SELECT REF_COLUMN_NAME AS COL, POLICY_NAME, POLICY_KIND
+    FROM TABLE({{ db }}.INFORMATION_SCHEMA.POLICY_REFERENCES(
+        REF_ENTITY_NAME => '{{ db }}.{{ schema }}.DICOM_INSTANCE',
+        REF_ENTITY_DOMAIN => 'TABLE'))
+    WHERE REF_COLUMN_NAME IS NOT NULL
+),
+phi_cols AS (
+    SELECT COLUMN_NAME
+    FROM {{ db }}.INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = '{{ schema }}'
+      AND TABLE_NAME = 'DICOM_INSTANCE'
+      AND (COLUMN_NAME IN ('PATIENT_ID','PATIENT_NAME','PATIENT_BIRTH_DATE',
+                           'ACCESSION_NUMBER','REFERRING_PHYSICIAN_NAME',
+                           'INSTITUTION_NAME','DEVICE_SERIAL_NUMBER',
+                           'RAW_METADATA','FILE_NAME'))
+)
+SELECT c.COLUMN_NAME,
+       p.POLICY_NAME,
+       p.POLICY_KIND,
+       (p.POLICY_NAME IS NOT NULL) AS POLICY_ATTACHED
+FROM phi_cols c
+LEFT JOIN protected p ON p.COL = c.COLUMN_NAME
+ORDER BY POLICY_ATTACHED, c.COLUMN_NAME;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT PIXEL_STATE,
+       COUNT(*) AS N_INSTANCES,
+       COUNT(DISTINCT SERIES_INSTANCE_UID) AS N_SERIES,
+       ANY_VALUE(MODALITY) AS SAMPLE_MODALITY
+FROM V_PIXEL_SERVABILITY
+GROUP BY PIXEL_STATE
+ORDER BY N_INSTANCES DESC;
+
+SELECT COLUMN_NAME, POLICY_KIND, POLICY_ATTACHED
+FROM V_PHI_LINEAGE_SWEEP
+ORDER BY POLICY_ATTACHED, COLUMN_NAME;
+
+SELECT COUNT(*) AS UNPROTECTED_PHI_COLUMNS
+FROM V_PHI_LINEAGE_SWEEP
+WHERE NOT POLICY_ATTACHED;

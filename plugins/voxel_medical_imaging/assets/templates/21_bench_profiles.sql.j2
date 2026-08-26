@@ -1,0 +1,307 @@
+-- =============================================================================
+-- 21: Bench profiles
+--
+-- The measurement apparatus. Produces per-run rows that are joined to the cost
+-- ledger to yield $/study, $/instance, files/sec, and $/month-at-zero-users.
+--
+-- =============================================================================
+-- DESIGN RULE: A BENCH RUN RECORDS WHAT IT MEASURED, NOT JUST THE RESULT
+--
+-- Every run captures warehouse size, batch limit, partition count, thread count,
+-- corpus size, and the ledger freshness at conclusion time. A benchmark number
+-- without its configuration is not reproducible, and a benchmark that is not
+-- reproducible does not survive a customer's own FinOps team re-running it --
+-- which is the only form of the claim that survives procurement.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA BENCH;
+
+CREATE TABLE IF NOT EXISTS BENCH_RUN (
+    RUN_ID           VARCHAR       DEFAULT UUID_STRING(),
+    PROFILE          VARCHAR       NOT NULL,   -- INGEST | ZERO_USER | FRAME | SEG
+    VARIANT_LABEL    VARCHAR,                  -- e.g. 'vectorized' vs 'scalar'
+    DEPLOYMENT_TAG   VARCHAR       DEFAULT '{{ cfg.deployment_tag }}',
+    STARTED_AT       TIMESTAMP_LTZ,
+    ENDED_AT         TIMESTAMP_LTZ,
+    -- Configuration that produced the number. See the design rule above.
+    --
+    -- WAREHOUSE_SIZE is the SIZE ('MEDIUM'), not the name. The first version stored
+    -- CURRENT_WAREHOUSE(), which returns the NAME -- so every row read
+    -- WAREHOUSE_SIZE = 'VOXEL_WH'. That is not a cosmetic mislabel: the deploy skill
+    -- forbids reporting a throughput number without its warehouse size, and this
+    -- column was the thing it was supposed to read. It went unnoticed because the
+    -- only deployment had one warehouse, so name and size were never compared.
+    -- Both are kept now, because attribution wants the name and the benchmark
+    -- claim wants the size.
+    WAREHOUSE_NAME   VARCHAR,
+    WAREHOUSE_SIZE   VARCHAR,
+    BATCH_LIMIT      NUMBER(38,0),
+    PARTITIONS       NUMBER(38,0),
+    IO_THREADS       NUMBER(38,0),
+    -- Workload volume, the denominator of every unit-economics figure.
+    FILES            NUMBER(38,0),
+    INSTANCES        NUMBER(38,0),
+    SERIES           NUMBER(38,0),
+    STUDIES          NUMBER(38,0),
+    FRAMES           NUMBER(38,0),
+    BYTES_READ       NUMBER(38,0),
+    ERRORS           NUMBER(38,0),
+    NOTES            VARCHAR,
+    CONSTRAINT PK_BENCH_RUN PRIMARY KEY (RUN_ID)
+)
+COMMENT = 'Voxel: one row per benchmark run, carrying the configuration that produced the number.';
+
+-- WAREHOUSE_NAME was added after the table shipped, and CREATE TABLE IF NOT EXISTS
+-- above is a NO-OP on an existing table -- it does not reconcile columns. Without
+-- this ALTER, a re-deploy over an existing BENCH_RUN leaves the column absent and
+-- SP_BENCH_INGEST fails on the next call with "invalid identifier
+-- 'WAREHOUSE_NAME'". Idempotent tables need idempotent MIGRATIONS too; the
+-- IF NOT EXISTS on the CREATE only makes the first deploy safe, not the second.
+ALTER TABLE BENCH_RUN ADD COLUMN IF NOT EXISTS WAREHOUSE_NAME VARCHAR;
+
+-- =============================================================================
+-- SP_BENCH_INGEST
+--
+-- Measures a full reprocess of everything currently catalogued, so the number is
+-- comparable run to run. Resets the manifest to NEW first, which also exercises
+-- the reprocess-delete path -- if that path is broken the benchmark surfaces it
+-- rather than measuring a no-op.
+--
+-- VARIANT_LABEL exists so the vectorized UDTF and the scalar control can be
+-- compared directly. Without a control, "the vectorized path is faster" is an
+-- assertion.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_BENCH_INGEST(P_VARIANT VARCHAR DEFAULT 'vectorized',
+                                            P_BATCH_LIMIT NUMBER DEFAULT {{ cfg.backfill_batch_limit }})
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Times a full reprocess and records a BENCH_RUN row. Also exercises the reprocess-delete path.'
+AS
+$$
+DECLARE
+    run_id   VARCHAR DEFAULT UUID_STRING();
+    t0       TIMESTAMP_LTZ;
+    n_files  NUMBER DEFAULT 0;
+    wh_name  VARCHAR;
+    wh_size  VARCHAR;
+    load_msg VARCHAR;
+BEGIN
+    SELECT COUNT(*) INTO n_files FROM {{ db }}.{{ schema }}.DICOM_FILE_MANIFEST;
+    IF (n_files = 0) THEN
+        RETURN 'Nothing to measure: manifest is empty. Run the backfill first.';
+    END IF;
+
+    -- Full reprocess so successive runs are comparable. Deliberately routed
+    -- through the same DELETE order the production path uses.
+    DELETE FROM {{ db }}.{{ schema }}.DICOM_FRAME_OFFSET;
+    DELETE FROM {{ db }}.{{ schema }}.DICOM_INSTANCE;
+    UPDATE {{ db }}.{{ schema }}.DICOM_FILE_MANIFEST
+       SET STATUS = 'NEW', LOADED_AT = NULL;
+    UPDATE {{ db }}.{{ schema }}.DICOM_LOAD_ERRORS
+       SET RESOLVED = TRUE WHERE NOT RESOLVED;
+
+    -- The SIZE, not the name. CURRENT_WAREHOUSE() returns the name, which is what
+    -- this used to record into WAREHOUSE_SIZE. SHOW + RESULT_SCAN is the only way to
+    -- reach the size from inside a procedure -- there is no INFORMATION_SCHEMA view
+    -- for warehouses. Must be the statement immediately before the RESULT_SCAN.
+    wh_name := CURRENT_WAREHOUSE();
+    SHOW WAREHOUSES LIKE :wh_name;
+    SELECT "size" INTO wh_size FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) LIMIT 1;
+
+    t0 := CURRENT_TIMESTAMP();
+
+    CALL {{ db }}.{{ schema }}.SP_LOAD_METADATA(:P_BATCH_LIMIT);
+    load_msg := (SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+
+    INSERT INTO BENCH_RUN
+        (RUN_ID, PROFILE, VARIANT_LABEL, STARTED_AT, ENDED_AT,
+         WAREHOUSE_NAME, WAREHOUSE_SIZE, BATCH_LIMIT, IO_THREADS,
+         FILES, INSTANCES, SERIES, STUDIES, FRAMES, BYTES_READ, ERRORS, NOTES)
+    SELECT
+        :run_id, 'INGEST', :P_VARIANT, :t0, CURRENT_TIMESTAMP(),
+        :wh_name, :wh_size, :P_BATCH_LIMIT, {{ cfg.udtf_io_threads }},
+        (SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_FILE_MANIFEST),
+        (SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE),
+        (SELECT COUNT(DISTINCT SERIES_INSTANCE_UID) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE),
+        (SELECT COUNT(DISTINCT STUDY_INSTANCE_UID) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE),
+        (SELECT SUM(COALESCE(NUMBER_OF_FRAMES,1)) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE),
+        -- Bytes READ is not bytes STORED. The handler reads only the header,
+        -- so charging it the full file size would overstate I/O by ~175x on this
+        -- corpus and understate the advantage being measured.
+        (SELECT SUM(PIXEL_DATA_START) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE),
+        (SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_LOAD_ERRORS WHERE NOT RESOLVED),
+        :load_msg;
+
+    RETURN 'BENCH_RUN ' || :run_id || ' (' || :P_VARIANT || '): ' || :load_msg;
+END;
+$$;
+
+-- =============================================================================
+-- SP_BENCH_ZERO_USER
+--
+-- THE HEADLINE NUMBER. Records an observation window during which no workload
+-- ran, so the cost attributable to simply HAVING the deployment can be read off
+-- the ledger.
+--
+-- This is the measurement that does not exist on the other side. The incumbent's steady
+-- state includes two always-on app services, a managed Postgres instance with
+-- a 0.5 CU floor
+-- whose entire job is holding integers, and a SQL Warehouse kept available --
+-- all billing with nobody logged in. Voxel's steady state is a suspended
+-- warehouse, two suspended compute pools, and suspended tasks.
+--
+-- Refuses to conclude while the ledger is still lagging (caveat 2 in
+-- 20_BENCH_LEDGER), because a premature read reports a misleadingly low number.
+-- =============================================================================
+CREATE OR REPLACE PROCEDURE SP_BENCH_ZERO_USER(P_WINDOW_HOURS NUMBER DEFAULT 24)
+RETURNS STRING
+LANGUAGE SQL
+COMMENT = 'Reports credits consumed over a window with no workload. Refuses to conclude while ACCOUNT_USAGE is still lagging.'
+AS
+$$
+DECLARE
+    max_lag  NUMBER DEFAULT 0;
+    credits  FLOAT  DEFAULT 0;
+    run_id   VARCHAR DEFAULT UUID_STRING();
+    t0       TIMESTAMP_LTZ;
+BEGIN
+    -- Gate on freshness. Concluding early is how you publish a retraction.
+    SELECT MAX(LAG_MINUTES) INTO max_lag
+    FROM V_COST_FRESHNESS
+    WHERE SRC IN ('WAREHOUSE_METERING_HISTORY',
+                  'SNOWPARK_CONTAINER_SERVICES_HISTORY',
+                  'SERVERLESS_TASK_HISTORY');
+
+    IF (max_lag > 180) THEN
+        RETURN 'INCONCLUSIVE: ledger lag is ' || max_lag::STRING
+            || ' minutes, beyond the documented 180-minute maximum. '
+            || 'Re-run once ACCOUNT_USAGE has caught up.';
+    END IF;
+
+    t0 := DATEADD('hour', -1 * :P_WINDOW_HOURS, CURRENT_TIMESTAMP());
+
+    SELECT COALESCE(SUM(CREDITS_TOTAL), 0) INTO credits
+    FROM V_COST_HOURLY WHERE HOUR_UTC >= :t0;
+
+    INSERT INTO BENCH_RUN
+        (RUN_ID, PROFILE, VARIANT_LABEL, STARTED_AT, ENDED_AT, FILES, INSTANCES, NOTES)
+    SELECT :run_id, 'ZERO_USER', 'idle', :t0, CURRENT_TIMESTAMP(), 0, 0,
+           'credits over ' || :P_WINDOW_HOURS::STRING || 'h idle window: ' || :credits::STRING
+           || ' | ledger lag ' || :max_lag::STRING || 'min';
+
+    RETURN 'ZERO_USER over ' || :P_WINDOW_HOURS::STRING || 'h: '
+        || ROUND(:credits, 6)::STRING || ' credits'
+        || ' (ledger lag ' || :max_lag::STRING || ' min). '
+        || 'Compare against V_COST_RATE for a currency figure.';
+END;
+$$;
+
+-- =============================================================================
+-- V_BENCH_UNIT_ECONOMICS
+--
+-- Joins each run to the credits consumed during ITS window, then divides by the
+-- volume that run actually processed. This is the $/study table.
+--
+-- Credits are attributed by TIME OVERLAP with the run window rather than by
+-- query tag, because compute-pool and serverless-task credits are reported per
+-- hour and cannot be attributed to an individual statement. The window is stated
+-- so the attribution method is auditable rather than implied.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_BENCH_UNIT_ECONOMICS AS
+WITH run_credits AS (
+    SELECT r.RUN_ID,
+           COALESCE(SUM(h.CREDITS_TOTAL), 0) AS CREDITS
+    FROM BENCH_RUN r
+    LEFT JOIN V_COST_HOURLY h
+           ON h.HOUR_UTC >= DATE_TRUNC('hour', r.STARTED_AT)
+          AND h.HOUR_UTC <= DATE_TRUNC('hour', r.ENDED_AT)
+    GROUP BY r.RUN_ID
+),
+rate AS (
+    SELECT AVG(RATE_PER_CREDIT) AS RATE_PER_CREDIT, ANY_VALUE(CURRENCY) AS CURRENCY
+    FROM V_COST_RATE
+    WHERE USAGE_DATE > DATEADD('day', -30, CURRENT_DATE())
+)
+SELECT
+    r.RUN_ID,
+    r.PROFILE,
+    r.VARIANT_LABEL,
+    r.WAREHOUSE_NAME,
+    -- Rows written before WAREHOUSE_NAME existed have a NAME in WAREHOUSE_SIZE,
+    -- because that is what the old code recorded. Surfacing it would present
+    -- 'VOXEL_WH' as a warehouse size to anyone reading a benchmark table, so those
+    -- rows report NULL instead: the value is not merely absent, it is known-wrong,
+    -- and the project's rule is that an honest NULL beats a plausible wrong value.
+    -- Backfilling a guessed size would be worse -- the whole point of recording
+    -- configuration alongside a number is that the number is reproducible.
+    IFF(r.WAREHOUSE_NAME IS NULL, NULL, r.WAREHOUSE_SIZE) AS WAREHOUSE_SIZE,
+    IFF(r.WAREHOUSE_NAME IS NULL,
+        'pre-migration row: warehouse size was not recorded', NULL) AS CONFIG_NOTE,
+    r.STARTED_AT,
+    DATEDIFF('millisecond', r.STARTED_AT, r.ENDED_AT) / 1000.0 AS ELAPSED_S,
+    r.FILES,
+    r.INSTANCES,
+    r.SERIES,
+    r.STUDIES,
+    r.ERRORS,
+    -- FILES_PER_SEC divides FILES. It used to divide INSTANCES, which is a different
+    -- claim: files/sec is an INGEST RATE against what was read off object storage,
+    -- instances/sec is an OUTPUT RATE against what was catalogued. They are equal
+    -- only when every file yields exactly one instance, which is true of this corpus
+    -- and is why the error was invisible -- 2,848 files produced 2,848 instances.
+    -- They diverge the moment a file is quarantined, is header-only, or is a
+    -- multi-frame object, and the published throughput figure is files/sec.
+    -- Both are emitted so the divergence is visible rather than inferred.
+    ROUND(r.FILES / NULLIF(DATEDIFF('millisecond', r.STARTED_AT, r.ENDED_AT) / 1000.0, 0), 1)
+        AS FILES_PER_SEC,
+    ROUND(r.INSTANCES / NULLIF(DATEDIFF('millisecond', r.STARTED_AT, r.ENDED_AT) / 1000.0, 0), 1)
+        AS INSTANCES_PER_SEC,
+    ROUND(c.CREDITS, 6) AS CREDITS,
+    -- Currency figures are NULL rather than fabricated when the rate view is not
+    -- readable. A made-up $/credit is worse than an honest NULL.
+    ROUND(c.CREDITS * rt.RATE_PER_CREDIT, 4)                          AS COST_TOTAL,
+    ROUND(c.CREDITS * rt.RATE_PER_CREDIT / NULLIF(r.STUDIES, 0), 6)   AS COST_PER_STUDY,
+    ROUND(c.CREDITS * rt.RATE_PER_CREDIT / NULLIF(r.SERIES, 0), 6)    AS COST_PER_SERIES,
+    ROUND(c.CREDITS * rt.RATE_PER_CREDIT / NULLIF(r.INSTANCES, 0), 8) AS COST_PER_INSTANCE,
+    rt.CURRENCY
+FROM BENCH_RUN r
+JOIN run_credits c ON c.RUN_ID = r.RUN_ID
+CROSS JOIN rate rt;
+
+-- =============================================================================
+-- V_BENCH_FRAME_PLANE_SAVINGS
+--
+-- Quantifies the sparse-frame-plane decision: how many offset rows a
+-- row-per-frame design (the incumbent) would have stored versus how many Voxel actually
+-- stores, and the implied cache footprint avoided.
+--
+-- 1.7 KB per entry is the incumbent's OWN documented per-entry cost for single-frame
+-- objects, so the comparison uses their number rather than one invented here.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_BENCH_FRAME_PLANE_SAVINGS AS
+SELECT
+    (SELECT SUM(COALESCE(NUMBER_OF_FRAMES,1)) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE)
+        AS FRAMES_IN_CORPUS,
+    (SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_FRAME_OFFSET)
+        AS OFFSET_ROWS_STORED,
+    (SELECT COUNT_IF(RESOLUTION = 'ARITHMETIC') FROM {{ db }}.{{ schema }}.V_FRAME_COVERAGE)
+        AS INSTANCES_NEEDING_NO_ROWS,
+    ROUND(100.0 * (1 - (SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_FRAME_OFFSET)
+          / NULLIF((SELECT SUM(COALESCE(NUMBER_OF_FRAMES,1))
+                    FROM {{ db }}.{{ schema }}.DICOM_INSTANCE), 0)), 2)
+        AS PCT_OFFSET_ROWS_AVOIDED,
+    ROUND((SELECT SUM(COALESCE(NUMBER_OF_FRAMES,1)) FROM {{ db }}.{{ schema }}.DICOM_INSTANCE)
+          * 1.7 / 1024, 2)
+        AS PIXELS_EQUIV_CACHE_MB,
+    ROUND((SELECT COUNT(*) FROM {{ db }}.{{ schema }}.DICOM_FRAME_OFFSET) * 12.0 / 1048576, 4)
+        AS VOXEL_PACKED_ARRAY_MB,
+    'The incumbent documents ~1.7 KB per cache entry for single-frame objects; Voxel packs '
+    || '12 bytes per frame (uint64 offset + uint32 length) and stores nothing at all '
+    || 'for native uncompressed syntaxes.' AS METHOD_NOTE;
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT * FROM V_BENCH_FRAME_PLANE_SAVINGS;
+SELECT COUNT(*) AS BENCH_RUNS FROM BENCH_RUN;

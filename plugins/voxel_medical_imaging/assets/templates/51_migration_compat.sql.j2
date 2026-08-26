@@ -1,0 +1,154 @@
+-- =============================================================================
+-- 51: Migration compatibility view
+--
+-- Exposes the Voxel catalog under the same column names and the same VARIANT
+-- model an existing incumbent deployment uses, so migration is a view
+-- swap plus a mechanical syntax rewrite rather than a full re-ingest.
+--
+-- =============================================================================
+-- WHY THIS IS CHEAP TO PROVIDE, AND WHERE THE LIMIT IS
+--
+-- Migration cost is the strongest argument an incumbent has. A customer already
+-- on the incumbent has a `meta VARIANT` column holding the DICOM JSON model keyed by
+-- 8-hex-digit tag.
+--
+-- Voxel's RAW_METADATA IS ALREADY THAT MODEL. That was a deliberate choice in
+-- the extraction UDTF -- it builds the DICOM JSON model rather than the
+-- keyword-keyed dict the reference Snowflake plugin used. Two payoffs:
+--   1. QIDO-RS responses are specified in this form, so the DICOMweb layer needs
+--      no translation.
+--   2. This compatibility view is a projection, not a rewrite.
+--
+-- =============================================================================
+-- BE PRECISE ABOUT WHAT TRANSFERS AND WHAT DOES NOT
+--
+-- The DATA MODEL transfers exactly. The PATH SYNTAX does not, and claiming
+-- otherwise would not survive first contact. Verified on this deployment:
+--
+--     meta:['00080060']   incumbent form -> Snowflake: SQL compilation error,
+--                                            "syntax error ... unexpected '['"
+--     meta['00080060']    Snowflake       -> works
+--     meta:"00080060"     Snowflake       -> works
+--
+-- So migration is a MECHANICAL FIND-REPLACE, not a re-model:
+--
+--     meta:['<tag>']   ->   meta['<tag>']          (delete one colon)
+--
+-- Stating it this way is the right trade. The expensive part of a migration is
+-- re-ingesting a multi-terabyte corpus and re-deriving every frame offset -- and
+-- that is exactly what does NOT have to happen, because the VARIANT contents are
+-- the same model. Rewriting a colon in a WHERE clause is a sed script.
+--
+-- Claiming "your queries run unchanged" would be disproved by the first person
+-- who tried it, and would cost more credibility than the accurate claim buys.
+--
+-- =============================================================================
+-- WHAT IS DELIBERATELY DIFFERENT
+--
+-- The incumbent's object_catalog is FILE-centric: one row per file, with path_tags
+-- derived by regex from the last five path segments. Voxel is INSTANCE-centric,
+-- keyed on SOPInstanceUID. The view bridges this by emitting one row per
+-- instance with both the path columns the incumbent queries and the UID columns
+-- DICOMweb needs.
+--
+-- path_tags is reproduced because `array_contains(path_tags, 'patient5397')` is a
+-- real query shape in incumbent notebooks. It is regex-derived there and regex-
+-- derived here, with the same limitation: it is a convenience index over the
+-- path, not governed metadata.
+--
+-- NOTE ON MASKING: this view inherits the masking policies on DICOM_INSTANCE for
+-- the typed columns, but `meta` is RAW_METADATA and therefore UNMASKED in phase
+-- 1 -- the same gap CHECKS reports as PHI_RAW_METADATA_UNMASKED. A customer
+-- migrating onto this view inherits the incumbent's PHI posture exactly, which is
+-- honest, and the deid phase then improves on it.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+CREATE OR REPLACE VIEW V_OBJECT_CATALOG
+COMMENT = 'Migration-compatible projection of DICOM_INSTANCE. Same column names and same DICOM JSON VARIANT model, so migration needs no re-ingest -- only a meta:[X] -> meta[X] syntax rewrite.'
+AS
+SELECT
+    -- --- Incumbent object_catalog column names, same semantics ----------------
+    i.FILE_NAME                                   AS path,
+    i.FILE_NAME                                   AS relative_path,
+    i.FILE_NAME                                   AS local_path,
+    i.FILE_SIZE                                   AS length,
+    i.LOADED_AT                                   AS modificationTime,
+    'dcm'                                         AS extension,
+    'DICOM'                                       AS file_type,
+    FALSE                                         AS is_anon,
+
+    -- path_tags: last 5 path segments split on the same delimiter class the incumbent
+    -- uses ([_./:@]), so array_contains(path_tags, '<something>') behaves the
+    -- same way.
+    ARRAY_COMPACT(SPLIT(
+        REGEXP_REPLACE(i.FILE_NAME, '[_./:@]', ' '), ' '))
+                                                  AS path_tags,
+
+    -- THE column that makes migration a view swap. Already the DICOM JSON model.
+    i.RAW_METADATA                                AS meta,
+
+    -- --- Voxel additions the incumbent has no equivalent for ----------------------
+    -- Exposed so a migrating customer can adopt them incrementally rather than
+    -- having to choose between compatibility and the new capabilities.
+    i.SOP_INSTANCE_UID,
+    i.SERIES_INSTANCE_UID,
+    i.STUDY_INSTANCE_UID,
+    i.TRANSFER_SYNTAX_UID,
+    i.PIXEL_DATA_START,
+    COALESCE(i.NUMBER_OF_FRAMES, 1)               AS num_frames,
+    i.SOURCE_NAME,
+    i.FILE_MD5,
+    '{{ db }}.{{ schema }}.DICOM_INSTANCE'         AS uc_table_name
+FROM DICOM_INSTANCE i;
+
+-- =============================================================================
+-- V_INSTANCE_PATHS
+--
+-- Direct equivalent of the incumbent's instance_paths_vw, which is the flattening
+-- contract between their lakehouse and their serving tier. Reproduced so a
+-- migrating deployment can point its existing DICOMweb gateway at Voxel data
+-- before switching gateways -- i.e. the two stacks can run side by side on the
+-- same corpus rather than requiring a flag day.
+--
+-- The incumbent derives every column with a VARIANT path extract and then dedupes with
+-- QUALIFY ROW_NUMBER() because their catalog can hold two rows for one file.
+-- Here the columns are already typed and SOP_INSTANCE_UID is unique by
+-- construction (asserted as CONFIG_0002_UID_UNIQUENESS in CHECKS), so no dedupe
+-- is needed -- but the QUALIFY is retained as a no-op guard so behaviour matches
+-- even if a future source violates it.
+-- =============================================================================
+CREATE OR REPLACE VIEW V_INSTANCE_PATHS
+COMMENT = 'Equivalent of the incumbent''s instance_paths_vw. Lets an existing DICOMweb gateway read Voxel data during a side-by-side migration.'
+AS
+SELECT
+    i.SOP_INSTANCE_UID                  AS sop_instance_uid,
+    i.STUDY_INSTANCE_UID                AS study_instance_uid,
+    i.SERIES_INSTANCE_UID               AS series_instance_uid,
+    i.FILE_NAME                         AS local_path,
+    COALESCE(i.NUMBER_OF_FRAMES, 1)     AS num_frames,
+    i.TRANSFER_SYNTAX_UID               AS transfer_syntax_uid,
+    i.PIXEL_DATA_START                  AS pixel_data_pos,
+    '{{ db }}.{{ schema }}.DICOM_INSTANCE' AS uc_table_name
+FROM DICOM_INSTANCE i
+WHERE i.SOP_INSTANCE_UID IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (PARTITION BY i.SOP_INSTANCE_UID ORDER BY i.FILE_NAME) = 1;
+
+-- -----------------------------------------------------------------------------
+-- Verify: a genuine incumbent-shaped query, in Snowflake path syntax.
+--
+-- Same column name, same VARIANT model, same tag keys. The only difference from
+-- the customer's existing incumbent query is the deleted colon -- see the header.
+-- -----------------------------------------------------------------------------
+SELECT
+    meta['00080060'].Value[0]::STRING AS modality,
+    meta['00080070'].Value[0]::STRING AS manufacturer,
+    COUNT(*)                          AS instances
+FROM V_OBJECT_CATALOG
+GROUP BY 1, 2
+ORDER BY instances DESC
+LIMIT 10;
+
+SELECT COUNT(*) AS INSTANCE_PATHS FROM V_INSTANCE_PATHS;

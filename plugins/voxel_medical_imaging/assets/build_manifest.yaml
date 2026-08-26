@@ -1,0 +1,279 @@
+version: 1
+# Build manifest for Voxel -- a Snowflake-native medical imaging platform.
+#
+# Rendered by assets/renderer/render.py against a per-customer config.json, then
+# executed by the skills in the order below.
+#
+# Keys per object:
+#   object_name  the rendered filename (<object_name>.sql unless out_file is set)
+#   template     the Jinja source in assets/templates/
+#   phase        account | core | pipeline | bench | dicomweb | seg | deid
+#                | conformance | validate | teardown
+#   role         the Snowflake role that must run it
+#   depends_on   ordering (this DAG is linear, so the numbering already encodes it)
+#   enabled_if   optional config flag; when false the object is skipped entirely
+#   out_file     override when the artifact is not .sql (spec.yaml, nginx.conf)
+#
+# ORDERING IS ENCODED IN THE FILENAMES, deliberately, matching the convention in
+# dicom_imaging_intelligence and maude. The pipeline is linear.
+#
+# NUMBERING NOTE: reference data (04, 05) is created BEFORE the UDFs (06) and
+# before the procedures (11), because SP_LOAD_METADATA writes to
+# DICOM_FRAME_OFFSET and reads DICOM_CAPABILITY on every batch. Creating the
+# procedure first would succeed -- Snowflake does not validate table references
+# at procedure creation -- and then fail at the first call, which is a worse
+# place to find out.
+
+objects:
+  # --- phase: account (ACCOUNTADMIN) ---------------------------------------
+  # Split out because compute pools, image repositories, network rules, and
+  # external access integrations cannot be created by SYSADMIN. This is the one
+  # phase a customer may have to hand to a platform admin.
+  - object_name: 00_ACCOUNT_SETUP
+    object_type: script
+    template: 00_account_setup.sql.j2
+    phase: account
+    role: ACCOUNTADMIN
+    grain: "warehouse, db/schema with ownership handed to owner_role, web + GPU compute pools, image repository, build-only network rule + EAI"
+    depends_on: []
+
+  # --- phase: core (owner_role) --------------------------------------------
+  - object_name: 01_DATABASE_SCHEMA
+    object_type: script
+    template: 01_database_schema.sql.j2
+    phase: core
+    role: owner_role
+    grain: "database + schema (idempotent; 00 already created them)"
+    depends_on: [00_ACCOUNT_SETUP]
+
+  - object_name: 02_STAGES
+    object_type: script
+    template: 02_stages.sql.j2
+    phase: core
+    role: owner_role
+    # Two stages, deliberately. The external stage carries the ingest-scale
+    # story. The internal stage exists because SPCS stage volumes mount
+    # INTERNAL stages only, so the pread frame-serving path in the dicomweb
+    # phase cannot reach a public S3 bucket. See the template header.
+    grain: "external stage to the public IDC bucket + internal stage for the SPCS pread path. Directory tables deliberately disabled."
+    depends_on: [01_DATABASE_SCHEMA]
+
+  - object_name: 03_TABLES_CATALOG
+    object_type: script
+    template: 03_tables_catalog.sql.j2
+    phase: core
+    role: owner_role
+    grain: "DICOM_INSTANCE -- the flattened per-instance catalog plus RAW_METADATA VARIANT"
+    depends_on: [01_DATABASE_SCHEMA]
+
+  # Reference data comes BEFORE the frame plane: V_FRAME_COVERAGE joins
+  # DICOM_CAPABILITY to decide whether an instance needs stored offsets at all,
+  # and CREATE VIEW validates its references at creation time.
+  - object_name: 04_REFERENCE_DATA
+    object_type: script
+    template: 04_reference_data.sql.j2
+    phase: core
+    role: owner_role
+    grain: "DICOM_CAPABILITY (transfer syntax support, encapsulation flag, size ceilings) and DICOM_ERROR_CATALOG (stable error codes), both seeded"
+    depends_on: [01_DATABASE_SCHEMA]
+
+  - object_name: 05_FRAME_PLANE
+    object_type: script
+    template: 05_frame_plane.sql.j2
+    phase: core
+    role: owner_role
+    # Standard table, NOT a hybrid table. Hybrid tables cap at ~16k ops/sec and
+    # 2 TB per database, support no Streams/Dynamic Tables/Snowpipe, disable the
+    # results cache, and their published XSMALL benchmark tails to 1535 ms. A
+    # 1.5 s tail on a per-frame lookup is a visibly janky scroll. The frame
+    # server holds an in-process offset manifest per series instead.
+    grain: "DICOM_FRAME_OFFSET (PK on SOP_INSTANCE_UID, FRAME_NUMBER, encapsulated files only) + V_FRAME_COVERAGE"
+    depends_on: [03_TABLES_CATALOG, 04_REFERENCE_DATA]
+
+  - object_name: 06_UDFS
+    object_type: script
+    template: 06_udfs.sql.j2
+    phase: core
+    role: owner_role
+    grain: "EXTRACT_DICOM_HEADER_AND_FRAMES (vectorized UDTF), EXTRACT_DICOM_METADATA (scalar, kept for A/B), RENDER_DICOM_SLICE"
+    depends_on: [04_REFERENCE_DATA]
+
+  - object_name: 07_MASKING_POLICIES
+    object_type: script
+    template: 07_masking_policies.sql.j2
+    phase: core
+    role: owner_role
+    # Phase 1 masks the typed identifier columns. It does NOT yet mask
+    # RAW_METADATA, which is a known gap closed in the deid phase: a policy on
+    # PATIENT_NAME while RAW_METADATA:"0010,0010" returns cleartext fails review
+    # in one query. The gap is asserted as a WARN in CHECKS so it cannot be
+    # forgotten.
+    grain: "PHI_MASK + assignment to DICOM_INSTANCE identifier columns"
+    depends_on: [03_TABLES_CATALOG]
+
+  # --- phase: pipeline (owner_role) ----------------------------------------
+  - object_name: 10_PIPELINE_CONFIG
+    object_type: script
+    template: 10_pipeline_config.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "source config + prefixes, DICOM_FILE_MANIFEST state machine, DICOM_LOAD_ERRORS quarantine, series registry"
+    depends_on: [05_FRAME_PLANE]
+
+  - object_name: 11_PIPELINE_PROCEDURES
+    object_type: script
+    template: 11_pipeline_procedures.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "SP_SCAN_ALL_SOURCES (Python; LIST is rejected in SQL procs) + SP_LOAD_METADATA + registry/reconcile/resume/suspend"
+    depends_on: [10_PIPELINE_CONFIG, 06_UDFS]
+
+  - object_name: 12_PIPELINE_TASKS
+    object_type: script
+    template: 12_pipeline_tasks.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "serverless task DAG + monitoring views. Every task created SUSPENDED."
+    depends_on: [11_PIPELINE_PROCEDURES]
+
+  - object_name: 13_INITIAL_BACKFILL
+    object_type: script
+    template: 13_initial_backfill.sql.j2
+    phase: pipeline
+    role: owner_role
+    grain: "one synchronous pass through the same procedures the DAG calls, plus the pread-stage subset COPY"
+    depends_on: [12_PIPELINE_TASKS]
+
+  # --- phase: bench (owner_role) -------------------------------------------
+  # Deliberately its own phase, and deliberately NOT dropped by teardown. The
+  # headline compete number is post-teardown residual cost, which cannot be
+  # measured by a ledger that teardown deleted.
+  - object_name: 20_BENCH_LEDGER
+    object_type: script
+    template: 20_bench_ledger.sql.j2
+    phase: bench
+    role: owner_role
+    grain: "object tagging + the hourly credit/currency derivation over ACCOUNT_USAGE, with the billed-vs-consumed distinction encoded"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  - object_name: 21_BENCH_PROFILES
+    object_type: script
+    template: 21_bench_profiles.sql.j2
+    phase: bench
+    role: owner_role
+    grain: "BENCH_RUN + BENCH_OBSERVATION, SP_BENCH_INGEST, SP_BENCH_ZERO_USER, and the unit-economics views"
+    depends_on: [20_BENCH_LEDGER]
+
+  # --- phase: validate ------------------------------------------------------
+  - object_name: CHECKS
+    object_type: script
+    template: checks.sql.j2
+    phase: validate
+    role: owner_role
+    grain: "PASS/FAIL/WARN row per invariant, including frame-offset reconciliation and the RAW_METADATA masking gap"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: teardown ------------------------------------------------------
+  # Its own phase so no deploy path can reach it. Inert until confirmed = TRUE.
+  # Verifies by re-enumerating after dropping and failing loudly on survivors --
+  # the thing `bundle destroy` does not do.
+  - object_name: TEARDOWN
+    object_type: script
+    template: teardown.sql.j2
+    phase: teardown
+    role: ACCOUNTADMIN
+    grain: "drops db, pools, image repo, EAI, network rule; then re-enumerates and reports RESIDUAL rows"
+    depends_on: []
+
+  # =========================================================================
+  # PHASE 2+ STUBS
+  # Declared now so the manifest shape and skill wiring are settled before code
+  # lands in them. Each stub renders to a file that is safe to execute and
+  # prints what it will become. Phase 1 measurement gates all of them.
+  # =========================================================================
+
+  # --- phase: dicomweb ------------------------------------------------------
+  # ONE service, MULTIPLE containers, EXACTLY ONE public endpoint.
+  # Containers in a service instance talk over localhost with no endpoint
+  # declared. Each PUBLIC endpoint gets its own allocated hostname, so a second
+  # public endpoint would reintroduce cross-origin and the proxy's baseline CSP
+  # (connect-src 'self') would hard-block the SPA's fetch to the gateway.
+  # An SPCS GATEWAY object cannot be used here: it supports neither caller's
+  # rights nor CORS/CSP headers, and executeAsCaller is load-bearing for the
+  # per-user row-access story.
+  - object_name: DICOMWEB_SPEC
+    object_type: config
+    template: dicomweb_spec_yaml.j2
+    out_file: dicomweb_spec.yaml
+    phase: dicomweb
+    role: owner_role
+    grain: "multi-container service spec: nginx router (single public endpoint) + pydicom gateway on localhost + shared memory volume + stage volume"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  - object_name: DICOMWEB_NGINX
+    object_type: config
+    template: dicomweb_nginx_conf.j2
+    out_file: nginx.conf
+    phase: dicomweb
+    role: owner_role
+    # The router MUST forward Sf-Context-Current-User-Token to the gateway. If
+    # it drops it, the gateway silently falls back to owner rights and every row
+    # access policy quietly passes -- a security failure with no error. The
+    # dicomweb-deploy skill asserts this behaviorally with two users.
+    grain: "nginx: serve OHIF static at /, proxy /dicom-web/* to localhost:8080, forward Sf-Context-* headers verbatim"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  - object_name: DICOMWEB_GRANTS
+    object_type: script
+    template: dicomweb_grants.sql.j2
+    phase: dicomweb
+    role: owner_role
+    grain: "restricted caller's rights grants (GRANT CALLER / GRANT INHERITED CALLER) + service roles"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: seg -----------------------------------------------------------
+  - object_name: 30_SEGMENTATION
+    object_type: script
+    template: 30_segmentation.sql.j2
+    phase: seg
+    role: owner_role
+    grain: "Vista3D model registry service, SEGMENTATION_QUEUE, DICOM-SEG writeback tables, queue-depth batch trigger"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  # --- phase: deid ----------------------------------------------------------
+  - object_name: 40_DEID_TAG_PLANE
+    object_type: script
+    template: 40_deid_tag_plane.sql.j2
+    phase: deid
+    role: owner_role
+    grain: "DICOM_TAG_POLICY, VARIANT masking policy via OBJECT_INSERT UDF, format-preserving UID encryption"
+    depends_on: [07_MASKING_POLICIES]
+
+  - object_name: 41_DEID_PIXEL_PLANE
+    object_type: script
+    template: 41_deid_pixel_plane.sql.j2
+    phase: deid
+    role: owner_role
+    grain: "PIXEL_PHI_VERDICT gate, projection policies with ENFORCEMENT => FAIL on preview/embedding/mask columns, lineage policy sweep"
+    depends_on: [40_DEID_TAG_PLANE]
+
+  # --- phase: conformance ---------------------------------------------------
+  - object_name: 50_CONFORMANCE
+    object_type: script
+    template: 50_conformance.sql.j2
+    phase: conformance
+    role: owner_role
+    grain: "CONFORMANCE_RESULT table + the per-transfer-syntax pass/fail matrix view the dcm4che suite writes into"
+    depends_on: [13_INITIAL_BACKFILL]
+
+  - object_name: 51_MIGRATION_COMPAT
+    object_type: script
+    template: 51_migration_compat.sql.j2
+    phase: conformance
+    role: owner_role
+    # Exposes the catalog under the incumbent's hex-tag access pattern
+    # (meta:['00100010'].Value[0]::STRING) so an existing incumbent customer's
+    # queries and notebooks keep working. Cutover becomes a view swap, not a
+    # full re-ingest.
+    grain: "V_OBJECT_CATALOG -- incumbent-compatible meta VARIANT projection for migration"
+    depends_on: [03_TABLES_CATALOG]

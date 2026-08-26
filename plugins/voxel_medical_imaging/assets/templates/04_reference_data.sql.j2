@@ -1,0 +1,252 @@
+-- =============================================================================
+-- 04: Reference data
+--
+-- Two seeded tables that the pipeline consults on every batch:
+--
+--   DICOM_CAPABILITY     what we can parse, what needs stored frame offsets,
+--                        and how large an object of each class may be
+--   DICOM_ERROR_CATALOG  stable error codes with a retry decision attached
+--
+-- Both are reference data, created before the UDFs and procedures that read
+-- them. Seeded with MERGE rather than INSERT so a re-run does not duplicate and
+-- does not clobber a customer's local edits to MAX_OBJECT_BYTES.
+-- =============================================================================
+
+USE DATABASE {{ db }};
+USE SCHEMA {{ schema }};
+
+-- =============================================================================
+-- DICOM_CAPABILITY
+--
+-- Consulted on a CHEAP HEADER-ONLY read, BEFORE any attempt at full pixel
+-- decode. This ordering is the entire point of the table.
+--
+-- Without it, a site that upgrades a modality and starts emitting HTJ2K, or a
+-- 4 GB whole-slide image arriving on the shared parse path, surfaces as either
+-- a decode exception buried in a quarantine row or a container OOM that cycles
+-- the service and takes down studies that WERE working. The operator's first
+-- signal is an unrelated outage.
+--
+-- With it, novel input becomes a countable CAPABILITY-* row with an owner, and
+-- an oversized object is routed away from the shared path rather than allowed
+-- to exhaust it.
+--
+-- IS_ENCAPSULATED is the column the frame plane actually turns on:
+--   FALSE -> pixel data is a single contiguous native block, so frame offsets
+--            are closed-form arithmetic and NO offset rows are stored at all.
+--   TRUE  -> pixel data is encapsulated in (FFFE,E000) items, so offsets must
+--            be discovered (Extended Offset Table, else an item-header scan)
+--            and persisted.
+--
+-- Deflated Explicit VR (1.2.840.10008.1.2.1.99) is marked IS_ENCAPSULATED =
+-- TRUE even though its pixel data is nominally native. The whole DATASET is
+-- deflate-compressed, so byte offsets into the decompressed stream are not
+-- offsets into the file, and the closed-form formula would produce confidently
+-- wrong offsets -- which serves the wrong pixels at HTTP 200. Forcing it down
+-- the discovery path is the safe classification.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DICOM_CAPABILITY (
+    TRANSFER_SYNTAX_UID   VARCHAR       NOT NULL,
+    SYNTAX_NAME           VARCHAR,
+    IS_ENCAPSULATED       BOOLEAN       NOT NULL,
+    PARSE_SUPPORTED       BOOLEAN       NOT NULL,
+    FRAMES_SERVABLE       BOOLEAN       NOT NULL,
+    TRANSCODE_SUPPORTED   BOOLEAN       DEFAULT FALSE,
+    MAX_OBJECT_BYTES      NUMBER(38,0),
+    NOTES                 VARCHAR,
+    CONSTRAINT PK_DICOM_CAPABILITY PRIMARY KEY (TRANSFER_SYNTAX_UID)
+)
+COMMENT = 'Voxel: transfer-syntax capability matrix. Consulted on a header-only read before full decode so an unsupported syntax or oversized object is catalogued, not fatal.';
+
+MERGE INTO DICOM_CAPABILITY t
+USING (
+    SELECT * FROM VALUES
+      -- uid, name, encapsulated, parse, servable, transcode, max_bytes, notes
+      ('1.2.840.10008.1.2',        'Implicit VR Little Endian',        FALSE, TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Native. Closed-form frame offsets, no stored rows.'),
+      ('1.2.840.10008.1.2.1',      'Explicit VR Little Endian',        FALSE, TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Native. Closed-form frame offsets, no stored rows. Most common in IDC CT/MR.'),
+      ('1.2.840.10008.1.2.2',      'Explicit VR Big Endian',           FALSE, TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Native, retired but still present in older archives. Byte order handled by pydicom.'),
+      ('1.2.840.10008.1.2.1.99',   'Deflated Explicit VR LE',          TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Whole DATASET is deflated, so file byte offsets are meaningless. Forced down the discovery path deliberately -- closed-form here would serve wrong pixels at HTTP 200.'),
+      ('1.2.840.10008.1.2.5',      'RLE Lossless',                     TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. Offsets from EOT or item scan.'),
+      ('1.2.840.10008.1.2.4.50',   'JPEG Baseline 8-bit',              TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. Browser decodes natively.'),
+      ('1.2.840.10008.1.2.4.51',   'JPEG Extended 12-bit',             TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. 12-bit needs a WASM decoder in the viewer.'),
+      ('1.2.840.10008.1.2.4.57',   'JPEG Lossless Non-Hierarchical',   TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. Requires pylibjpeg for server-side decode.'),
+      ('1.2.840.10008.1.2.4.70',   'JPEG Lossless SV1',                TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. Requires pylibjpeg for server-side decode.'),
+      ('1.2.840.10008.1.2.4.80',   'JPEG-LS Lossless',                 TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. charls in the viewer, pylibjpeg server-side.'),
+      ('1.2.840.10008.1.2.4.81',   'JPEG-LS Near-Lossless',            TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated.'),
+      ('1.2.840.10008.1.2.4.90',   'JPEG 2000 Lossless',               TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. Needs pylibjpeg-openjpeg server-side.'),
+      ('1.2.840.10008.1.2.4.91',   'JPEG 2000 Lossy',                  TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated.'),
+      ('1.2.840.10008.1.2.4.201',  'HTJ2K Lossless',                   TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated. RPCL progressive order -- the viewer can paint low-res passes as bytes arrive.'),
+      ('1.2.840.10008.1.2.4.202',  'HTJ2K Lossless RPCL',              TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated.'),
+      ('1.2.840.10008.1.2.4.203',  'HTJ2K',                            TRUE,  TRUE,  TRUE,  FALSE, {{ cfg.max_object_bytes }}, 'Encapsulated.')
+    AS v(TRANSFER_SYNTAX_UID, SYNTAX_NAME, IS_ENCAPSULATED, PARSE_SUPPORTED, FRAMES_SERVABLE, TRANSCODE_SUPPORTED, MAX_OBJECT_BYTES, NOTES)
+) s
+ON t.TRANSFER_SYNTAX_UID = s.TRANSFER_SYNTAX_UID
+-- Deliberately no UPDATE clause. A re-deploy must not silently reset a
+-- MAX_OBJECT_BYTES a customer raised for whole-slide imaging, or flip a
+-- FRAMES_SERVABLE they turned off after a bad experience with a syntax.
+WHEN NOT MATCHED THEN INSERT
+    (TRANSFER_SYNTAX_UID, SYNTAX_NAME, IS_ENCAPSULATED, PARSE_SUPPORTED, FRAMES_SERVABLE, TRANSCODE_SUPPORTED, MAX_OBJECT_BYTES, NOTES)
+    VALUES
+    (s.TRANSFER_SYNTAX_UID, s.SYNTAX_NAME, s.IS_ENCAPSULATED, s.PARSE_SUPPORTED, s.FRAMES_SERVABLE, s.TRANSCODE_SUPPORTED, s.MAX_OBJECT_BYTES, s.NOTES);
+
+
+-- =============================================================================
+-- DICOM_ERROR_CATALOG
+--
+-- Stable codes, grouped by CLASS, because THE CLASS DETERMINES THE RESPONSE.
+-- That grouping is the whole value: it is what stops a GPU capacity shortage
+-- from looking like a corrupt-data incident, and stops a config typo from
+-- being retried 3 times before anyone notices.
+--
+--   DATA-*        bad bytes. Not our fault. Never retry. Quarantine.
+--   CAPACITY-*    the environment said no. Retry later. Do NOT quarantine the
+--                 file -- nothing is wrong with it.
+--   CONFIG-*      a human misconfigured something. Never retry. Page.
+--   CAPABILITY-*  we do not support this yet. That is a product fact, not an
+--                 incident. Digest, do not page.
+--   INVARIANT-*   internal consistency violated. This is the class that catches
+--                 the failures which produce NO ERROR AT ALL.
+--
+-- This table replaces the reference plugin's poisoned-cell pattern, where a
+-- parse failure was written into the metadata VARIANT as {'ERROR': ...}. Under
+-- that pattern the job is green, the bad file is invisible unless somebody
+-- thinks to query for it, nothing pages, and the failure count is unknown.
+-- Here every failure is a row with a code, so COUNT(*) GROUP BY ERR_CODE is a
+-- working SLO.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS DICOM_ERROR_CATALOG (
+    ERR_CODE       VARCHAR      NOT NULL,
+    ERR_CLASS      VARCHAR      NOT NULL,
+    SEVERITY       VARCHAR      NOT NULL,   -- PAGE | ALERT | DIGEST
+    RETRYABLE      BOOLEAN      NOT NULL,
+    QUARANTINE     BOOLEAN      NOT NULL,
+    LIKELY_CAUSE   VARCHAR,
+    RUNBOOK_STEP   VARCHAR,
+    CONSTRAINT PK_DICOM_ERROR_CATALOG PRIMARY KEY (ERR_CODE)
+)
+COMMENT = 'Voxel: stable error codes with a retry/quarantine/severity decision attached. Replaces the poisoned-cell pattern so failures are countable.';
+
+MERGE INTO DICOM_ERROR_CATALOG t
+USING (
+    SELECT * FROM VALUES
+      -- ---------------------------------------------------------------------
+      -- DATA: the bytes are bad. Retrying re-reads the same bad bytes.
+      -- ---------------------------------------------------------------------
+      ('DATA-0001', 'DATA', 'DIGEST', FALSE, TRUE,
+       'File has no DICM preamble or is not DICOM at all.',
+       'Expected for non-DICOM files swept up by a broad FILE_PATTERN. Narrow the pattern in DICOM_SOURCE_PREFIX.'),
+      ('DATA-0002', 'DATA', 'ALERT', FALSE, TRUE,
+       'Truncated file: header parsed but pixel data is short or absent.',
+       'Check the upstream transfer. If the source is mid-upload, SP_RECONCILE_DELETES will pick up the completed file on the next scan.'),
+      ('DATA-0003', 'DATA', 'ALERT', FALSE, TRUE,
+       'Header parsed but no SOPInstanceUID. The instance has no addressable identity.',
+       'A DICOM object without (0008,0018) cannot be served over DICOMweb. Inspect the file; usually a partial write or a non-image object.'),
+      ('DATA-0004', 'DATA', 'ALERT', FALSE, TRUE,
+       'VARIANT construction failed -- almost always an oversized InlineBinary value.',
+       'This is the case that forced the incumbent to add try_parse_json + a _corrupt_record column. The tag allowlist in the deid phase removes the class entirely by never storing binary VRs.'),
+      ('DATA-0005', 'DATA', 'ALERT', FALSE, TRUE,
+       'Pixel data element present but frame offsets could not be resolved by EOT or item scan.',
+       'Malformed encapsulation. Metadata is still catalogued; frames are marked unservable for this instance.'),
+
+      -- ---------------------------------------------------------------------
+      -- CAPACITY: the environment said no. The FILE IS FINE.
+      -- Quarantine = FALSE is the important column here. Quarantining on a
+      -- capacity error would permanently sideline a perfectly good file
+      -- because a pool was busy for 30 seconds.
+      -- ---------------------------------------------------------------------
+      ('CAPACITY-0001', 'CAPACITY', 'ALERT', TRUE, FALSE,
+       'Compute pool had no schedulable node.',
+       'Check SHOW COMPUTE POOLS for state and node counts. Consider BACKUP_INSTANCE_FAMILIES if this recurs in a capacity-constrained region.'),
+      ('CAPACITY-0002', 'CAPACITY', 'ALERT', FALSE, FALSE,
+       'CUDA out of memory during inference.',
+       'NEVER retried -- a retry OOMs identically and burns GPU time. Reduce patch size or restrict the label set. On a 24 GB GPU_NV_S use the two-pass localize-then-crop path.'),
+      ('CAPACITY-0003', 'CAPACITY', 'DIGEST', TRUE, FALSE,
+       'Required service is not RUNNING (suspended, starting, or never created).',
+       'Expected outside a GPU window. The procedure returns SKIPPED rather than raising, so this does not count toward SUSPEND_TASK_AFTER_NUM_FAILURES.'),
+      ('CAPACITY-0004', 'CAPACITY', 'ALERT', TRUE, FALSE,
+       'UDTF handler exceeded its execution timeout on a large batch.',
+       'Lower udtf_max_batch_size in config. Large multiframe objects need a smaller batch to fit the handler time budget.'),
+
+      -- ---------------------------------------------------------------------
+      -- CONFIG: a human got it wrong. Retrying cannot help.
+      -- These two are the reference plugin's pre-flight ABORT guards, promoted
+      -- from a bare abort into coded, countable failures.
+      -- ---------------------------------------------------------------------
+      ('CONFIG-0001', 'CONFIG', 'PAGE', FALSE, FALSE,
+       'Prefix strip failed -- a manifest path still contains "://".',
+       'The stage URL and the LIST output shape disagree. Fix DICOM_SOURCE_PREFIX. The scan ABORTS rather than writing corrupt paths.'),
+      ('CONFIG-0002', 'CONFIG', 'PAGE', FALSE, FALSE,
+       'Same SOPInstanceUID under two different files or sources.',
+       'Downstream frame offsets key on the UID. Two files claiming one UID means one will silently win. Resolve at the source before re-scanning.'),
+      ('CONFIG-0003', 'CONFIG', 'PAGE', FALSE, FALSE,
+       'pread_stage is not an internal stage.',
+       'SPCS stage volumes cannot mount external stages. 02_STAGES asserts this; the dicomweb service would otherwise fail at CREATE SERVICE with a misleading error.'),
+
+      -- ---------------------------------------------------------------------
+      -- CAPABILITY: not an incident. A backlog item with a count.
+      -- ---------------------------------------------------------------------
+      ('CAPABILITY-0001', 'CAPABILITY', 'DIGEST', FALSE, FALSE,
+       'Transfer syntax absent from DICOM_CAPABILITY.',
+       'Metadata is catalogued and discoverable; frames are marked unservable. Rank V_CAPABILITY_GAPS by file count to prioritise. Add the row to DICOM_CAPABILITY once verified.'),
+      ('CAPABILITY-0002', 'CAPABILITY', 'DIGEST', FALSE, FALSE,
+       'Object exceeds MAX_OBJECT_BYTES for its class.',
+       'Routed away from the shared parse path so it cannot exhaust memory for CT frames being served concurrently. Raise MAX_OBJECT_BYTES for that syntax if the large-object path is provisioned for it.'),
+      ('CAPABILITY-0003', 'CAPABILITY', 'DIGEST', FALSE, FALSE,
+       'SOP class is not an image (SR, KOS, presentation state, etc).',
+       'Correctly catalogued with no frames. Not an error; recorded so the instance count and the frame count reconcile.'),
+
+      -- ---------------------------------------------------------------------
+      -- INVARIANT: the dangerous class. These failures produce NO ERROR.
+      -- Every one of these is a hard-won lesson turned into a continuously
+      -- evaluated assertion rather than tribal knowledge.
+      -- ---------------------------------------------------------------------
+      ('INVARIANT-0001', 'INVARIANT', 'PAGE', FALSE, FALSE,
+       'Derived rows exist whose FILE_MD5 does not match the current manifest md5.',
+       'The stale-derived-row bug. Downstream anti-joins see a row present and SKIP it, so the system serves data computed from the PREVIOUS file contents forever with nothing erroring. Call REPLAY_FILE for the affected instances.'),
+      ('INVARIANT-0002', 'INVARIANT', 'ALERT', FALSE, FALSE,
+       'Manifest row is LOADED but has neither a catalog row nor an unresolved error row.',
+       'The state "neither done nor failed" is itself the incident. Set STATUS back to NEW to reprocess.'),
+      ('INVARIANT-0003', 'INVARIANT', 'PAGE', FALSE, FALSE,
+       'Stored frame offset does not point at a valid item boundary.',
+       'The worst failure mode in the system: a wrong offset returns WRONG PIXELS at HTTP 200, so a clinician sees the wrong anatomy and nothing objects. Detection must also fence the instance so frame serving demotes instead of serving bad bytes.'),
+      ('INVARIANT-0004', 'INVARIANT', 'ALERT', FALSE, FALSE,
+       'Stored frame-offset row count disagrees with NUMBER_OF_FRAMES.',
+       'Partial offset extraction. Reprocess the instance; do not serve partial frame sets.')
+    AS v(ERR_CODE, ERR_CLASS, SEVERITY, RETRYABLE, QUARANTINE, LIKELY_CAUSE, RUNBOOK_STEP)
+) s
+ON t.ERR_CODE = s.ERR_CODE
+-- Codes DO get updated on re-deploy, unlike DICOM_CAPABILITY. The retry and
+-- severity decisions are product decisions that should track the shipped
+-- version, and there is no customer-tuned value here to preserve.
+WHEN MATCHED THEN UPDATE SET
+    t.ERR_CLASS    = s.ERR_CLASS,
+    t.SEVERITY     = s.SEVERITY,
+    t.RETRYABLE    = s.RETRYABLE,
+    t.QUARANTINE   = s.QUARANTINE,
+    t.LIKELY_CAUSE = s.LIKELY_CAUSE,
+    t.RUNBOOK_STEP = s.RUNBOOK_STEP
+WHEN NOT MATCHED THEN INSERT
+    (ERR_CODE, ERR_CLASS, SEVERITY, RETRYABLE, QUARANTINE, LIKELY_CAUSE, RUNBOOK_STEP)
+    VALUES
+    (s.ERR_CODE, s.ERR_CLASS, s.SEVERITY, s.RETRYABLE, s.QUARANTINE, s.LIKELY_CAUSE, s.RUNBOOK_STEP);
+
+-- -----------------------------------------------------------------------------
+-- Verify
+-- -----------------------------------------------------------------------------
+SELECT 'DICOM_CAPABILITY' AS TBL,
+       COUNT(*)                                   AS ROWS_SEEDED,
+       COUNT_IF(IS_ENCAPSULATED)                  AS ENCAPSULATED,
+       COUNT_IF(NOT IS_ENCAPSULATED)              AS NATIVE_CLOSED_FORM
+FROM DICOM_CAPABILITY
+UNION ALL
+SELECT 'DICOM_ERROR_CATALOG', COUNT(*), COUNT_IF(RETRYABLE), COUNT_IF(QUARANTINE)
+FROM DICOM_ERROR_CATALOG;
+
+SELECT ERR_CLASS,
+       COUNT(*)              AS CODES,
+       COUNT_IF(RETRYABLE)   AS RETRYABLE,
+       COUNT_IF(QUARANTINE)  AS QUARANTINED,
+       LISTAGG(SEVERITY, ',') WITHIN GROUP (ORDER BY ERR_CODE) AS SEVERITIES
+FROM DICOM_ERROR_CATALOG
+GROUP BY ERR_CLASS
+ORDER BY ERR_CLASS;
