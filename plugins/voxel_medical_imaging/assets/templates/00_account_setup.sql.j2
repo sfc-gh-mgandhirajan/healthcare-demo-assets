@@ -43,8 +43,6 @@
 --    omitted entirely -- there is nothing here that needs cleartext egress.
 -- =============================================================================
 
-USE ROLE ACCOUNTADMIN;
-
 EXECUTE IMMEDIATE $$
 DECLARE
     -- ---------------------------------------------------------------------
@@ -208,10 +206,10 @@ BEGIN
     --   registry.npmjs.org                 - npm for the OHIF bundle build
     --   huggingface.co + CDN hosts         - one-time Vista3D weight fetch
     --
-    -- The HF CDN hostnames rotate. If a weight fetch hangs with no log output,
-    -- that is hf-xet retrying against a blocked host, not a slow download --
-    -- add the host from the NameResolutionError rather than widening to
-    -- 0.0.0.0. Once weights are staged this rule can be narrowed to PyPI/npm.
+    -- HF CDN hostnames rotate and individual hosts fail Snowflake DNS
+    -- resolution. Wildcard patterns survive rotation and are supported by
+    -- Snowflake network rules. Once weights are staged this rule can be
+    -- narrowed to PyPI/npm only.
     -- ---------------------------------------------------------------------
     stmt := 'CREATE OR REPLACE NETWORK RULE ' || fq_rule
          || ' MODE = EGRESS'
@@ -219,10 +217,7 @@ BEGIN
          || ' VALUE_LIST = ('
          ||   '''pypi.org:443'', ''files.pythonhosted.org:443'', '
          ||   '''registry.npmjs.org:443'', '
-         ||   '''huggingface.co:443'', ''cdn-lfs.huggingface.co:443'', '
-         ||   '''cdn-lfs-us-1.huggingface.co:443'', ''us.aws.cdn.hf.co:443'', '
-         ||   '''transfer.xethub.hf.co:443'', ''cas-bridge.xethub.hf.co:443'', '
-         ||   '''cas-server.xethub.hf.co:443'''
+         ||   '''*.huggingface.co:443'', ''*.hf.co:443'', ''*.xethub.hf.co:443'''
          || ')'
          || ' COMMENT = ''Voxel BUILD-ONLY egress. Never attach to a serving service.''';
     EXECUTE IMMEDIATE :stmt;
